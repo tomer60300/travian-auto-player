@@ -36,6 +36,8 @@ from travian_api.services.trade_route_service import (
     TradeRouteService,
 )
 
+from .activity_billing import billing
+
 # Exactly the keys the real client sent, in the create body.
 CAPTURED_CREATE_KEYS = {
     "action",
@@ -53,10 +55,19 @@ CAPTURED_CREATE_KEYS = {
 
 
 class _RecordingClient:
-    """Records the verb, url and body of anything sent."""
+    """Records the verb, url and body of anything sent.
+
+    Bills the daily activity ceiling once per request, on every exit path,
+    because that is what the real transport does (``HttpClient._billed``) and
+    this stands in for it. A test that wants a request to fail sets
+    ``refusals[<method name>]`` rather than replacing the method: a replaced
+    method bills nothing, which is how the service-layer double-bill stayed
+    invisible here for as long as it did.
+    """
 
     def __init__(self) -> None:
         self.sent: list[tuple[str, str, dict]] = []
+        self.refusals: dict[str, Exception] = {}
 
         class _Delay:
             @staticmethod
@@ -65,23 +76,29 @@ class _RecordingClient:
 
         self.human_delay = _Delay()
         self.settings = SimpleNamespace(base_url="https://ts2.x1.europe.travian.com")
-        # Every write feeds the seconds it consumed into the daily activity
-        # ceiling. Without this attribute _log_activity raises AttributeError
-        # into its own broad catch, so the accounting silently does nothing --
-        # and no test notices, because the write itself still succeeds.
         self.logged_activity: list[float] = []
         self.activity_scheduler = SimpleNamespace(log_activity=self.logged_activity.append)
+        bill = billing(self.logged_activity)
+        self.post_json = bill(self._post_json)
+        self.put_json = bill(self._put_json)
+        self.delete_json = bill(self._delete_json)
 
-    async def post_json(self, url: str, payload: dict, **_kwargs):
-        self.sent.append(("POST", url, payload))
+    def _issue(self, verb: str, url: str, body: dict | None, method: str) -> None:
+        self.sent.append((verb, url, body))
+        refusal = self.refusals.get(method)
+        if refusal is not None:
+            raise refusal
+
+    async def _post_json(self, url: str, payload: dict, **_kwargs):
+        self._issue("POST", url, payload, "post_json")
         return {}
 
-    async def put_json(self, url: str, payload: dict, **_kwargs):
-        self.sent.append(("PUT", url, payload))
+    async def _put_json(self, url: str, payload: dict, **_kwargs):
+        self._issue("PUT", url, payload, "put_json")
         return {}
 
-    async def delete_json(self, url: str, *, data: dict | None = None, **_kwargs):
-        self.sent.append(("DELETE", url, data))
+    async def _delete_json(self, url: str, *, data: dict | None = None, **_kwargs):
+        self._issue("DELETE", url, data, "delete_json")
         return {}
 
 
@@ -256,9 +273,12 @@ class TestWritesConsumeActivityBudget:
     The ceiling is what keeps the account's total daily traffic inside a human
     range. A whole execute run that reported zero seconds would let the rest of
     the day's automation spend a budget it had already used -- and because
-    _log_activity swallows its own failures by design (accounting must never
-    break a request that already went out), nothing surfaces when it silently
-    stops working. Hence an explicit assertion.
+    billing swallows its own failures by design (accounting must never break a
+    request that already went out), nothing surfaces when it silently stops
+    working. Hence an explicit assertion.
+
+    Billing lives in ``HttpClient._billed`` now, not in the service, so these
+    count what the fake transport charges: one write, one request, one bill.
     """
 
     def test_a_create_reports_the_time_it_took(self):
@@ -311,11 +331,7 @@ class TestWritesConsumeActivityBudget:
         already makes this argument for the reads in open_marketplace.
         """
         client = _RecordingClient()
-
-        async def refuse(*_args, **_kwargs):
-            raise NetworkError("HTTP 500: the game said no")
-
-        setattr(client, verb, refuse)
+        client.refusals[verb] = NetworkError("HTTP 500: the game said no")
         service = TradeRouteService(client, live_enabled=True, reconciler_verified=True)
 
         result = asyncio.run(invoke(service))
@@ -328,11 +344,7 @@ class TestWritesConsumeActivityBudget:
         # "skipped" describes the ROUTE, not the traffic: the create went out
         # and came back refused, at full price.
         client = _RecordingClient()
-
-        async def refuse(*_args, **_kwargs):
-            raise NetworkError("HTTP 400: plus.error_goldclub")
-
-        client.post_json = refuse
+        client.refusals["post_json"] = NetworkError("HTTP 400: plus.error_goldclub")
         service = TradeRouteService(client, live_enabled=True, reconciler_verified=True)
 
         result = asyncio.run(service.create_route(_route()))
@@ -345,11 +357,7 @@ class TestWritesConsumeActivityBudget:
         # whatever the transport raises next, so it hangs on leaving the
         # request instead -- however that happens.
         client = _RecordingClient()
-
-        async def expire(*_args, **_kwargs):
-            raise SessionExpiredError("the session went away mid-write")
-
-        client.post_json = expire
+        client.refusals["post_json"] = SessionExpiredError("the session went away mid-write")
         service = TradeRouteService(client, live_enabled=True, reconciler_verified=True)
 
         with pytest.raises(SessionExpiredError):

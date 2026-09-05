@@ -28,6 +28,8 @@ from travian_api.services.trade_route_service import (
     TradeRouteService,
 )
 
+from .activity_billing import billing
+
 # A page carrying an empty but VALID trade-route model, so the parser recognises
 # it (no routes) rather than reporting the page as unreadable.
 EMPTY_MARKETPLACE = (
@@ -79,7 +81,15 @@ def _route_row(route_id: int, dest: int) -> dict:
 
 
 class _CountingClient:
-    """Records every request in order. Serves whatever the test queues."""
+    """Records every request in order. Serves whatever the test queues.
+
+    Bills the activity ceiling once per request, on every exit path, exactly as
+    ``HttpClient._billed`` does -- billing lives in the transport, so a fake
+    that stands in for the transport has to charge for the requests it issues.
+    A queued page or read-back may be an ``Exception``, which this raises after
+    recording and billing the call: that is how a test makes one request in a
+    sequence fail without replacing a method and losing its bill.
+    """
 
     def __init__(self, pages, readbacks=()):
         self.calls: list[tuple[str, str]] = []
@@ -95,27 +105,37 @@ class _CountingClient:
         # is exactly what this file is about.
         self.logged_activity: list[float] = []
         self.activity_scheduler = SimpleNamespace(log_activity=self.logged_activity.append)
+        bill = billing(self.logged_activity)
+        self.get_html = bill(self._get_html)
+        self.post_json = bill(self._post_json)
+        self.put_json = bill(self._put_json)
 
     async def _wait(self, _action, reason=""):
         # Pacing is what keeps a burst from looking like a burst. Recorded so a
         # write that skipped its delay is visible here.
         self.waits.append(reason)
 
-    async def get_html(self, path, **kw):
+    @staticmethod
+    def _served(queued):
+        if isinstance(queued, Exception):
+            raise queued
+        return queued
+
+    async def _get_html(self, path, **kw):
         self.calls.append(("GET", path))
         self.referers.append((path, kw.get("referer")))
-        return self._pages.pop(0) if self._pages else EMPTY_MARKETPLACE
+        return self._served(self._pages.pop(0)) if self._pages else EMPTY_MARKETPLACE
 
-    async def post_json(self, path, payload, **kw):
+    async def _post_json(self, path, payload, **kw):
         self.calls.append(("POST", path))
         self.referers.append((path, kw.get("referer")))
         self.bodies.append((path, payload))
         if path == GRAPHQL:
             assert self._readbacks, "queue a read-back payload for every confirm"
-            return self._readbacks.pop(0)
+            return self._served(self._readbacks.pop(0))
         return {}
 
-    async def put_json(self, path, payload, **kw):
+    async def _put_json(self, path, payload, **kw):
         self.calls.append(("PUT", path))
         self.referers.append((path, kw.get("referer")))
         return {}
@@ -336,28 +356,14 @@ class TestAFailedReadIsBilledToo:
     SHARED with the farm-list and oasis loops, so under-counting here silently
     licenses THOSE to overspend. A NetworkError refunds nothing.
 
-    Exactly once is the property, in both directions: a read that failed
-    half-way through its two GETs must not be billed twice, and one that
-    answered must not be billed at all over again.
+    Exactly once is the property, per REQUEST: billing lives in the transport
+    (``HttpClient._billed``), so a read that failed half-way through its two
+    GETs is billed for the two that went out, and one that answered is not
+    billed all over again by the service on top.
     """
 
-    def _refusing_get(self, client, fail_on: int):
-        """A get_html that answers normally until the *fail_on*-th call."""
-        seen = {"n": 0}
-        real = client.get_html
-
-        async def get_html(path, **kwargs):
-            seen["n"] += 1
-            if seen["n"] == fail_on:
-                client.calls.append(("GET", path))
-                raise NetworkError("HTTP 500: the game said no")
-            return await real(path, **kwargs)
-
-        return get_html
-
     def test_a_village_view_that_fails_is_still_billed(self):
-        service, client = _service([])
-        client.get_html = self._refusing_get(client, fail_on=1)
+        service, client = _service([NetworkError("HTTP 500: the game said no")])
 
         with pytest.raises(NetworkError):
             asyncio.run(service.open_marketplace(20003))
@@ -366,26 +372,19 @@ class TestAFailedReadIsBilledToo:
         assert len(client.logged_activity) == 1, "a failed read is not a free read"
         assert client.logged_activity[0] >= 0.0
 
-    def test_a_marketplace_get_that_fails_after_the_village_view_is_billed_once(self):
-        # Two requests went out and one billing covers the pair, exactly as on
-        # the success path -- the span is what is billed, not the count.
-        service, client = _service([EMPTY_MARKETPLACE])
-        client.get_html = self._refusing_get(client, fail_on=2)
+    def test_a_marketplace_get_that_fails_after_the_village_view_bills_both(self):
+        # Two requests went out, so two bills -- the one that answered and the
+        # one that did not. Both spent a throttler gap.
+        service, client = _service([EMPTY_MARKETPLACE, NetworkError("HTTP 500: the game said no")])
 
         with pytest.raises(NetworkError):
             asyncio.run(service.open_marketplace(20003))
 
         assert len(client.calls) == 2
-        assert len(client.logged_activity) == 1
+        assert len(client.logged_activity) == 2
 
     def test_a_read_back_that_fails_is_still_billed(self):
-        service, client = _service([])
-
-        async def refuse(path, _payload, **_kwargs):
-            client.calls.append(("POST", path))
-            raise NetworkError("HTTP 500: the game said no")
-
-        client.post_json = refuse
+        service, client = _service([], [NetworkError("HTTP 500: the game said no")])
 
         with pytest.raises(NetworkError):
             asyncio.run(service.refresh_marketplace(20003))
@@ -405,12 +404,12 @@ class TestAFailedReadIsBilledToo:
 
         assert len(client.logged_activity) == 1
 
-    def test_a_read_that_answers_is_billed_once_per_method(self):
-        # The regression anchor: open_marketplace is two GETs and one billing,
-        # refresh_marketplace is one POST and one billing.
+    def test_a_read_that_answers_is_billed_once_per_request(self):
+        # The regression anchor: open_marketplace is two GETs and two billings,
+        # refresh_marketplace is one POST and one more.
         service, client = _service([EMPTY_MARKETPLACE, EMPTY_MARKETPLACE], [_readback(20003)])
         asyncio.run(service.list_existing_routes(20003))
-        assert len(client.logged_activity) == 1
+        assert len(client.logged_activity) == 2
 
         asyncio.run(service.refresh_marketplace(20003))
-        assert len(client.logged_activity) == 2
+        assert len(client.logged_activity) == 3

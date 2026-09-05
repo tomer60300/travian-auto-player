@@ -37,6 +37,8 @@ from travian_api.web.routes.distribution import (
     post_execute,
 )
 
+from .activity_billing import billing
+
 
 def _exec_body(dry_run=True, disable_existing=True, max_routes_per_run=3, margin=0.0, **extra):
     body = ExecuteRequest.model_validate(
@@ -4467,20 +4469,24 @@ class TestMarketplaceReadsBillTheActivityCeiling:
     def _service(self):
         from travian_api.services.trade_route_service import TradeRouteService
 
+        # The fake transport bills per request, exactly as HttpClient._billed
+        # does -- billing lives there now, so a fake that does not charge for
+        # its requests cannot observe a read being billed at all.
         logged: list[float] = []
+        bill = billing(logged)
         client = SimpleNamespace(
             settings=SimpleNamespace(base_url="https://example.invalid"),
             human_delay=SimpleNamespace(wait=_noop),
             activity_scheduler=SimpleNamespace(log_activity=logged.append),
-            get_html=_empty_marketplace,
-            post_json=_empty_readback,
+            get_html=bill(_empty_marketplace),
+            post_json=bill(_empty_readback),
         )
         return TradeRouteService(client, live_enabled=True, reconciler_verified=True), logged
 
     def test_opening_the_marketplace_is_billed(self):
         service, logged = self._service()
         asyncio.run(service.open_marketplace(20003))
-        assert len(logged) == 1, "two GETs, billed as one page visit"
+        assert len(logged) == 2, "two GETs, two throttler gaps, two bills"
 
     def test_refreshing_it_is_billed(self):
         # Still billed after moving to GraphQL: the request class changed, the

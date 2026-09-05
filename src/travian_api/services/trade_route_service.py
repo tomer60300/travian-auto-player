@@ -354,42 +354,26 @@ class TradeRouteService:
         active village between the two GETs cannot make us read — and disable —
         the wrong village's routes.
         """
-        started = time.monotonic()
         newdid_q = f"?newdid={village_id}" if village_id else ""
         newdid_amp = f"&newdid={village_id}" if village_id else ""
         base = self.http_client.settings.base_url.rstrip("/")
         village_view = f"/dorf2.php{newdid_q}"
-        try:
-            await self.http_client.get_html(village_view)
-            # `t=3` is the trade-route tab. Without it we never load the tab the
-            # routes live on -- so the reconciler read a page that cannot contain
-            # them, and a server-side "did this session render the trade-route tab
-            # before POSTing to it?" check would fail outright.
-            path = f"/build.php?gid={MARKETPLACE_GID}&t=3{newdid_amp}"
-            # Pin the second GET to the village view we just loaded, rather than
-            # letting BrowserHeaders supply it. The two are the same value only in a
-            # quiet session: this GET waits out a throttler gap BEFORE its headers
-            # are built, and the account-wide "last page" is one field shared with
-            # every concurrent operation -- so a farm loop or queue poll landing in
-            # that window sends this navigation out referred from /dorf1.php. The
-            # same hazard `_marketplace_referer` closes on the writes, closed on the
-            # read that establishes them.
-            html = await self.http_client.get_html(path, referer=f"{base}{village_view}")
-            self._marketplace_referer[village_id] = f"{base}{path}"
-        finally:
-            # Reads bill the ceiling too. They were free, so an execute run reported
-            # roughly half the traffic it actually spent -- and the daily ceiling is
-            # shared with the farm and oasis loops, so under-reporting here lets
-            # THOSE overspend. Each of these consumed a real throttler gap.
-            #
-            # On the way out rather than on success: a read that RAISED spent the
-            # same requests and the same gaps, and the game merely answered badly.
-            # On the `finally` rather than in an except branch, so it covers
-            # whatever the transport raises next, and stays one call site -- which
-            # is what makes 'exactly once' hold by construction. A read that never
-            # went out still costs nothing: `started` is taken just above the
-            # first request.
-            self._log_activity(started)
+        await self.http_client.get_html(village_view)
+        # `t=3` is the trade-route tab. Without it we never load the tab the
+        # routes live on -- so the reconciler read a page that cannot contain
+        # them, and a server-side "did this session render the trade-route tab
+        # before POSTing to it?" check would fail outright.
+        path = f"/build.php?gid={MARKETPLACE_GID}&t=3{newdid_amp}"
+        # Pin the second GET to the village view we just loaded, rather than
+        # letting BrowserHeaders supply it. The two are the same value only in a
+        # quiet session: this GET waits out a throttler gap BEFORE its headers
+        # are built, and the account-wide "last page" is one field shared with
+        # every concurrent operation -- so a farm loop or queue poll landing in
+        # that window sends this navigation out referred from /dorf1.php. The
+        # same hazard `_marketplace_referer` closes on the writes, closed on the
+        # read that establishes them.
+        html = await self.http_client.get_html(path, referer=f"{base}{village_view}")
+        self._marketplace_referer[village_id] = f"{base}{path}"
         return html
 
     async def refresh_marketplace(self, village_id: int) -> dict[str, Any]:
@@ -416,25 +400,19 @@ class TradeRouteService:
         ``ownPlayer.village.marketplace.tradeRoutes`` path is identical to the
         page model's.
         """
-        started = time.monotonic()
-        try:
-            response = await self.http_client.post_json(
-                "/api/v1/graphql",
-                # `variables` is absent on purpose: the client's call passes none, and
-                # JSON.stringify drops an undefined value, so the real body has this
-                # one key. An extra key is a fingerprint like any other.
-                {"query": MARKETPLACE_READBACK_QUERY},
-                # An API request never advances page context, so this one must state
-                # where it is issued from: the marketplace tab, which is the only
-                # page whose script fires this query. Falling back to the
-                # account-wide last page would send it referred from whatever a
-                # concurrent loop touched during the write's 3-20s pacing delay.
-                referer=self._marketplace_referer.get(village_id),
-            )
-        finally:
-            # Reads bill the ceiling too -- this one consumed a real throttler gap,
-            # answered or not. Same shape and same reasoning as open_marketplace.
-            self._log_activity(started)
+        response = await self.http_client.post_json(
+            "/api/v1/graphql",
+            # `variables` is absent on purpose: the client's call passes none, and
+            # JSON.stringify drops an undefined value, so the real body has this
+            # one key. An extra key is a fingerprint like any other.
+            {"query": MARKETPLACE_READBACK_QUERY},
+            # An API request never advances page context, so this one must state
+            # where it is issued from: the marketplace tab, which is the only
+            # page whose script fires this query. Falling back to the
+            # account-wide last page would send it referred from whatever a
+            # concurrent loop touched during the write's 3-20s pacing delay.
+            referer=self._marketplace_referer.get(village_id),
+        )
         view = response.get("data") if isinstance(response, dict) else None
         if not isinstance(view, dict):
             raise MarketplaceUnreadable(
@@ -615,32 +593,6 @@ class TradeRouteService:
             detail=detail,
         )
 
-    def _log_activity(self, started: float) -> None:
-        """Feed the seconds this write consumed into the daily activity ceiling.
-
-        Accounting must never break a write that already went out, hence the
-        broad catch -- the ceiling exists to keep the account looking human, not
-        to become a new way for a committed request to fail.
-
-        KNOWN OVERLAP with ``HttpClient._billed``, which now bills every
-        request the transport issues (the fix for eight writers that billed
-        NOTHING). This service was one of the four that did remember, so its
-        writes are charged twice: once for the whole write's wall clock here,
-        once per request underneath. Over-billing a ceiling stops the account
-        early, so the direction is safe, but it is not right. Removing this
-        needs the ~17 tests that pin billing at THIS layer
-        (``tests/test_trade_route_payload.py::TestWritesConsumeActivityBudget``,
-        ``tests/test_trade_route_footprint.py::TestAFailedReadIsBilledToo``,
-        ``tests/test_distribution_execute.py::TestMarketplaceReadsBillTheActivityCeiling``)
-        re-pointed at the transport first -- they drive fake clients that
-        replace the request methods on the instance, so they cannot observe the
-        transport's bill at all.
-        """
-        try:
-            self.http_client.activity_scheduler.log_activity(time.monotonic() - started)
-        except Exception:  # noqa: BLE001 - accounting must not break traffic
-            logger.debug("activity accounting failed for a trade-route write", exc_info=True)
-
     def _require_reconciler(self) -> None:
         """Refuse to create when we cannot read what already exists."""
         if not self.reconciler_verified:
@@ -718,15 +670,6 @@ class TradeRouteService:
             return RouteActionResult(
                 route.origin_village_id, route.dest_x, route.dest_y, "failed", str(exc)
             )
-        finally:
-            # Billed on the way out, not on success. A write that FAILED spent
-            # the same request and the same throttler gap as one that worked --
-            # the game just answered badly -- and the ceiling is shared with the
-            # farm and oasis loops, so under-reporting here lets THOSE overspend.
-            # Same argument the reads already make in open_marketplace. On the
-            # `finally` rather than in the except branch so it also covers
-            # whatever the transport raises next.
-            self._log_activity(started)
         self._trace_write("create", route.origin_village_id, "created", started, payload)
         return RouteActionResult(route.origin_village_id, route.dest_x, route.dest_y, "created")
 
@@ -767,9 +710,6 @@ class TradeRouteService:
         except NetworkError as exc:
             self._trace_write(kind, origin_village_id, "failed", started, payload, str(exc))
             return RouteActionResult(origin_village_id, 0, 0, "failed", f"{verb} failed: {exc}")
-        finally:
-            # A failed toggle cost a real request; see create_route.
-            self._log_activity(started)
 
         # Unlike the create, the bulk toggle DOES answer with a body, and the
         # game's own client reads it: it counts `response.routes` entries with an
@@ -954,9 +894,6 @@ class TradeRouteService:
             return RouteActionResult(
                 origin_village_id, 0, 0, "failed", f"cargo update failed: {exc}"
             )
-        finally:
-            # A failed cargo update cost a real request; see create_route.
-            self._log_activity(started)
 
         try:
             rejected = self._rejected_routes(response)
@@ -1054,9 +991,6 @@ class TradeRouteService:
         except NetworkError as exc:
             self._trace_write("delete", origin_village_id, "failed", started, payload, str(exc))
             return RouteActionResult(origin_village_id, 0, 0, "failed", f"delete failed: {exc}")
-        finally:
-            # A failed delete cost a real request; see create_route.
-            self._log_activity(started)
 
         # Read like the toggles read theirs. The return used to be discarded, so
         # every 2xx was `deleted` -- a body naming per-route errors, an HTML
