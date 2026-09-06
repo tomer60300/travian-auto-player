@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator
+
+from .unknown_reason import UnknownReason, reason_name
 
 
 class ReportListItem(BaseModel):
@@ -78,10 +80,18 @@ class BattleReportData(BaseModel):
     battle_result: str = Field(default="unknown", description="Battle outcome")
     bounty: Dict[str, int] = Field(default_factory=dict, description="Resources stolen")
     attacker_losses: Dict[str, int] = Field(default_factory=dict, description="Attacker losses")
+    # An empty `attacker_losses` means "the raid cost nothing" ONLY while this is
+    # None. When the parser could not read the block it says so here instead,
+    # because `{}` on its own is the same shape for both.
+    attacker_losses_unknown: Optional[UnknownReason] = Field(
+        default=None, description="Why attacker_losses is empty, when it could not be read"
+    )
     defender_losses: Dict[str, int] = Field(default_factory=dict, description="Defender losses")
     carry_used: int = Field(default=0, description="Resources actually carried")
     carry_max: int = Field(default=0, description="Total carry capacity of surviving troops")
     carry_full: bool = Field(default=False, description="True if troops were fully loaded")
+    # Either a strength or an UnknownReason code. Guard with `require_known`
+    # before computing; `reason_name` turns it into something a log can print.
     attacker_combat_strength: int = Field(default=0, description="Attacker combat strength")
     defender_combat_strength: int = Field(default=0, description="Defender combat strength")
 
@@ -94,6 +104,17 @@ class BattleReportData(BaseModel):
         if v_lower not in valid_results:
             return "unknown"
         return v_lower
+
+    @field_serializer("attacker_losses_unknown", when_used="json")
+    def _serialize_losses_reason(self, value: Optional[UnknownReason]) -> Optional[str]:
+        """Name, not number: `-4` on the wire is indistinguishable from a count."""
+        return value.name if value is not None else None
+
+    @field_serializer("attacker_combat_strength", "defender_combat_strength", when_used="json")
+    def _serialize_combat_strength(self, value: int) -> int | str:
+        """A reason code leaves as its NAME so no reader can plot it as a strength."""
+        named = reason_name(value)
+        return named if named is not None else value
 
 
 class ScoutReportData(BaseModel):

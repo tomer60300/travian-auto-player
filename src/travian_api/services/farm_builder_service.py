@@ -18,6 +18,7 @@ import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from ..models.farm_list import MapTileInfo
+from ..models.unknown_reason import is_unknown, reason_name, require_known
 
 logger = logging.getLogger(__name__)
 
@@ -75,12 +76,39 @@ def answer_was_lost(detail: str) -> bool:
 
 
 def lookup_troop_row(def_val: int, tribe: str) -> Optional[Dict[str, int]]:
-    """Return the troop dict for a given def value, or None if out of range."""
+    """Return the troop dict for a given def value, or None if out of range.
+
+    *def_val* must be a strength, never an unknown-reason code: a code falls
+    outside every row, so this would answer "out of range" for a defence nobody
+    read and the target would be skipped for the wrong reason. Callers check
+    ``is_unknown`` first; the guard makes a miss loud.
+    """
+    require_known(def_val, "defender_combat_strength")
     table = TROOP_COMPOSITION_TABLES.get(tribe.lower(), [])
     for lo, hi, units in table:
         if lo <= def_val <= hi:
             return dict(units)
     return None
+
+
+def def_label(def_val: int) -> str:
+    """How a log prints a defence figure: the strength, or the reason there is none.
+
+    A bare ``-2`` in the FB-DEFENSE trace is the thing this whole vocabulary
+    exists to stop -- it reads as a strength.
+    """
+    named = reason_name(def_val)
+    return named if named is not None else str(def_val)
+
+
+def def_row_desc(def_val: int, tribe: str) -> str:
+    """The troop row a defence figure selects, as the FB-DEFENSE log prints it."""
+    if is_unknown(def_val):
+        return f"SKIP:def_unknown({reason_name(def_val)})"
+    row = lookup_troop_row(def_val, tribe)
+    if row is None:
+        return "SKIP:def_out_of_range"
+    return ",".join(f"{k}={v}" for k, v in row.items())
 
 
 def chebyshev(x1: int, y1: int, x2: int, y2: int) -> int:
@@ -662,16 +690,12 @@ class FarmBuilderService:
                                 "report_id": rid,
                                 "scouted_at": time.time(),
                             }
-                            row = lookup_troop_row(cs, tribe_name)
-                            row_desc = (
-                                "SKIP:def_out_of_range"
-                                if row is None
-                                else f"{','.join(f'{k}={v}' for k, v in row.items())}"
-                            )
+                            row_desc = def_row_desc(cs, tribe_name)
                             await send_log(
                                 "FB-DEFENSE",
                                 "🛡️",
-                                f"FB-DEFENSE [{i + 1}/{len(all_targets)}] ({x},{y}) EXISTING def={cs} row={row_desc}",
+                                f"FB-DEFENSE [{i + 1}/{len(all_targets)}] ({x},{y}) "
+                                f"EXISTING def={def_label(cs)} row={row_desc}",
                             )
                             continue
             except Exception as exc:
@@ -801,14 +825,11 @@ class FarmBuilderService:
                 if got:
                     defense_data[(x, y)] = got
                     cs = got["defender_combat_strength"]
-                    row = lookup_troop_row(cs, tribe_name)
-                    row_desc = (
-                        "SKIP:def_out_of_range"
-                        if row is None
-                        else f"{','.join(f'{k}={v}' for k, v in row.items())}"
-                    )
+                    row_desc = def_row_desc(cs, tribe_name)
                     await send_log(
-                        "FB-DEFENSE", "🛡️", f"FB-DEFENSE ({x},{y}) def={cs} row={row_desc}"
+                        "FB-DEFENSE",
+                        "🛡️",
+                        f"FB-DEFENSE ({x},{y}) def={def_label(cs)} row={row_desc}",
                     )
                 else:
                     defense_failed[(x, y)] = "report_fetch_failed"
@@ -996,6 +1017,20 @@ class FarmBuilderService:
                     continue
 
                 cs = d["defender_combat_strength"]
+                # A defence nobody could read is not a low defence. Both are
+                # skipped -- as they were before this branch existed, when an
+                # unread combat row arrived as 0 and tripped `< DEF_MIN` -- but
+                # only one of them is a reason to re-scout.
+                if is_unknown(cs):
+                    skipped.append({"x": x, "y": y, "reason": f"def_unknown ({reason_name(cs)})"})
+                    await send_log(
+                        "FB-ASSIGN",
+                        "⚠️",
+                        f"FB-ASSIGN SKIP ({x},{y}) def unread: {reason_name(cs)}",
+                        "warning",
+                    )
+                    continue
+                require_known(cs, "defender_combat_strength")
                 if cs < DEF_MIN:
                     skipped.append({"x": x, "y": y, "reason": f"def_too_low ({cs})"})
                     await send_log(

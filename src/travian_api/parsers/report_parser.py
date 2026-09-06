@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from bs4 import BeautifulSoup
 
 from ..models.reports import BattleReportData, ReportListItem, ScoutReportData
+from ..models.unknown_reason import UnknownReason
 from .html_parser import clean_unicode
 
 
@@ -254,17 +255,23 @@ def _parse_troops_table(table) -> Dict[str, int]:
     return troops
 
 
-def _parse_troops_losses(table) -> Dict[str, int]:
+def _parse_troops_losses(table) -> Optional[Dict[str, int]]:
     """
     Parse troop losses from a troop table.
 
     Losses are in the third tbody (class 'units last') or a tbody with class 'losses'.
     Loss values are typically negative or shown as casualties.
+
+    Returns ``None`` when the losses row is not there to read, and a dict when it
+    is -- an EMPTY dict then means the row was read and every unit came back
+    alive. Those are different claims: this function used to answer ``{}`` to
+    both, which is why a battle report with no losses row was indistinguishable
+    downstream from a loss-free raid.
     """
-    losses = {}
+    losses: Dict[str, int] = {}
     tbodies = table.find_all("tbody", class_="units")
     if len(tbodies) < 2:
-        return losses
+        return None
 
     # Unit keys from first tbody
     header_tbody = tbodies[0]
@@ -287,11 +294,11 @@ def _parse_troops_losses(table) -> Dict[str, int]:
         loss_tbody = table.find("tbody", class_="last")
 
     if not loss_tbody:
-        return losses
+        return None
 
     loss_row = loss_tbody.find("tr")
     if not loss_row:
-        return losses
+        return None
 
     loss_cells = loss_row.find_all("td", class_="unit")
     for key, cell in zip(unit_keys, loss_cells):
@@ -422,7 +429,19 @@ def parse_scout_report(html: str) -> ScoutReportData:
 
 
 def parse_battle_report(html: str) -> BattleReportData:
-    """Parse a battle report page."""
+    """Parse a battle report page.
+
+    Figures this page did not carry come back as :class:`UnknownReason` codes,
+    not as zeros: an unreadable combat-strength row is not "no defence", and an
+    attacker block that was never there is not "nobody died".
+    """
+    if not html.strip():
+        return BattleReportData(
+            attacker_losses_unknown=UnknownReason.EMPTY_RESPONSE,
+            attacker_combat_strength=UnknownReason.EMPTY_RESPONSE,
+            defender_combat_strength=UnknownReason.EMPTY_RESPONSE,
+        )
+
     soup = BeautifulSoup(html, "html.parser")
 
     attacker_info = _extract_player_village(soup, "attacker")
@@ -433,16 +452,28 @@ def parse_battle_report(html: str) -> BattleReportData:
     defender_troops: Dict[str, int] = {}
     attacker_losses: Dict[str, int] = {}
     defender_losses: Dict[str, int] = {}
+    # Why `attacker_losses` is empty, when it is. An empty dict alone meant both
+    # "the raid cost nothing" and "the block that would have said so is not on
+    # this page", and the two lead to opposite decisions.
+    attacker_losses_unknown: Optional[UnknownReason] = None
 
     attacker_role = soup.find("div", class_=re.compile(r"\brole\s+attacker\b"))
-    if attacker_role:
+    if attacker_role is None:
+        attacker_losses_unknown = UnknownReason.NO_ATTACKER_BLOCK
+    else:
+        losses_row_read = False
         for table in attacker_role.find_all("table"):
             t = _parse_troops_table(table)
             if t:
                 attacker_troops.update(t)
             l = _parse_troops_losses(table)
-            if l:
+            if l is not None:
+                losses_row_read = True
                 attacker_losses.update(l)
+        if not losses_row_read:
+            # The block is there but its losses row is not readable -- a
+            # different failure from the block being absent altogether.
+            attacker_losses_unknown = UnknownReason.UNPARSEABLE_PAGE
 
     defender_role = soup.find("div", class_=re.compile(r"\brole\s+defender\b"))
     if defender_role:
@@ -530,10 +561,14 @@ def parse_battle_report(html: str) -> BattleReportData:
                     carry_used = int(parts[0]) if parts[0] else 0
                     carry_max = int(parts[1]) if parts[1] else 0
 
-    # Combat strength from combatStatistic table
+    # Combat strength from combatStatistic table.
+    # A report whose combatStatistic row cannot be read carries NO defence
+    # figure. Zero is a legitimate reading -- an undefended village -- so a zero
+    # standing in for the unread case is the defence equivalent of the cranny
+    # bug: it reads as "walk in".
     # Regex fast-path: extract both values without BS4 DOM traversal
-    attacker_combat_strength = 0
-    defender_combat_strength = 0
+    attacker_combat_strength: int = UnknownReason.UNPARSEABLE_PAGE
+    defender_combat_strength: int = UnknownReason.UNPARSEABLE_PAGE
     _combat_re = re.search(
         r'combatStatistic.*?<span[^>]*class="value"[^>]*>\s*([\d\s,.]+)</span>'
         r'.*?<span[^>]*class="value"[^>]*>\s*([\d\s,.]+)</span>',
@@ -545,8 +580,8 @@ def parse_battle_report(html: str) -> BattleReportData:
             attacker_combat_strength = int(re.sub(r"[^\d]", "", _combat_re.group(1)))
             defender_combat_strength = int(re.sub(r"[^\d]", "", _combat_re.group(2)))
         except (ValueError, IndexError):
-            attacker_combat_strength = 0
-            defender_combat_strength = 0
+            attacker_combat_strength = UnknownReason.UNPARSEABLE_PAGE
+            defender_combat_strength = UnknownReason.UNPARSEABLE_PAGE
 
     # BS4 fallback if regex didn't find values
     combat_table = soup.find("table", class_="combatStatistic") if not _combat_re else None
@@ -578,6 +613,7 @@ def parse_battle_report(html: str) -> BattleReportData:
         battle_result=battle_result,
         bounty=bounty,
         attacker_losses=attacker_losses,
+        attacker_losses_unknown=attacker_losses_unknown,
         defender_losses=defender_losses,
         carry_used=carry_used,
         carry_max=carry_max,

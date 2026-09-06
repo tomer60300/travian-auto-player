@@ -20,6 +20,7 @@ from rich.table import Table
 from .clients.http_client import HttpClient
 from .config import Settings
 from .constants import BUILDING_GID_BY_NAME_LOWER
+from .models.unknown_reason import reason_name
 from .services.auth_service import AuthService
 from .services.auto_scout_service import AutoScoutService
 from .services.build_queue_service import BuildPlan, BuildQueueService
@@ -1082,7 +1083,15 @@ def reports_village(
                         atk_losses = {
                             k: v for k, v in d.get("attacker_losses", {}).items() if v > 0
                         }
-                        if atk_losses:
+                        losses_unknown = d.get("attacker_losses_unknown")
+                        if losses_unknown is not None:
+                            # An empty losses line used to mean both "nothing
+                            # died" and "the block was not on the page".
+                            console.print(
+                                f"  [yellow]Attacker losses: unreadable "
+                                f"({reason_name(losses_unknown)})[/yellow]"
+                            )
+                        elif atk_losses:
                             console.print(
                                 f"  [red]Attacker losses: {', '.join(f'{k}={v}' for k, v in atk_losses.items())}[/red]"
                             )
