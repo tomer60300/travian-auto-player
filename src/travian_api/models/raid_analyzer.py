@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
+
+from .unknown_reason import reason_name
 
 
 class TargetVillageState(BaseModel):
@@ -18,9 +20,14 @@ class TargetVillageState(BaseModel):
     y: int = 0
     village_id: int = 0
 
-    # Resources
+    # Resources.
+    # `raidable_confidence` is a CONFIDENCE LADDER, not an unknown-reason code:
+    # it grades a figure that exists ("scouted", "raided", "depleted") as well as
+    # naming the two failures. `UnknownReason` (models/unknown_reason.py) is the
+    # other vocabulary -- it stands IN PLACE OF a figure. Keep them apart; see
+    # that module's docstring for why merging them loses the distinction.
     estimated_raidable: int = 0
-    raidable_confidence: str = "none"  # scouted|raided|depleted|stale|none
+    raidable_confidence: str = "none"  # scouted|raided|depleted|unreadable|none
 
     # Defenders
     defenders: Dict[str, int] = Field(default_factory=dict)
@@ -32,6 +39,12 @@ class TargetVillageState(BaseModel):
     # the zeros are an absence of information rather than a reading, and the
     # target cannot be scored -- `trapped = min(n, traps)` would predict that
     # nobody is swallowed by a trapper nobody looked for.
+    #
+    # `reconstruct_state` now says the same thing in the figures themselves:
+    # both start at UnknownReason.NO_BUILDING_ROW and are only replaced by a
+    # reading. The flag stays because it is what `_phase_4_score` refuses on;
+    # the codes are what a trace reads. These defaults are the hand-built case
+    # (tests, fixtures), which means "no wall, no trapper" as it always has.
     trap_capacity: int = 0
     wall_level: int = 0
     wall_tribe: str = ""
@@ -50,6 +63,12 @@ class TargetVillageState(BaseModel):
     player_population: int = 0
     distance: float = 0.0
     report_count: int = 0
+
+    @field_serializer("wall_level", "trap_capacity", when_used="json")
+    def _serialize_defence_figure(self, value: int) -> int | str:
+        """A reason code leaves as its NAME, so no page can render it as a level."""
+        named = reason_name(value)
+        return named if named is not None else value
 
 
 class RaidRecommendation(BaseModel):

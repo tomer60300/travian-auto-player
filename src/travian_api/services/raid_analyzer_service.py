@@ -18,6 +18,7 @@ from ..models.raid_analyzer import (
     RaidRecommendation,
     TargetVillageState,
 )
+from ..models.unknown_reason import UnknownReason, require_known
 from ..services.recon_account import acquire_recon_client
 from ..services.reports_service import ReportsService
 
@@ -313,6 +314,15 @@ def calculate_score(
             DEF += count * smithy_stat(def_inf, upk, 0)
             N_def += count
 
+    # ── Nothing below may be computed from a reason code ───────
+    # `wall_level` fails quietly (a -5 is simply "not > 0", so the wall bonus is
+    # skipped) but `trap_capacity` fails loudly and wrongly: `min(n, -5)` is -5,
+    # which turns the trapper into five EXTRA fighters. Callers refuse an unseen
+    # defence before they get here; this is the backstop that says so by name if
+    # one ever does not.
+    require_known(state.wall_level, "wall_level")
+    require_known(state.trap_capacity, "trap_capacity")
+
     # Wall bonus
     if state.wall_level > 0 and state.wall_tribe in WALL_BASES:
         DEF *= WALL_BASES[state.wall_tribe] ** state.wall_level
@@ -429,7 +439,16 @@ def reconstruct_state(
 
     Each entry in *reports* has keys: type, data, report_id, timestamp.
     """
-    state = TargetVillageState(x=coord_key[0], y=coord_key[1])
+    # The wall and the trapper start UNKNOWN, not zero. Only a report that
+    # actually carried a building row replaces the reason code with a reading,
+    # so `defence_buildings_seen` and these two agree by construction and a
+    # trace says WHICH read was missing rather than showing a bare 0.
+    state = TargetVillageState(
+        x=coord_key[0],
+        y=coord_key[1],
+        wall_level=UnknownReason.NO_BUILDING_ROW,
+        trap_capacity=UnknownReason.NO_BUILDING_ROW,
+    )
 
     # Separate scouts and raids, newest first
     scouts: List[Dict[str, Any]] = []
@@ -644,6 +663,8 @@ def _score_defended_binary(
     t_raid,
 ) -> Optional[RaidRecommendation]:
     """Binary search for optimal n_send against defended targets."""
+    require_known(state.wall_level, "wall_level")
+    require_known(state.trap_capacity, "trap_capacity")
     N_def = 0
     DEF = 10.0
     for uid, count in state.defenders.items():
@@ -763,6 +784,13 @@ def calculate_score_v2(
     # path below reads its garrison as "no defenders" and predicts no losses.
     if unsupported_defender_ids(state.defenders):
         return None
+
+    # ── Nothing below may be computed from a reason code ───────
+    # An unknown `trap_capacity` is not `== 0`, so it would fall past the
+    # undefended fast path into the binary search, where `min(n, -5)` hands the
+    # attacker five fighters it never sent.
+    require_known(state.wall_level, "wall_level")
+    require_known(state.trap_capacity, "trap_capacity")
 
     # Fast path: no defenders, no traps
     N_def = sum(v for k, v in state.defenders.items() if k != "uhero" and k in UNIT_DEF_TABLE)
