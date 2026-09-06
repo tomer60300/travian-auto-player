@@ -114,3 +114,7 @@ scout-results*.md
 # The travian-reviewer agent deliberately does not read these, and they are not
 # part of its review logic — see review-data/_out-of-scope/README.md. Kept local.
 .claude/agents/review-data/_out-of-scope/
+
+# Operator-local specs: they carry village ids, coordinates and production
+# figures, and this remote is public.
+*.local.md
