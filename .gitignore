@@ -115,6 +115,8 @@ scout-results*.md
 # part of its review logic — see review-data/_out-of-scope/README.md. Kept local.
 .claude/agents/review-data/_out-of-scope/
 
-# Operator-local specs: they carry village ids, coordinates and production
-# figures, and this remote is public.
+# Operator-local assets. This remote is PUBLIC, and `local/` holds village
+# ids, coordinates, production figures, run logs, review reports and working
+# notes. See local/README.md. Credentials do NOT go there - they go in .env.
+/local/
 *.local.md

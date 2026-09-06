@@ -25,6 +25,17 @@ repository is already in the state it warns about.
 
 ---
 
+## 0. Where the private things live
+
+`local/` is gitignored and holds everything that must not reach the remote:
+operating specs that name village ids, snapshots and run logs, audit reports,
+working notes. `local/README.md` says what belongs in each subdirectory.
+
+Credentials are the exception: they do **not** go in `local/`. An ignored file
+is one `git add -f` away from a public remote, and this repository has already
+lost two secrets that way. Credentials belong in `.env`, which is ignored and
+which no agent reads, or in a password manager.
+
 ## 1. Secrets
 
 ### 1.1 The GitLab root password — rotate it, and rotate it first
