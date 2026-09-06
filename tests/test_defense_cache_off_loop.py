@@ -295,10 +295,15 @@ class TestTheScanReadsEachSlotOnce:
         route, which streams the same single result line). It is pinned here so
         the batching cannot be blamed for it, and so a fix for it is a visible
         change to this expectation rather than a silent one.
+
+        The ``fetched`` fixture gained a ``defender_combat_strength``: the route
+        now caches only rows whose strength was actually established, and a
+        fetch result without that key is what an UNKNOWN row looks like. The
+        expectation -- one batched write for the refetched slot -- is unchanged.
         """
         slots = [_slot(1, 12, 120, 1_000), _slot(2, 12, 120, 5_000)]
         entries = {(12, 120, 1_000): DEFENSE}
-        fetched = {"defender_troops": {"t1": 7}, "defender_total": 7}
+        fetched = {"defender_troops": {"t1": 7}, "defender_total": 7, "defender_combat_strength": 7}
 
         cache, lines = await _scan(monkeypatch, slots, entries, fetched=fetched)
 
@@ -307,8 +312,12 @@ class TestTheScanReadsEachSlotOnce:
         assert cache.stored == [[(12, 120, 5_000)]]
 
     async def test_a_fetched_group_is_written_in_one_batch(self, monkeypatch):
+        """The fixture carries a ``defender_combat_strength`` because the route
+        caches only established figures now; a row without one is an UNKNOWN and
+        is streamed but never stored. One batch per coord, as before.
+        """
         slots = [_slot(1, 12, 120, 1_000), _slot(2, 13, 121, 2_000)]
-        fetched = {"defender_total": 3}
+        fetched = {"defender_total": 3, "defender_combat_strength": 3}
 
         cache, lines = await _scan(monkeypatch, slots, {}, fetched=fetched)
 

@@ -1065,6 +1065,11 @@ export default function FarmLists() {
                               if (defenseScanning) return <span className="text-secondary">...</span>
                               if (!def) return <span className="text-secondary">---</span>
                               if (def.never_raided) return <span className="text-secondary">N/A</span>
+                              // A defence the scan could not establish is not an empty village.
+                              // The backend names the reason; the figure itself never arrives
+                              // as a negative code, so nothing can render one as a strength.
+                              if (def.defender_unknown_reason)
+                                return <span className="text-warning" title={`Defence not established: ${def.defender_unknown_reason}`}>?</span>
                               if (def.defender_combat_strength === 0 && def.defender_total === 0)
                                 return <span className="text-success">Empty{def.report_age_hours != null && <span className="text-secondary ml-1">({def.report_age_hours}h)</span>}</span>
                               const strength = def.defender_combat_strength || def.defender_total

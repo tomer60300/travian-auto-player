@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from travian_api.exceptions import TravianError
+from travian_api.models.unknown_reason import UnknownReason, is_unknown, reason_of
 from travian_api.web.auth import get_current_user
 from travian_api.web.sessions import TravianSession, get_travian_session, require_village_id
 
@@ -323,13 +324,22 @@ class DefenseInfoRequest(BaseModel):
 
 
 class SlotDefenseInfo(BaseModel):
+    """One row of the defence scan.
+
+    ``defender_combat_strength`` is None exactly when the scan could not
+    establish it, and ``defender_unknown_reason`` then carries the
+    :class:`UnknownReason` NAME. The number never leaves as a negative: a raw
+    ``-2`` in this field renders in the Defence column as a strength.
+    """
+
     slot_id: int
     x: int
     y: int
     name: str
     defender_troops: dict[str, int] = {}
     defender_total: int = 0
-    defender_combat_strength: int = 0
+    defender_combat_strength: int | None = None
+    defender_unknown_reason: str | None = None
     report_age_hours: float | None = None
     report_id: str | None = None
     never_raided: bool = False
@@ -344,12 +354,33 @@ def _cache_target(slot: FarmListSlot) -> tuple[int, int, int]:
     return (slot.target.x, slot.target.y, slot.last_raid.time)
 
 
+def _defense_unknown(reason: UnknownReason) -> dict:
+    """A scan row for a coordinate whose defence could not be established.
+
+    Every failure used to come back as ``None`` and be emitted with the model's
+    defaults -- ``defender_combat_strength=0``, ``defender_total=0`` -- which
+    the page renders as a green "Empty". Naming the reason is the difference
+    between "this village is undefended" and "I never found out".
+    """
+    return {
+        "defender_troops": {},
+        "defender_total": 0,
+        "defender_combat_strength": None,
+        "defender_unknown_reason": reason.name,
+        "report_id": None,
+    }
+
+
 async def _fetch_defense_for_coord(
     session,
     x: int,
     y: int,
-) -> dict | None:
-    """Fetch defense data for a single coordinate (tile-details + report HTML)."""
+) -> dict:
+    """Fetch defense data for a single coordinate (tile-details + report HTML).
+
+    Always answers. A row whose ``defender_combat_strength`` is None carries the
+    reason instead, and must not be cached -- there is nothing to cache.
+    """
     try:
         village_data = await session.reports_service.fetch_village_reports(
             x=x,
@@ -358,7 +389,7 @@ async def _fetch_defense_for_coord(
         )
     except Exception as exc:
         logger.debug("Defense scan: tile-details failed for (%s,%s): %s", x, y, exc)
-        return None
+        return _defense_unknown(UnknownReason.UNPARSEABLE_PAGE)
 
     tile_reports = village_data.get("reports", [])
     battle_report = next(
@@ -366,7 +397,9 @@ async def _fetch_defense_for_coord(
         None,
     )
     if not battle_report:
-        return None
+        # Defence is read out of this account's own raid reports. No raid on
+        # file means the question was never asked, not that the answer is zero.
+        return _defense_unknown(UnknownReason.NEVER_RAIDED)
 
     report_id = battle_report.get("report_id", "")
     aid = battle_report.get("aid", "")
@@ -375,20 +408,27 @@ async def _fetch_defense_for_coord(
         detail = await session.reports_service.fetch_report_detail(
             f"{report_id}&aid={aid}" if aid else report_id
         )
-        if detail and detail.get("type") == "battle":
-            battle = detail.get("data")
-            if battle:
-                defender_troops = dict(battle.defender_troops) if battle.defender_troops else {}
-                return {
-                    "defender_troops": defender_troops,
-                    "defender_total": sum(defender_troops.values()),
-                    "defender_combat_strength": getattr(battle, "defender_combat_strength", 0) or 0,
-                    "report_id": report_id,
-                }
     except Exception as exc:
         logger.debug("Defense scan: report fetch failed for %s: %s", report_id, exc)
+        return _defense_unknown(UnknownReason.UNPARSEABLE_PAGE)
 
-    return None
+    battle = detail.get("data") if detail and detail.get("type") == "battle" else None
+    if not battle:
+        return _defense_unknown(UnknownReason.EMPTY_RESPONSE)
+
+    strength = getattr(battle, "defender_combat_strength", UnknownReason.UNPARSEABLE_PAGE)
+    if is_unknown(strength):
+        # The report is on file but its combatStatistic row was not readable.
+        return _defense_unknown(reason_of(strength) or UnknownReason.UNPARSEABLE_PAGE)
+
+    defender_troops = dict(battle.defender_troops) if battle.defender_troops else {}
+    return {
+        "defender_troops": defender_troops,
+        "defender_total": sum(defender_troops.values()),
+        "defender_combat_strength": strength,
+        "defender_unknown_reason": None,
+        "report_id": report_id,
+    }
 
 
 @router.post("/defense-scan")
@@ -487,6 +527,7 @@ async def scan_defense_strength(
                         x=slot.target.x,
                         y=slot.target.y,
                         name=slot.target.name,
+                        defender_unknown_reason=UnknownReason.NEVER_RAIDED.name,
                         never_raided=True,
                     ).model_dump()
                     | {"type": "result"}
@@ -509,7 +550,8 @@ async def scan_defense_strength(
                             report_age_hours=age_hours,
                             defender_troops=cached.get("defender_troops", {}),
                             defender_total=cached.get("defender_total", 0),
-                            defender_combat_strength=cached.get("defender_combat_strength", 0),
+                            defender_combat_strength=cached.get("defender_combat_strength"),
+                            defender_unknown_reason=cached.get("defender_unknown_reason"),
                             report_id=cached.get("report_id"),
                         ).model_dump()
                         | {"type": "result"}
@@ -535,7 +577,7 @@ async def scan_defense_strength(
                 try:
                     defense_data = await inflight
                 except Exception:
-                    defense_data = None
+                    defense_data = _defense_unknown(UnknownReason.EMPTY_RESPONSE)
             else:
                 fut = defense_cache.set_inflight(cache_scope, x, y)
                 try:
@@ -543,11 +585,14 @@ async def scan_defense_strength(
                     fut.set_result(defense_data)
                 except Exception as exc:
                     fut.set_exception(exc)
-                    defense_data = None
+                    defense_data = _defense_unknown(UnknownReason.EMPTY_RESPONSE)
                 finally:
                     defense_cache.clear_inflight(cache_scope, x, y)
 
             fetched_count += 1
+            # Only an established figure is worth caching; a reason code cached
+            # for two hours is a failure remembered as a fact.
+            is_established = defense_data.get("defender_combat_strength") is not None
             to_store: list[tuple[int, int, int]] = []
 
             for slot in slots:
@@ -556,30 +601,19 @@ async def scan_defense_strength(
                     if slot.last_raid and slot.last_raid.time
                     else None
                 )
-                if defense_data:
-                    yield _line(
-                        SlotDefenseInfo(
-                            slot_id=slot.id,
-                            x=slot.target.x,
-                            y=slot.target.y,
-                            name=slot.target.name,
-                            report_age_hours=age_hours,
-                            **defense_data,
-                        ).model_dump()
-                        | {"type": "result"}
-                    )
+                yield _line(
+                    SlotDefenseInfo(
+                        slot_id=slot.id,
+                        x=slot.target.x,
+                        y=slot.target.y,
+                        name=slot.target.name,
+                        report_age_hours=age_hours,
+                        **defense_data,
+                    ).model_dump()
+                    | {"type": "result"}
+                )
+                if is_established:
                     to_store.append(_cache_target(slot))
-                else:
-                    yield _line(
-                        SlotDefenseInfo(
-                            slot_id=slot.id,
-                            x=slot.target.x,
-                            y=slot.target.y,
-                            name=slot.target.name,
-                            report_age_hours=age_hours,
-                        ).model_dump()
-                        | {"type": "result"}
-                    )
 
             if to_store:
                 await defense_cache.put_many(cache_scope, to_store, defense_data)
