@@ -101,6 +101,9 @@ farm-list-creation/logs/run*.log
 # public, and the data is reconnaissance about live accounts.
 farm-list-creation/progress.json
 scout-results*.md
+# Run logs from the scout/raid scripts: they carry real village ids, coordinates
+# and login events, and this remote is public. Nothing tracked matches today.
+*.jsonl
 *-scout-results*.json
 
 # Local dev/production server logs (started by the agent on 8000/8001)

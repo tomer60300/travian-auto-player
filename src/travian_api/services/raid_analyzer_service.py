@@ -395,6 +395,10 @@ def calculate_score(
     profit = loot - total_dead * CLUB_COST
 
     # ── Confidence adjustments ─────────────────────────────────
+    # TODO(raids): 0.5 is a fabricated confidence for an unknown scout age -- the
+    # same family as the zeros the UnknownReason codes replaced, and the last one
+    # left. Changing it moves every score, so it needs the operator's ruling first.
+    # See docs/29-raiding-todo.md.
     C_scout = T_SCOUT / (T_SCOUT + t_scout) if t_scout is not None else 0.5
     C_confirm = 1.2 if (t_raid is not None and t_scout is not None and t_raid < t_scout) else 1.0
 
@@ -602,6 +606,12 @@ def reconstruct_state(
         if def_troops:
             surviving: Dict[str, int] = {}
             for uid, count in def_troops.items():
+                # TODO(raids): the same 'absence is not zero' defect the attacker
+                # side now names. An unread defender-loss row reads as 'nobody
+                # died' and OVERSTATES the surviving garrison, so it errs safe and
+                # is deliberately left. Fix with UnknownReason.NO_ATTACKER_BLOCK's
+                # sibling handling when the raiding model is next opened.
+                # See docs/29-raiding-todo.md.
                 lost = def_losses.get(uid, 0)
                 remaining = count - lost
                 if remaining > 0:
@@ -634,6 +644,10 @@ def _score_undefended(
         n = 1
     loot = min(n * CLUB_CARRY, eff_R)
     profit = loot  # no losses → profit = loot
+    # TODO(raids): 0.5 is a fabricated confidence for an unknown scout age -- the
+    # same family as the zeros the UnknownReason codes replaced, and the last one
+    # left. Changing it moves every score, so it needs the operator's ruling first.
+    # See docs/29-raiding-todo.md.
     C_scout = T_SCOUT / (T_SCOUT + t_scout) if t_scout is not None else 0.5
     C_confirm = 1.2 if (t_raid is not None and t_scout is not None and t_raid < t_scout) else 1.0
     round_trip = 2 * dist / CLUB_SPEED
@@ -729,6 +743,10 @@ def _score_defended_binary(
     if profit <= 0:
         return None
 
+    # TODO(raids): 0.5 is a fabricated confidence for an unknown scout age -- the
+    # same family as the zeros the UnknownReason codes replaced, and the last one
+    # left. Changing it moves every score, so it needs the operator's ruling first.
+    # See docs/29-raiding-todo.md.
     C_scout = T_SCOUT / (T_SCOUT + t_scout) if t_scout is not None else 0.5
     C_confirm = 1.2 if (t_raid is not None and t_scout is not None and t_raid < t_scout) else 1.0
     round_trip = 2 * dist / CLUB_SPEED

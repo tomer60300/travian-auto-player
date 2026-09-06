@@ -64,9 +64,9 @@ whole allowed set per route and never infer a direction.
 | Constant | Value in code | Location | Confidence | Wrong-direction danger |
 |---|---|---|---|---|
 | Outgoing troop cap | **not implemented** | — | VERIFIED: 20,000 per **avatar**, account-wide | **Quiet.** Includes returning legs, own-village reinforcements and hero adventures. The tool keeps issuing sends the server refuses, and every downstream metric (last bounty, carry ratio, re-scout queue) degrades because the raids it thinks it sent never left. The only `20_000` in the tree is `MAX_EVENTS` in `execution_trace.py` — unrelated. |
-| Clubswinger carry | **60** | `raid_analyzer_service.py:95` `CLUB_CARRY` | stock; measurable from any full-bag report | over-estimate → under-full bags on targets the model rates profitable |
-| Axeman carry | **50** | `raid_analyzer_service.py:102` `AXE_CARRY` | stock | as above |
-| Stealable fallback | **0.67** | `raid_analyzer_service.py:392` `WAREHOUSE_RATIO` | pragmatic fallback when the carry icon is not parsed | **No cranny model exists.** If scoring was calibrated on hero-accompanied raids it over-estimates hero-less ones by up to 20% of cranny capacity — quiet |
+| Clubswinger carry | **60** | `raid_analyzer_service.py` `CLUB_CARRY` | stock; measurable from any full-bag report | over-estimate → under-full bags on targets the model rates profitable |
+| Axeman carry | **50** | `raid_analyzer_service.py` `AXE_CARRY` | stock | as above |
+| ~~Stealable fallback 0.67~~ | **REMOVED** | `WAREHOUSE_RATIO`, deleted 2026-09-06 by `30cfebc` | — | **Do not reinstate.** It fired whenever the parsed stealable figure was `<= 0`, which collapsed three cases into one: no info table, a non-English title, and the game genuinely reporting 0 because the cranny covers the stock. A fully-crannied target scored at 67% of its stock and was raided to an empty return. There IS a cranny model now: `max(0, total - cranny)`, and absence refuses rather than guessing |
 | Farm list entry cap | **100** | — | VERIFIED, hard server-side | The 99 figure circulating in older guides is an off-by-one from a 0–99 display. Retire it. |
 | Siege in farm lists | must be **excluded** | — | VERIFIED | In a raid catapults do not fire and rams do not damage the wall — siege adds no carry and just exposes slow expensive units |
 | Bag / sack percentage | carry-**utilisation** | — | VERIFIED semantics | **Backwards-reading is self-reinforcing**: read as "fraction of target taken", resizing logic keeps growing sends against targets that are already fully drained |
