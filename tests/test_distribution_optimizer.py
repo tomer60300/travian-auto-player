@@ -538,7 +538,9 @@ class TestStructuralInvariants:
             plans,
             GEOMETRY,
             MODEL,
-            excluded_origins_by_destination={3: {1}, 4: {1}},
+            # Pin the relay's own cargo to 7; residual repair can otherwise
+            # serve 7 from 1 and use 2's production downstream instead.
+            excluded_origins_by_destination={3: {1}, 4: {1}, 7: {1}},
         )
 
         # Not vacuous: all three legs out of the relay really were built.
