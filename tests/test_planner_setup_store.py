@@ -378,17 +378,17 @@ class TestABlankMerchantLeverMeansThePlannersOwn:
 
 class TestTheVersion:
     def test_a_newer_version_says_so(self, client, account):
-        # 12, not 11: v11 became readable when `merchant_capacity_measured` started
+        # 13, not 12: v12 became readable when the night's two ends started
         # travelling in the document. This case needs a version that is
         # guaranteed to be beyond this build, so it moves whenever
         # READABLE_VERSIONS grows -- and the parametrised case below is what
         # would fail if the two ever disagreed.
-        res = _put(client, account, _minimal(account, version=12))
+        res = _put(client, account, _minimal(account, version=13))
 
         assert res.status_code == 422, res.text
         assert "NEWER build" in res.text
 
-    @pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+    @pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
     def test_every_readable_version_is_accepted(self, client, account, version):
         assert _put(client, account, _minimal(account, version=version)).status_code == 200
 
@@ -865,9 +865,9 @@ class TestWhatThePlannerWouldRefuse:
         doc = _realistic(account)
         assert _put(client, account, doc).status_code == 200
 
-        # 12 for the same reason as TestTheVersion's: v11 is readable now, so a
+        # 13 for the same reason as TestTheVersion's: v12 is readable now, so a
         # refusal has to be asked for with a version beyond this build.
-        assert _put(client, account, _minimal(account, version=12)).status_code == 422
+        assert _put(client, account, _minimal(account, version=13)).status_code == 422
 
         assert _get(client, account).json()["setup"] == doc
 
@@ -952,3 +952,62 @@ class TestTheAccountKeyIsRequired:
 
     def test_delete_needs_one(self, client):
         assert client.delete(SETUP).status_code == 422
+
+
+class TestTheNightsTwoEnds:
+    """v12: `morning_floor` and `pre_night_baseline` travel in the document.
+
+    Same criterion v9, v10 and v11 earned a version for -- NEITHER persistence
+    path carried them. `/night-profile` accepted the pair as `target_fill` and
+    `baseline_fill` and `/day-check` pinned the module constants, so the figures
+    the operator derived a night at did not survive to the check, let alone to
+    another browser origin.
+
+    Unlike the three booleans above them these are OPTIONAL rather than
+    tri-state: the planner has a defensible default for each, so an omitted one
+    is a complete document and not an unanswered question. That is the reading
+    `MerchantModelIn`'s levers already get.
+    """
+
+    def test_the_pair_round_trips(self, client, account):
+        doc = _minimal(account, version=12, morning_floor=0.8, pre_night_baseline=0.2)
+
+        assert _put(client, account, doc).status_code == 200
+
+        stored = _get(client, account).json()["setup"]
+        assert stored["morning_floor"] == 0.8
+        assert stored["pre_night_baseline"] == 0.2
+
+    def test_omitting_them_is_a_complete_document(self, client, account):
+        """Absent is "use the planner's own", so a v11 export keeps planning
+        exactly as it did. The three booleans refuse instead; these do not."""
+        assert _put(client, account, _minimal(account, version=12)).status_code == 200
+
+        stored = _get(client, account).json()["setup"]
+        assert "morning_floor" not in stored
+        assert "pre_night_baseline" not in stored
+
+    def test_a_floor_at_or_below_the_baseline_is_refused_here(self, client, account):
+        """The store's own rule: a document the planner would refuse is refused
+        HERE, not a week later when the operator tries to plan from it."""
+        doc = _minimal(account, version=12, morning_floor=0.2, pre_night_baseline=0.25)
+
+        res = _put(client, account, doc)
+
+        assert res.status_code == 422, res.text
+        assert "not above" in res.text
+
+    def test_a_lone_floor_is_measured_against_the_planners_baseline(self, client, account):
+        """Only one of the two typed is the common case -- the page writes what
+        the operator answered. 0.2 clears nothing against the default 0.25
+        baseline the plan will actually use, so it cannot be accepted just
+        because its partner is absent."""
+        res = _put(client, account, _minimal(account, version=12, morning_floor=0.2))
+
+        assert res.status_code == 422, res.text
+
+    @pytest.mark.parametrize("floor", [0, 1.5])
+    def test_a_floor_off_the_scale_is_refused(self, client, account, floor):
+        res = _put(client, account, _minimal(account, version=12, morning_floor=floor))
+
+        assert res.status_code == 422, res.text

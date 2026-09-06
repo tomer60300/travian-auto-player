@@ -3409,7 +3409,56 @@ class DayCheckRequest(PlanRequest):
         ),
     )
 
+    pre_night_baseline: float = Field(
+        default=DEFAULT_BASELINE_FILL,
+        ge=0.0,
+        le=MAX_STOCK_FLOOR_FRACTION,
+        description=(
+            "The fraction each store is ASSUMED to be down to at the day-to-night "
+            "switch. Configurable rather than pinned, because it describes the "
+            "operator's own spend-down and not the game: an account emptied to a "
+            "fifth and one emptied to a quarter reserve different room for the "
+            "night, and `NightProfileRequest.baseline_fill` has always let the "
+            "derivation be told which. Pinning it HERE meant a night derived at "
+            "one figure was then checked against another. "
+            "An assumption the operator owns, never a constraint: a snapshot that "
+            "disagrees is reported as `pre_night_baseline`, not refused."
+        ),
+    )
+    morning_floor: float = Field(
+        default=DEFAULT_TARGET_FILL,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "The fraction of both stores every role village must have reached at "
+            "the morning switch. The same figure the night derivation uses as its "
+            "CEILING -- 'never overflow during the night, never arrive empty at "
+            "morning' is one statement seen from either side -- so it is passed to "
+            "`/night-profile` as `target_fill` and read back here as the floor. "
+            "Configurable for the reason the baseline is: raising it does not cost "
+            "the room it looks like it does, since the night only ships the "
+            "difference between the two."
+        ),
+    )
+
     _unique_segment_names = field_validator("segments")(_one_name_per_profile)
+
+    @field_validator("morning_floor")
+    @classmethod
+    def _floor_is_above_baseline(cls, value: float, info: ValidationInfo) -> float:
+        """The same rule `NightProfileRequest` states, and for the same reason.
+
+        Declared after `pre_night_baseline` so `info.data` carries it: a floor at
+        or below the baseline leaves the night no room to fill, and the ceiling
+        the derivation computes from the pair goes zero or negative.
+        """
+        baseline = (info.data or {}).get("pre_night_baseline", DEFAULT_BASELINE_FILL)
+        if value <= baseline:
+            raise ValueError(
+                f"morning_floor {value} is not above pre_night_baseline {baseline}; "
+                f"there would be no room for anything to arrive in overnight"
+            )
+        return value
 
     @field_validator("dispatch_window")
     @classmethod
@@ -4304,7 +4353,9 @@ async def post_day_check(
         # `segments` happens to arrive in. A night stated as one window is the
         # degenerate case: both ends are that window.
         opening, closing = night_run
-        pre_night_over = pre_night_overfills(trajectories, capacities, floor_villages, opening.name)
+        pre_night_over = pre_night_overfills(
+            trajectories, capacities, floor_villages, opening.name, body.pre_night_baseline
+        )
         # Whichever profile takes over at the night's last minute -- 07:00 on the
         # operator's own pair. Found by the minute rather than by position or by
         # name: `segments` need not be given in clock order, and an hour with no
@@ -4322,10 +4373,13 @@ async def post_day_check(
             )
         else:
             morning_short = morning_floor_shortfalls(
-                trajectories, capacities, floor_villages, morning.name
+                trajectories, capacities, floor_villages, morning.name, body.morning_floor
             )
     warnings.extend(
-        f.message for f in night_state_findings(morning_short, pre_night_over, names=names)
+        f.message
+        for f in night_state_findings(
+            morning_short, pre_night_over, body.morning_floor, body.pre_night_baseline, names=names
+        )
     )
 
     # `settled` is one flag for the whole day, so an unsettled run marks every
@@ -4366,8 +4420,8 @@ async def post_day_check(
             )
             for segment, account in zip(body.segments, planned, strict=True)
         ],
-        morning_floor=DEFAULT_TARGET_FILL,
-        pre_night_baseline=DEFAULT_BASELINE_FILL,
+        morning_floor=body.morning_floor,
+        pre_night_baseline=body.pre_night_baseline,
         morning_shortfalls=_fill_rows(morning_short, names),
         pre_night_over_baseline=_fill_rows(pre_night_over, names),
         # Re-sorted across the halves of a split night, so the worst overrun is

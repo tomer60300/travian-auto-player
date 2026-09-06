@@ -171,7 +171,7 @@ import { NPC_FEEDSTOCK_RESOURCES, isFeedstockList } from './plannerNpc'
 import { excludedOriginIds, namesForVillageIds } from './villageRefs'
 
 export const SETUP_FORMAT = 'travian-planner-owned-state'
-export const SETUP_VERSION = 11
+export const SETUP_VERSION = 12
 /** Versions this build can read. A v1 file simply carries no profiles, a v2 one
  * no roles, a v3 one no per-village relay answer, a v4 one no merchant cap, a
  * v5 one no relay tier and a v6 one no per-profile NPC attendance, so refusing
@@ -190,7 +190,7 @@ export const SETUP_VERSION = 11
  * readable list AND two refusals that have to be asked for with a version
  * beyond this build. Bumping one side alone is the failure this note exists to
  * prevent. */
-export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
 
 /** Matches the Trade Office input's own bounds, and the backend's `le=20`. */
 export const MAX_TRADE_OFFICE_LEVEL = 20
@@ -489,6 +489,28 @@ export function isStockFloorFraction(value) {
   if (value < 0 || value > MAX_STOCK_FLOOR_FRACTION) return false
   const permille = value * 1000
   return Math.abs(permille - Math.round(permille)) < 1e-6
+}
+
+/** Is this a usable morning fill floor? A fraction above empty and no more
+ * than a full store. Zero is refused rather than allowed as "no floor": the
+ * same number is the night derivation's CEILING, and a ceiling of zero leaves
+ * nowhere for the night's cargo to go. Say "no floor" by leaving it off.
+ * Matches `DayCheckRequest.morning_floor`'s `gt=0, le=1`. */
+export function isMorningFloor(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 1
+}
+
+/** Is this a usable pre-night baseline? Bounded like a stock floor, because it
+ * is one -- how far down the operator empties each store before bed. Zero IS an
+ * answer here, unlike the floor above: emptying completely is a thing a person
+ * can do. Matches `DayCheckRequest.pre_night_baseline`'s `ge=0, le=0.95`. */
+export function isPreNightBaseline(value) {
+  return (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    value <= MAX_STOCK_FLOOR_FRACTION
+  )
 }
 
 /** Is this a usable consumption rate? What a village spends per hour, so zero
@@ -1425,6 +1447,8 @@ export function buildSetup({
   reservedWindow,
   pruneToWindow,
   merchantCapacityMeasured,
+  morningFloor,
+  preNightBaseline,
   merchantModel,
   foreignTargets,
   exportedAt,
@@ -1600,6 +1624,12 @@ export function buildSetup({
   // the server lifts from an absent field with `bool(None)` -- so a written
   // `false` would say nothing an absent field does not.
   if (merchantCapacityMeasured === true) doc.merchant_capacity_measured = true
+  // The night's two ends, written only when the operator typed one. Absent is
+  // "use the planner's own" -- the reading the merchant levers below already
+  // get -- and NOT zero: an emptied box must not travel as a floor of 0, which
+  // is a ceiling the night cannot ship into.
+  if (isMorningFloor(morningFloor)) doc.morning_floor = morningFloor
+  if (isPreNightBaseline(preNightBaseline)) doc.pre_night_baseline = preNightBaseline
   // The levers the operator actually TYPED. A blank box means "use the
   // planner's own", which the plan path has always read correctly -- the field
   // is omitted from the request and the backend's default stands -- while this
@@ -2283,6 +2313,45 @@ export function parseSetup(text) {
     merchantCapacityMeasured = raw.merchant_capacity_measured
   }
 
+  // The night's two ends. Refused rather than clamped, for the reason every
+  // other bound in this file is: a figure the server would 422 must not load
+  // cleanly here, or the operator saves a document they cannot read back.
+  let morningFloor = null
+  if (raw.morning_floor != null) {
+    if (!isMorningFloor(raw.morning_floor)) {
+      throw new SetupFileError(
+        `morning_floor is ${JSON.stringify(raw.morning_floor)}, which is not a fraction of a ` +
+          `store above empty and up to full. It is how full every role village must be at the ` +
+          `morning switch, and the same figure bounds what the night may ship in.`
+      )
+    }
+    morningFloor = raw.morning_floor
+  }
+  let preNightBaseline = null
+  if (raw.pre_night_baseline != null) {
+    if (!isPreNightBaseline(raw.pre_night_baseline)) {
+      throw new SetupFileError(
+        `pre_night_baseline is ${JSON.stringify(raw.pre_night_baseline)}, which is not a ` +
+          `fraction of a store from empty to ${MAX_STOCK_FLOOR_FRACTION}. It is how far down ` +
+          `the stores are spent before the night starts.`
+      )
+    }
+    preNightBaseline = raw.pre_night_baseline
+  }
+  // Checked as a PAIR, against whatever the plan will actually use for the half
+  // the document leaves off -- the same fallback `SetupDocument`'s own validator
+  // applies. A floor at or below the baseline gives the night no room to fill.
+  if (morningFloor != null || preNightBaseline != null) {
+    const floor = morningFloor ?? DEFAULT_TARGET_FILL
+    const baseline = preNightBaseline ?? DEFAULT_BASELINE_FILL
+    if (floor <= baseline) {
+      throw new SetupFileError(
+        `morning_floor ${floor} is not above pre_night_baseline ${baseline}; there would be no ` +
+          `room for anything to arrive in overnight.`
+      )
+    }
+  }
+
   let merchantModel = null
   if (raw.merchant_model != null) {
     const m = raw.merchant_model
@@ -2409,6 +2478,8 @@ export function parseSetup(text) {
     reservedWindow,
     pruneToWindow,
     merchantCapacityMeasured,
+    morningFloor,
+    preNightBaseline,
     merchantModel,
     foreignTargets,
   }
@@ -2443,6 +2514,8 @@ export function mergeSetup({
   reservedWindow,
   pruneToWindow,
   merchantCapacityMeasured,
+  morningFloor,
+  preNightBaseline,
   foreignTargets,
 }) {
   const known = new Map((villages ?? []).map((v) => [v.village_id, v]))
@@ -2594,6 +2667,13 @@ export function mergeSetup({
     // on screen. `false` and not `null` at the end of the chain, because the
     // page renders a checkbox and a checkbox has two states.
     merchantCapacityMeasured: setup.merchantCapacityMeasured ?? merchantCapacityMeasured ?? false,
+    // The same rule again: a document written before v12 says nothing about the
+    // night's two ends, so loading one must not overwrite what is on screen.
+    // `null` at the end of the chain and not the planner's own figure, because
+    // an empty box is how the page says "use the planner's own" -- filling it in
+    // would turn a default into a figure the operator appears to have asserted.
+    morningFloor: setup.morningFloor ?? morningFloor ?? null,
+    preNightBaseline: setup.preNightBaseline ?? preNightBaseline ?? null,
     // Replaced wholesale, not merged. Merging two tribute lists would either
     // double an obligation or leave a target the operator deleted still being
     // shipped to. A file with no targets leaves what is on screen alone.

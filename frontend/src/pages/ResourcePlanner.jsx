@@ -328,6 +328,35 @@ function loadProfiles(accountKey) {
   return { [DEFAULT_PROFILE]: legacy && typeof legacy === 'object' ? legacy : {} }
 }
 
+/** A fill box's percent as the fraction the wire carries, or null when the box
+ * is blank.
+ *
+ * Blank is NOT zero. `Number('') / 100` is 0, and a store "emptied to 0%" is a
+ * different answer from one the operator has not given -- the distinction the
+ * derivation already refuses over. The two callers that must not invent an
+ * answer go through here: the setup document, where an invented 0 would export
+ * as a floor the night cannot ship into, and the day check, where it would
+ * measure every role village against a floor of nothing. The derivation keeps
+ * its own explicit refusal instead of a fallback, because a night derived from
+ * a guessed fill stops matching the account it was built for. */
+const fillFraction = (percent) => {
+  if (String(percent ?? '').trim() === '') return null
+  const value = Number(percent)
+  return Number.isFinite(value) ? value / 100 : null
+}
+
+/** The night's two ends for a `/day-check` body, each omitted when its box is
+ * blank so the planner's own figure stands -- the reading every other cleared
+ * lever on this page already gets. */
+const fillPayload = (targetPercent, baselinePercent) => {
+  const floor = fillFraction(targetPercent)
+  const baseline = fillFraction(baselinePercent)
+  return {
+    ...(floor == null ? {} : { morning_floor: floor }),
+    ...(baseline == null ? {} : { pre_night_baseline: baseline }),
+  }
+}
+
 const LS_WINDOWS = 'planner_profile_windows'
 const LS_CROP_CEILING = 'planner_crop_ceiling'
 const LS_SHIP_ONLY_TO = 'planner_ship_only_to'
@@ -1717,6 +1746,20 @@ export default function ResourcePlanner() {
       // tell them apart -- so dropped, the operator is asked again on every
       // plan for a reading they have already taken.
       merchantCapacityMeasured,
+      // The night's two ends, and v12. Both boxes have been on this page since
+      // the derivation shipped and both already reach `/night-profile` as
+      // `baseline_fill` / `target_fill` -- but NEITHER persistence path carried
+      // them, the same gap v9, v10 and v11 were bumped for. So the pair a night
+      // was derived at did not survive a reload, did not follow the operator
+      // between origins, and `/day-check` measured the result against the
+      // module defaults regardless of what was on screen: a night built to wake
+      // at 80% was checked against 60% and its shortfalls went unreported.
+      //
+      // A percent on screen, a fraction on the wire. A blank box stays blank:
+      // `fillFraction` returns null, `buildSetup` omits the field, and absent
+      // means "use the planner's own".
+      morningFloor: fillFraction(targetFill),
+      preNightBaseline: fillFraction(baselineFill),
       merchantModel,
       foreignTargets,
       exportedAt: new Date().toISOString(),
@@ -1774,6 +1817,8 @@ export default function ResourcePlanner() {
     villages,
     tradeOffice,
     maxBusy,
+    targetFill,
+    baselineFill,
     cropCeilings,
     shipOnlyTo,
     relayFor,
@@ -1873,6 +1918,15 @@ export default function ResourcePlanner() {
       // `onChange`, which a direct `setMerchantModel` never runs. A document
       // restoring a calibration is not an operator typing over one.
       setMerchantCapacityMeasured(merged.merchantCapacityMeasured)
+      // The night's two ends, v12. `mergeSetup` has already applied the same
+      // rule the fields above it get -- a document that says nothing leaves the
+      // boxes alone -- so a null here is "not carried", not "cleared".
+      // Back to a percent, with the same deliberate rounding the initial state
+      // uses: `0.6 * 100` is 60.00000000000001.
+      if (merged.morningFloor != null) setTargetFill(Math.round(merged.morningFloor * 100))
+      if (merged.preNightBaseline != null) {
+        setBaselineFill(Math.round(merged.preNightBaseline * 100))
+      }
       // Capacity is server-calibrated, so a file that carries a calibration is
       // more trustworthy than this build's default. Absent, the default stands.
       if (merged.merchantModel) {
@@ -3823,6 +3877,12 @@ export default function ResourcePlanner() {
         // different row counts -- the plan the operator reviewed was not the
         // plan the run wrote, on the one endpoint that always carries segments.
         prune_to_window: true,
+        // The pair the night was DERIVED at, so the check measures against the
+        // same two figures. Pinned to the module defaults here until v12, which
+        // is how a night built to wake at 80% came back with no shortfall: the
+        // floor it was checked against was 60%. Omitted when a box is blank,
+        // which is the reading every other lever on this page gets.
+        ...fillPayload(targetFill, baselineFill),
         crop_ceilings: ceilings,
       })
       // Drop the response if the account switched OR any day-check input changed

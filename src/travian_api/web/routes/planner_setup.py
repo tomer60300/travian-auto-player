@@ -57,16 +57,28 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Final, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field, StrictBool, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StrictBool,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from travian_api.services.distribution.allocation import Resource
+from travian_api.services.distribution.night_profile import (
+    DEFAULT_BASELINE_FILL,
+    DEFAULT_TARGET_FILL,
+)
 from travian_api.services.distribution.roles import Role
 from travian_api.web.auth import get_current_user
 from travian_api.web.models.db import User, get_db
 from travian_api.web.models.planner_setup import PlannerSetup
 from travian_api.web.routes.distribution import (
+    MAX_STOCK_FLOOR_FRACTION,
     AllocationInput,
     ForeignTarget,
     PlanRequest,
@@ -93,7 +105,7 @@ router = APIRouter(prefix="/api/distribution", tags=["distribution"])
 # by any checker reading this module.
 SETUP_FORMAT: Final = "travian-planner-owned-state"
 
-READABLE_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+READABLE_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
 """Versions this build can read. A v1 document simply carries no profiles, a v2
 one no roles, a v3 one no per-village relay answer, a v4 one no merchant cap, a
 v5 one no relay tier and a v6 one no per-profile NPC attendance, so refusing any
@@ -134,7 +146,16 @@ asked again for a reading they have already taken.
 
 Named `merchant_capacity_measured` and not `merchant_model_measured`: the
 merchant model is capacity AND speed, and speed has never been measured on this
-server. The tick covers the half that was read."""
+server. The tick covers the half that was read.
+
+v12 carries `morning_floor` and `pre_night_baseline`, the pair the night is
+derived and then checked against. Same criterion again: neither path carried
+them. `/night-profile` has always ACCEPTED them (`target_fill`, `baseline_fill`)
+while `/day-check` pinned the module defaults, so a night derived at one figure
+was checked against another and the disagreement showed up as a morning
+shortfall nobody could act on. They are the operator's own numbers -- how empty
+the stores get before bed and how full they want to wake up to -- and nothing in
+the game states either."""
 
 MAX_MERCHANTS_PER_VILLAGE = 20
 """Travian's hard ceiling on merchants in one village. The only bound on a
@@ -322,6 +343,40 @@ class SetupDocument(BaseModel):
     # exactly like an untouched 0.20. `StrictBool` like the answers above it,
     # and absent is "not answered", not "measured".
     merchant_capacity_measured: StrictBool | None = None
+    # The night's two ends. Optional, and absent means "use the planner's own"
+    # -- the reading every lever in `MerchantModelIn` already gets, and the one
+    # that keeps a document written before v12 planning exactly as it did.
+    #
+    # Not `StrictBool`-style refusals like the answers above them, because these
+    # are not answers the planner refuses to guess: it has a defensible default
+    # for each, and a document that omits them is complete rather than
+    # unanswered.
+    pre_night_baseline: float | None = Field(default=None, ge=0.0, le=MAX_STOCK_FLOOR_FRACTION)
+    morning_floor: float | None = Field(default=None, gt=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _floor_is_above_baseline(self) -> SetupDocument:
+        """The rule `DayCheckRequest` and `NightProfileRequest` both state.
+
+        Here as well, and for the store's own reason: a document the planner
+        would refuse is refused HERE rather than a week later when the operator
+        tries to plan from it. A model validator and not a field one, so it
+        holds whichever of the two the document happens to carry -- each falls
+        back to the planner's own figure, which is what the plan will use.
+        """
+        floor = self.morning_floor if self.morning_floor is not None else DEFAULT_TARGET_FILL
+        baseline = (
+            self.pre_night_baseline
+            if self.pre_night_baseline is not None
+            else DEFAULT_BASELINE_FILL
+        )
+        if floor <= baseline:
+            raise ValueError(
+                f"morning_floor {floor} is not above pre_night_baseline {baseline}; "
+                f"there would be no room for anything to arrive in overnight"
+            )
+        return self
+
     merchant_model: MerchantModelIn | None = None
     foreign_targets: list[ForeignTarget] = []
 

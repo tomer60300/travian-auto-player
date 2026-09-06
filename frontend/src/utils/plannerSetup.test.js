@@ -250,7 +250,7 @@ describe('profiles in the setup file', () => {
     // whenever a field is added, so that an older build refuses a file it would
     // otherwise half-load, and a literal is what makes forgetting the bump a
     // failing test rather than a tautology.
-    expect(setup.version).toBe(11)
+    expect(setup.version).toBe(12)
     expect(setup.profiles.Night.crop[20030].value).toBe(-8694)
     expect(setup.profile_windows.Night).toEqual(['23:00', '07:00'])
     expect(setup.merchant_model.base_capacity).toBe(2500)
@@ -2747,7 +2747,7 @@ describe('the merchant cap in the setup file', () => {
     // out-of-window firing live in the game; a v10 build dropping the
     // acknowledgement asks the operator for a reading they have already taken,
     // on every plan.
-    expect(SETUP_VERSION).toBe(11)
+    expect(SETUP_VERSION).toBe(12)
 
     const older = {
       format: SETUP_FORMAT,
@@ -3269,7 +3269,7 @@ describe('the reserved NPC-burst window in the setup file', () => {
     // whenever a field is added, so that an older build refuses a file it would
     // otherwise half-load, and a literal is what makes forgetting the bump a
     // failing test rather than a tautology.
-    expect(setup.version).toBe(11)
+    expect(setup.version).toBe(12)
     expect(setup.reserved_window).toEqual(['20:00', '21:00'])
     expect(roundTrip(setup).reservedWindow).toEqual(['20:00', '21:00'])
   })
@@ -3590,5 +3590,109 @@ describe('merchantModelIsCalibrated', () => {
   it('compares by value, not by type', () => {
     expect(merchantModelIsCalibrated({ base_capacity: '2500' })).toBe(false)
     expect(merchantModelIsCalibrated({ base_capacity: '2501' })).toBe(true)
+  })
+})
+
+describe('the night’s two ends (v12)', () => {
+  // Both boxes have always existed on the planner page and both already reach
+  // `/night-profile` as `baseline_fill` / `target_fill`. NEITHER persistence
+  // path carried them, which is the gap v9, v10 and v11 were each bumped for:
+  // the pair a night was derived at did not survive a reload, did not follow
+  // the operator between origins, and `/day-check` measured the result against
+  // the module defaults regardless. A night built to wake at 80% was checked
+  // against 60% and reported no shortfall it should have reported.
+
+  it('carries the pair the operator typed', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 19 },
+      morningFloor: 0.8,
+      preNightBaseline: 0.2,
+      exportedAt: STAMP,
+    })
+
+    expect(setup.morning_floor).toBe(0.8)
+    expect(setup.pre_night_baseline).toBe(0.2)
+    const back = roundTrip(setup)
+    expect(back.morningFloor).toBe(0.8)
+    expect(back.preNightBaseline).toBe(0.2)
+  })
+
+  it('leaves a blank box out, because absent means the planner’s own', () => {
+    // The reading every cleared lever on the page gets. Writing 0.6 in would
+    // make a default look like a figure the operator asserted.
+    const setup = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 19 },
+      morningFloor: null,
+      preNightBaseline: null,
+      exportedAt: STAMP,
+    })
+
+    expect('morning_floor' in setup).toBe(false)
+    expect('pre_night_baseline' in setup).toBe(false)
+    expect(roundTrip(setup).morningFloor).toBeNull()
+  })
+
+  it('never writes a floor of zero, which is a ceiling the night cannot fill', () => {
+    // The distinction the derivation already refuses over: `Number('') / 100`
+    // is 0, and an emptied box is not "wake up empty". `isMorningFloor` is
+    // `gt=0` for this reason, matching `DayCheckRequest.morning_floor`.
+    const setup = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 19 },
+      morningFloor: 0,
+      exportedAt: STAMP,
+    })
+
+    expect('morning_floor' in setup).toBe(false)
+  })
+
+  it('accepts a baseline of zero, because emptying completely is a thing a person does', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 19 },
+      preNightBaseline: 0,
+      exportedAt: STAMP,
+    })
+
+    expect(setup.pre_night_baseline).toBe(0)
+  })
+
+  it('refuses a floor at or below the baseline, as both endpoints do', () => {
+    const doc = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 1 }, exportedAt: STAMP })
+    doc.morning_floor = 0.2
+    doc.pre_night_baseline = 0.25
+
+    expect(() => roundTrip(doc)).toThrow(SetupFileError)
+    expect(() => roundTrip(doc)).toThrow(/not above/)
+  })
+
+  it('measures a lone floor against the baseline the plan will actually use', () => {
+    // Only one of the two typed is the common case. 0.2 clears nothing against
+    // the 0.25 default the plan falls back to, so it cannot pass just because
+    // its partner is absent -- the same fallback `SetupDocument`'s own
+    // validator applies.
+    const doc = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 1 }, exportedAt: STAMP })
+    doc.morning_floor = 0.2
+
+    expect(() => roundTrip(doc)).toThrow(/not above/)
+  })
+
+  it('refuses a figure off the scale rather than clamping it', () => {
+    const doc = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 1 }, exportedAt: STAMP })
+    doc.morning_floor = 1.5
+
+    expect(() => roundTrip(doc)).toThrow(/morning_floor/)
+  })
+
+  it('reads a v11 document as saying nothing about either', () => {
+    // A build that never wrote the pair is not an operator who cleared it, so
+    // loading one must leave both boxes exactly as they are.
+    const doc = { format: SETUP_FORMAT, version: 11, villages: [] }
+
+    const back = roundTrip(doc)
+    expect(back.morningFloor).toBeNull()
+    expect(back.preNightBaseline).toBeNull()
   })
 })

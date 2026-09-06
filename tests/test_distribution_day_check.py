@@ -14,6 +14,10 @@ import pytest
 from fastapi import HTTPException
 
 from travian_api.services.distribution.allocation import Resource
+from travian_api.services.distribution.night_profile import (
+    DEFAULT_BASELINE_FILL,
+    DEFAULT_TARGET_FILL,
+)
 from travian_api.services.distribution.optimizer import Route
 from travian_api.services.distribution.schedule import ScheduledRoute
 from travian_api.services.distribution.storage import ProfileSegment, simulate_profile_cycle
@@ -829,3 +833,106 @@ class TestTheReportedDayIsOneDay:
             "not whatever the sender happened to be holding at snapshot time"
         )
         assert net(full, 2) == pytest.approx(net(empty, 2))
+
+
+class TestTheNightsTwoEndsAreConfigurable:
+    """`morning_floor` and `pre_night_baseline` are the operator's, not the
+    module's.
+
+    `/night-profile` has always accepted them as `target_fill` and
+    `baseline_fill`; `/day-check` pinned `DEFAULT_TARGET_FILL` and
+    `DEFAULT_BASELINE_FILL` regardless of what the night had been derived at. A
+    night built to wake at 80% was therefore CHECKED against 60% and reported no
+    shortfall it should have reported -- and one built at 60% checked against a
+    baseline it never assumed.
+
+    The pair is one statement seen from both sides ("never overflow during the
+    night, never arrive empty at morning"), so the room the night has to fill is
+    the DIFFERENCE between them. That is why raising the floor is not as
+    expensive as it reads: against a 20% baseline, an 80% floor ships 60% of
+    capacity overnight, not 80%.
+    """
+
+    def _body(self, **extra):
+        return {
+            "snapshot": [],
+            "prune_to_window": True,
+            "segments": [
+                {"name": "Day", "window": [420, 1380], "allocations": {}},
+                {"name": "Night", "window": [1380, 420], "allocations": {}},
+            ],
+            **extra,
+        }
+
+    def test_the_defaults_are_the_modules_own(self):
+        body = DayCheckRequest.model_validate(self._body())
+
+        assert body.morning_floor == DEFAULT_TARGET_FILL
+        assert body.pre_night_baseline == DEFAULT_BASELINE_FILL
+
+    def test_the_operators_pair_is_taken_as_given(self):
+        body = DayCheckRequest.model_validate(self._body(morning_floor=0.8, pre_night_baseline=0.2))
+
+        assert body.morning_floor == 0.8
+        assert body.pre_night_baseline == 0.2
+
+    def test_the_response_echoes_what_was_asked_for_not_the_default(self):
+        """The figure the operator reads back has to be the one they were
+        measured against. Echoing the constant while checking against 0.8 is
+        how a shortfall becomes unattributable."""
+        body = DayCheckRequest.model_validate(
+            self._body(
+                morning_floor=0.8,
+                pre_night_baseline=0.2,
+                snapshot=[
+                    {
+                        "village_id": 1,
+                        "name": "02",
+                        "x": 0,
+                        "y": 0,
+                        "merchants_total": 20,
+                        "merchants_free": 20,
+                        "lumber_per_hour": 1000,
+                        "clay_per_hour": 1000,
+                        "iron_per_hour": 1000,
+                        "crop_per_hour": 1000,
+                        "crop_stock": 100_000,
+                        "granary_capacity": 800_000,
+                        "warehouse_capacity": 400_000,
+                    }
+                ],
+            )
+        )
+
+        res = asyncio.run(post_day_check(body, SimpleNamespace(id=1)))
+
+        assert res.morning_floor == 0.8
+        assert res.pre_night_baseline == 0.2
+
+    def test_a_floor_at_or_below_the_baseline_is_refused(self):
+        """There is no room for anything to arrive in, so the derivation's
+        ceiling goes zero or negative. The same rule `NightProfileRequest`
+        states, and it has to hold here too or the two endpoints disagree about
+        which pairs are legal."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError) as caught:
+            DayCheckRequest.model_validate(self._body(morning_floor=0.2, pre_night_baseline=0.25))
+        assert "not above" in str(caught.value)
+
+    def test_the_floor_is_compared_against_the_baseline_actually_sent(self):
+        """A floor legal against the default and illegal against the operator's
+        own baseline must be refused. Reading the constant instead of
+        `info.data` is the bug this pins -- 0.5 clears the 0.25 default and
+        does not clear a 0.6 baseline."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            DayCheckRequest.model_validate(self._body(morning_floor=0.5, pre_night_baseline=0.6))
+
+    @pytest.mark.parametrize("floor", [0.0, 1.5])
+    def test_a_floor_off_the_scale_is_refused(self, floor):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            DayCheckRequest.model_validate(self._body(morning_floor=floor))

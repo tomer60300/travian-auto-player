@@ -11,6 +11,20 @@
   one game request per page walked plus a batched query per 250 reports.
 - **A farm-list slot can be added parked.** `active` on the add-target request,
   so a target can be queued without raiding it yet.
+- **The night's two ends are the operator's figures, not the module's.**
+  `morning_floor` and `pre_night_baseline` on `/day-check`, and in the setup
+  document as **version 12**. `/night-profile` had always accepted the pair as
+  `target_fill` / `baseline_fill` while `/day-check` pinned
+  `DEFAULT_TARGET_FILL` and `DEFAULT_BASELINE_FILL` regardless — so a night
+  derived to wake at 80% was CHECKED against 60% and its shortfalls went
+  unreported. Neither figure survived a reload either: both boxes have been on
+  the planner page since the derivation shipped and neither persistence path
+  carried them, the same gap v9, v10 and v11 were bumped for. Defaults are
+  unchanged, so an existing document plans exactly as it did. The pair rule —
+  the floor must sit above the baseline, measured against the planner's own
+  figure for whichever half is absent — is enforced on the request, on the
+  document and in the page's parser, because a document the planner would
+  refuse must be refused where it is written.
 
 Both were recovered from an abandoned draft and landed on their own; the rest of
 that draft was reviewed and deliberately left behind, most of it because its
