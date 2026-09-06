@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **An enumeration of the coordinates you hold intel on.** `GET /api/reports/coords`
+  returns the distinct targets named by any raid or scout report in the window,
+  which the raid tooling previously had to re-derive for itself. The fan-out is
+  bounded at the edge — ten pages, a thirty-day window — because the call spends
+  one game request per page walked plus a batched query per 250 reports.
+- **A farm-list slot can be added parked.** `active` on the add-target request,
+  so a target can be queued without raiding it yet.
+
+Both were recovered from an abandoned draft and landed on their own; the rest of
+that draft was reviewed and deliberately left behind, most of it because its
+defence model reached its answers by routing around three refusals this release
+added, and asserted a defence of zero from reports it could not read.
+
 ## [1.0.0] — 2026-09-06
 
 The first version marked stable. It is a hardening release, not a feature
