@@ -41,6 +41,36 @@ async def list_reports(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=exc.message) from exc
 
 
+# ---------------------------------------------------------------------------
+# Coord enumeration (declared BEFORE /{report_id} so it doesn't collide)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/coords")
+async def list_report_coords(
+    max_age_hours: int = Query(
+        default=720, ge=1, le=720, description="Only enumerate reports newer than this"
+    ),
+    max_pages: int = Query(default=10, ge=1, le=10, description="Maximum pages to fetch"),
+    session: TravianSession = Depends(get_travian_session),
+):
+    """Distinct (x, y) coords across raid + scout reports in the window.
+
+    Not cheap: one game request per report-list page walked, plus one batched
+    GraphQL call per 250 reports found. Both bounds are deliberately tight —
+    `max_pages` matches `list_reports`, so the worst case is 10 pages and a
+    handful of batches, not the hundreds of requests an unbounded window would
+    spend.
+    """
+    try:
+        coords = await session.reports_service.list_unique_target_coords(
+            max_age_hours=max_age_hours, max_pages=max_pages
+        )
+    except TravianError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=exc.message) from exc
+    return {"coords": [{"x": x, "y": y} for x, y in coords]}
+
+
 @router.get("/{report_id}")
 async def get_report(
     report_id: str,

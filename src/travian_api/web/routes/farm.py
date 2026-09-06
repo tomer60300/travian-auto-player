@@ -31,6 +31,7 @@ class AddTargetRequest(BaseModel):
     x: int
     y: int
     troops: dict[str, int] | None = None
+    active: bool = True
     force: bool = False
 
 
@@ -281,6 +282,7 @@ async def add_target(
             x=body.x,
             y=body.y,
             units=body.troops,
+            active=body.active,
             force=body.force,
         )
     except TravianError as exc:

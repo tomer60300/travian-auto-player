@@ -163,6 +163,41 @@ class ReportsService:
         except Exception as e:
             raise ReportError(f"Failed to fetch report {report_id}: {e}") from e
 
+    async def list_unique_target_coords(
+        self,
+        max_age_hours: int = 720,
+        max_pages: int = 20,
+    ) -> List[Tuple[int, int]]:
+        """Distinct (x, y) target coords across raid + scout reports in *max_age_hours*.
+
+        Uses the existing robust list-fetch + GQL metadata batch (which is how
+        the analyzer's phase 1A already enumerates coords). Returns sorted
+        unique tuples. Battle and scout reports both contribute.
+
+        Costs one game request per report-list page walked (up to *max_pages*),
+        plus one batched GraphQL call per 250 reports the window holds. A
+        30-day window over a busy account is therefore tens of requests, not
+        one -- price it before calling.
+        """
+        reports_list, _, _, _ = await self.fetch_reports_robust(
+            max_age_hours=max_age_hours, max_pages=max_pages
+        )
+        relevant = [r for r in reports_list if r.report_type in ("scout", "battle")]
+        if not relevant:
+            return []
+        rids = [r.report_id for r in relevant]
+        coords: set[Tuple[int, int]] = set()
+        batch = 250
+        for i in range(0, len(rids), batch):
+            meta = await self.fetch_report_batch_metadata(rids[i : i + batch])
+            for m in meta.values():
+                defender = m.get("defender") or {}
+                village = defender.get("village") or {}
+                x, y = village.get("x"), village.get("y")
+                if x is not None and y is not None:
+                    coords.add((int(x), int(y)))
+        return sorted(coords)
+
     async def fetch_report_batch_metadata(self, report_ids: List[str]) -> Dict[str, Dict[str, Any]]:
         """
         Fetch metadata for multiple reports using GraphQL batch.
