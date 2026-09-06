@@ -1,6 +1,80 @@
 # Changelog
 
-## [Unreleased] — 2026-09-05
+## [1.0.0] — 2026-09-06
+
+The first version marked stable. It is a hardening release, not a feature
+release: the distribution planner and every other path that writes to the game
+were audited, driven against fakes, mutated, and corrected, and the protocol
+that governs the first real run was written and reviewed until an adversarial
+reviewer could find nothing left in the code.
+
+### Fixed — writes that reported more than they knew
+
+- **A raid could report as sent when it was not.** The troop dispatch's second
+  step treated an unreadable confirmation page as success whenever nothing on
+  it said otherwise, so an empty answer after the real, non-idempotent POST
+  read as a clean send. It is now an explicit unverified result carrying the
+  sentence the rest of the codebase uses: the original may already have taken
+  effect.
+- **A video reward said "claimed successfully" against a soft-block.** The
+  claim handler read an error key without first checking the answer's shape, so
+  the transport's wrapper for a non-JSON body fell through to the success
+  message, and a bare JSON array raised into the catch-all.
+- **An unreadable farm-list send body read as "troops exhausted"**, through a
+  comparison that is true of an empty result list — so the rest of the list was
+  silently never raided, behind a response identical to "the list was empty".
+- **No farm-list mutation read its body.** Every 2xx was "ok", including a
+  per-slot failure, an HTML soft-block and a non-object; a list create answered
+  `201 {"id": 0}` on four of five shapes.
+- **A build upgrade whose answer was lost was re-issued**, overshooting the
+  target by a level, because the level was re-read only on success.
+- **A scout sweep counted every target as sent** while the game refused them
+  all: a troop-movement banner forced success past the real check, so the
+  exhaustion guard never fired. A failed pre-flight read also meant "no limit"
+  rather than "could not check".
+- **Eight of ten writers billed nothing to the activity ceiling.** Billing now
+  happens once per request in the transport, so the throttle measures the
+  traffic instead of a minority of it.
+
+### Fixed — the interface
+
+- **Every WebSocket frame was dropped on three pages.** A mount effect that
+  returned only a cleanup left the mounted-guard false under strict mode: no
+  logs, no status, no summary, no error toast.
+- **The raid optimiser hung the tab.** Five nested loops multiplied, run during
+  render: a normal army was still unanswered after 170 seconds. The search is
+  bounded and off the render path — 95 ms for the army that never finished.
+- **Seven pages showed a fetch error as an empty list**, and the raid optimiser
+  computed confident plans off fabricated troop defaults with nothing said.
+- **The dark theme was unreachable** — committed CSS no control activated. It
+  now has one, and the danger button is legible in it.
+- Refusals that used to vanish in a four-second toast now persist where the
+  operator reads them, on the page whose next click writes to the account.
+
+### Added — the first live run
+
+- `docs/26-first-live-run.md`: a create-only canary the server enforces
+  mechanically, ten conditions checked before any write, and the eight
+  observations the run must produce before the write path is trusted.
+- `docs/27-bug-map.md` and `docs/28-production-readiness.md`: every failure
+  class against the test that pins it, and the checklist for running this
+  against a real account.
+- An explicit `execution_mode` on the execute request: `dry_run` alone is no
+  longer consent.
+
+### Changed — the tests
+
+- Mutation kill rate on the four services that spend troops and resources:
+  **38% → 97%**. On the planner it was already 74% and is now pinned by
+  sixteen further tests.
+- Every parallel worker gets its own database, closing a race that failed nine
+  runs in ten.
+- The browser suite runs in **11.9 minutes instead of 20.4**: one spec file
+  does image comparison, and it had 528 others pinned to a single worker.
+- Three tests that failed under load rather than under defects were rewritten
+  to assert the property instead of the machine's idleness.
+
+## [0.9.0] — 2026-09-05
 
 A review day rather than a feature day: six independent audits — contract and
 reachability, failure paths, accessibility, game mechanics, type checking and
