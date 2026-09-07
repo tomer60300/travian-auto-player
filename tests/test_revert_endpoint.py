@@ -25,11 +25,28 @@ from travian_api.web.routes import distribution as dist
 _USER = SimpleNamespace(id=1)
 
 
+def _session(svc):
+    return SimpleNamespace(
+        trade_route_service=svc,
+        server_url="https://world.example",
+        settings=SimpleNamespace(username="test-player"),
+    )
+
+
 def _trace_with(origin: int, inventory: list[dict]) -> str:
     """Write a finished trace whose recorded pre-state is `inventory`."""
     trace = execution_trace.ExecutionTrace()
-    trace.event("run_start", dry_run=False)
+    trace.event(
+        "run_start", dry_run=False, user=1, account=execution_trace.account_identity(_session(None))
+    )
     trace.event("origin_read", origin=origin, inventory=inventory)
+    created = [] if inventory else [dict(route_id=555, dest=30540, active=True)]
+    trace.event(
+        "verified",
+        origin=origin,
+        rows=[*inventory, *created],
+        undo_created_ids=[r["route_id"] for r in created],
+    )
     trace.close(created=1)
     return trace.run_id
 
@@ -69,7 +86,7 @@ class _Svc:
 
 def _call(trace_id, svc, **kw):
     body = dist.RevertPlanRequest(trace_id=trace_id, origins=[20003], **kw)
-    session = SimpleNamespace(trade_route_service=svc)
+    session = _session(svc)
     return asyncio.run(dist.post_revert_plan(body, _USER, session))
 
 
@@ -219,7 +236,7 @@ class TestAConcurrentExecutionBlocksTheUndo:
         async def _run():
             async with svc.execute_lock:  # an execution already holds it
                 body = dist.RevertPlanRequest(trace_id=trace, origins=[20003])
-                session = SimpleNamespace(trade_route_service=svc)
+                session = _session(svc)
                 with pytest.raises(HTTPException) as caught:
                     await dist.post_revert_plan(body, _USER, session)
                 return caught.value
@@ -235,7 +252,7 @@ class TestAConcurrentExecutionBlocksTheUndo:
         async def _run():
             async with svc.execute_lock:
                 body = dist.RevertPlanRequest(trace_id=trace, origins=[20003], apply_disable=True)
-                session = SimpleNamespace(trade_route_service=svc)
+                session = _session(svc)
                 with contextlib.suppress(HTTPException):
                     await dist.post_revert_plan(body, _USER, session)
 
@@ -293,7 +310,7 @@ class TestItRefusesRatherThanGuesses:
 
     def test_a_run_that_read_nothing_has_nothing_to_revert(self):
         trace = execution_trace.ExecutionTrace()
-        trace.event("run_start")
+        trace.event("run_start", user=1, account=execution_trace.account_identity(_session(None)))
         trace.close()
         with pytest.raises(HTTPException) as caught:
             _call(trace.run_id, _Svc([]))
@@ -339,6 +356,7 @@ class TestItCanFinishTheUndoItself:
 
         assert res.deleted_now == {20003: [555]}
         assert res.must_delete_by_hand == {}, "nothing left for a person to do"
+        assert res.clean
         assert any("confirmed gone" in s for s in res.steps)
         assert res.problems == []
 

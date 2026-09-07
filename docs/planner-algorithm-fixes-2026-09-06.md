@@ -73,6 +73,10 @@ so the old fixture no longer forces the scenario its assertion is testing.
 
 ## Still open — do not claim all optimization problems are solved
 
+Follow-up: [review resolution](planner-review-resolution-2026-09-07.md) fixes the
+unintended safety/UI findings and records the source evidence for retaining the
+three intentional model choices below. This section records the initial handoff.
+
 - **Pooled merchants:** accounting still reserves each route's peak independently.
   A phased pair of short trips may physically share a merchant while this model
   reserves two. No execution gate was relaxed. Replacing reservations requires
