@@ -7,9 +7,16 @@ reproducing one snapshot. A golden fixture of a 20-village plan would be stale
 the day it was written.
 """
 
+import hashlib
 import math
+import os
+import pickle
 import random
+import shutil
+import tempfile
+import time
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -90,10 +97,11 @@ def make_plans(
     return plans, productions
 
 
-# The largest account is marked slow rather than dropped: it is 14 of this
-# file's 128 cases but 11.4s of its 18.2s, so skipping it while iterating
-# (-m "not slow") is most of the wall clock for a ninth of the coverage. The
-# full gate still runs it.
+# The largest account is marked slow rather than dropped: skipping it while
+# iterating (-m "not slow") is most of this file's wall clock for a fraction of
+# its coverage, and the full gate still runs it. The figures this note used to
+# carry (14 of 128 cases, 11.4s of 18.2s) predate the shared plan cache below,
+# which took the file to 721 cases over the same 166 solves.
 ACCOUNT_SIZES = [
     1,
     2,
@@ -106,22 +114,186 @@ ACCOUNT_SIZES = [
 ]
 
 
-class TestScalesToAnyAccountSize:
-    @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
-    def test_produces_a_plan_without_error(self, village_count):
-        villages = make_account(village_count, seed=village_count)
-        plans, _ = make_plans(villages, seed=village_count)
+# Seed offsets every shared-plan invariant is checked against, and the cache
+# that makes checking all nine cost what checking one used to.
+#
+# Each invariant below used to build its OWN account from its OWN offset --
+# `seed=village_count + 3` for one, `+ 11` for the next -- so nine invariants
+# meant nine 40-village solves (8.09s each, measured 2026-09-07) and each
+# invariant was only ever asserted against a single account. A property that
+# holds on one random account and breaks on the next was invisible.
+#
+# Sharing all nine offsets across all nine invariants turns that around at NO
+# cost and NO loss: the distinct `(size, seed)` pairs are the same 72 this file
+# always solved, so the solve count is unchanged -- but each invariant is now
+# asserted against nine accounts instead of one, which is 648 checks where
+# there were 72.
+#
+# Keeping all nine, rather than a cheaper subset, is deliberate. Four offsets
+# would cut the solves to 32 and run faster, but it would DROP five accounts
+# this file has always exercised, and a property that holds on eight accounts
+# and breaks on the ninth is exactly what these tests exist to find. The speed
+# in this suite came from `--dist worksteal` and the cross-process cache below;
+# it must not be paid for out of coverage.
+#
+# Caching is sound because the inputs are pure and the output is deterministic:
+# `make_account` and `make_plans` are functions of `(count, seed)` alone, and
+# `TestDeterminism::test_replanning_unchanged_input_gives_an_identical_plan`
+# asserts that `build_plan` returns an identical plan for identical input --
+# which is exactly the licence to solve once. That test deliberately builds
+# twice and must NOT use this cache; nor may the four tests that need a
+# non-default `max_latency_hours`, since the plan depends on it.
+INVARIANT_SEED_OFFSETS = (0, 3, 11, 21, 31, 41, 71, 81, 100)
 
-        plan = build_plan(villages, plans, GEOMETRY, MODEL)
+_PLAN_CACHE: dict[tuple[int, int], tuple[dict, dict, object]] = {}
+
+
+def _solver_fingerprint() -> str:
+    """A hash of everything a cached plan depends on.
+
+    The on-disk cache below survives between runs and between xdist workers, so
+    the one thing that must never happen is a plan outliving the code that
+    produced it: a stale entry would assert an invariant against a solve from
+    before the change, and report green. So the directory name carries a hash
+    of the whole planner source AND of this file, which owns `make_account` and
+    `make_plans` -- edit either and the old entries become unreachable rather
+    than wrong.
+
+    Hashing content, not mtimes: a branch switch rewinds mtimes and would leave
+    a newer plan indexed under older code.
+    """
+    digest = hashlib.sha256()
+    root = Path(__file__).resolve().parent.parent / "src" / "travian_api"
+    try:
+        for source in sorted(root.rglob("*.py")):
+            digest.update(source.read_bytes())
+        digest.update(Path(__file__).resolve().read_bytes())
+    except OSError:
+        # A source file could not be read -- an editor mid-write, another agent
+        # working the same checkout, a file removed between glob and open. The
+        # digest is now of an unknown tree, so refuse to SHARE a cache rather
+        # than key one on a partial read: a unique name per process means this
+        # run simply solves for itself. Slower, and never wrong.
+        return f"unshared-{os.getpid()}-{time.time_ns()}"
+    return digest.hexdigest()[:16]
+
+
+_PLAN_CACHE_DIR = Path(tempfile.gettempdir()) / f"travian-plan-cache-{_solver_fingerprint()}"
+
+
+def _sweep_stale_caches() -> None:
+    """Reap cache directories left by earlier versions of the planner.
+
+    The directory name carries a source hash, so every edit to the planner or
+    to this file strands the previous one -- half a megabyte each, forever,
+    which over a few months of ordinary work is a lot of nothing in the
+    operator's temp directory.
+
+    Only directories untouched for a day are removed. A fresher one may belong
+    to a run happening RIGHT NOW in another checkout or another agent's
+    session, and pulling it out from under them would at best make their run
+    slow and at worst race a reader against the unlink. Best-effort throughout:
+    this is housekeeping, and a suite that fails because it could not tidy up
+    would be a worse bargain than the litter.
+    """
+    cutoff = time.time() - 24 * 60 * 60
+    for stale in Path(tempfile.gettempdir()).glob("travian-plan-cache-*"):
+        if stale == _PLAN_CACHE_DIR:
+            continue
+        try:
+            if stale.stat().st_mtime < cutoff:
+                shutil.rmtree(stale, ignore_errors=True)
+        except OSError:
+            pass
+
+
+_sweep_stale_caches()
+
+
+def _cached_on_disk(key: tuple[int, int]):
+    """The cross-PROCESS half of the memo, and the half that actually pays.
+
+    An in-process dict is worth nothing under xdist: the 648 cases sharing these
+    72 solves are handed to eight workers, so each worker rebuilt most of them
+    and the shared fixture cost MORE than the per-test accounts it replaced --
+    measured, 124s against 110s. This is the same trap `--dist load` sets for
+    every module-scoped fixture in the suite.
+
+    Pickle rather than JSON because the value must come back BIT-identical: the
+    plans carry floats that the invariants compare exactly, and a JSON round
+    trip is a re-parse, not a copy. The file is written by this suite and read
+    by this suite, under a directory keyed to the source that wrote it.
+    """
+    path = _PLAN_CACHE_DIR / f"{key[0]}-{key[1]}.pickle"
+    if path.exists():
+        try:
+            with path.open("rb") as handle:
+                return pickle.load(handle)
+        except (EOFError, pickle.UnpicklingError):
+            # A torn file from a killed run. Rebuild rather than fail.
+            return None
+    return None
+
+
+def _store_on_disk(key: tuple[int, int], value) -> None:
+    _PLAN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = _PLAN_CACHE_DIR / f"{key[0]}-{key[1]}.pickle"
+    # Written aside and renamed: eight workers can solve the same account at the
+    # same moment, and a reader must never see a half-written file.
+    staging = path.with_suffix(f".{os.getpid()}.tmp")
+    with staging.open("wb") as handle:
+        pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    os.replace(staging, path)
+
+
+def planned(village_count: int, seed: int):
+    """``(villages, plans, plan)`` for one account, solved at most once.
+
+    The villages mapping is REBUILT for each caller. `make_plans` stamps
+    `crop_per_hour` onto the states in place, so the pair has to be made
+    together -- and handing the same dict to every test would let one caller's
+    `replace()` reach another's assertions. `VillageState` is frozen, so a
+    shallow copy of the mapping is enough.
+
+    The plan itself is shared, not copied: every caller reads it. A test that
+    needs to MUTATE a plan must build its own.
+
+    **A test that monkeypatches the planner must NOT come through here.** The
+    disk cache is keyed on the planner SOURCE, and a `monkeypatch.setattr` does
+    not change a byte of it -- so a patched run would be served the unpatched
+    plan and pass without the patch ever taking effect. That is the same false
+    pass `_no_plan_cache` exists to prevent in `test_distribution_audit.py`.
+    The two tests in this file that patch the planner build their own plans
+    (`test_without_the_weight_the_same_account_splits_it` via `self._plan()`),
+    and the audit module's mutation guards run against its own memo, not this
+    one. Keep it that way.
+    """
+    key = (village_count, seed)
+    hit = _PLAN_CACHE.get(key)
+    if hit is None:
+        hit = _cached_on_disk(key)
+    if hit is None:
+        villages = make_account(village_count, seed=seed)
+        plans, _productions = make_plans(villages, seed=seed)
+        hit = (villages, plans, build_plan(villages, plans, GEOMETRY, MODEL))
+        _store_on_disk(key, hit)
+    _PLAN_CACHE[key] = hit
+    villages, plans, plan = hit
+    return dict(villages), plans, plan
+
+
+class TestScalesToAnyAccountSize:
+    @pytest.mark.parametrize("offset", INVARIANT_SEED_OFFSETS)
+    @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
+    def test_produces_a_plan_without_error(self, village_count, offset):
+        villages, plans, plan = planned(village_count, village_count + offset)
 
         assert set(plan.merchants_committed) == set(villages)
 
+    @pytest.mark.parametrize("offset", INVARIANT_SEED_OFFSETS)
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
-    def test_routes_only_reference_known_villages(self, village_count):
-        villages = make_account(village_count, seed=village_count + 100)
-        plans, _ = make_plans(villages, seed=village_count + 100)
-
-        plan = build_plan(villages, plans, GEOMETRY, MODEL)
+    def test_routes_only_reference_known_villages(self, village_count, offset):
+        villages, plans, plan = planned(village_count, village_count + offset)
 
         for route in plan.routes:
             assert route.origin in villages
@@ -337,15 +509,13 @@ def _material_relay_violations(plan, villages) -> list[str]:
 
 
 class TestStructuralInvariants:
+    @pytest.mark.parametrize("offset", INVARIANT_SEED_OFFSETS)
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
-    def test_never_ships_one_resource_both_ways_between_a_pair(self, village_count):
+    def test_never_ships_one_resource_both_ways_between_a_pair(self, village_count, offset):
         """Known issue #2. Impossible by construction -- netting in the
         allocation layer means a village cannot both send and receive the same
         resource -- so this asserts the property rather than a guard."""
-        villages = make_account(village_count, seed=village_count + 3)
-        plans, _ = make_plans(villages, seed=village_count + 3)
-
-        plan = build_plan(villages, plans, GEOMETRY, MODEL)
+        villages, plans, plan = planned(village_count, village_count + offset)
 
         carried: dict[tuple[int, int], set[Resource]] = {}
         for route in plan.routes:
@@ -354,8 +524,11 @@ class TestStructuralInvariants:
             back = carried.get((destination, origin), set())
             assert not (resources & back), f"{origin}<->{destination} both ways"
 
+    @pytest.mark.parametrize("offset", INVARIANT_SEED_OFFSETS)
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
-    def test_no_village_relays_a_material_unless_it_was_declared_a_relay(self, village_count):
+    def test_no_village_relays_a_material_unless_it_was_declared_a_relay(
+        self, village_count, offset
+    ):
         """The no-waterfall rule for W/C/I, AMENDED for section 5's declared tier.
 
         It used to read "no material village both sends and receives", full
@@ -379,10 +552,7 @@ class TestStructuralInvariants:
         matters, because it is the shape every existing account has.
         ``TestTheDeclaredRelayTier`` below exercises the exemption itself.
         """
-        villages = make_account(village_count, seed=village_count + 11)
-        plans, _ = make_plans(villages, seed=village_count + 11)
-
-        plan = build_plan(villages, plans, GEOMETRY, MODEL)
+        villages, plans, plan = planned(village_count, village_count + offset)
 
         assert _material_relay_violations(plan, villages) == []
 
@@ -618,12 +788,10 @@ class TestStructuralInvariants:
         assert collecting == {1}, f"the collecting leg was drawn from {sorted(collecting)}"
         assert plan.is_feasible
 
+    @pytest.mark.parametrize("offset", INVARIANT_SEED_OFFSETS)
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
-    def test_merchant_arithmetic_matches_the_cost_model(self, village_count):
-        villages = make_account(village_count, seed=village_count + 21)
-        plans, _ = make_plans(villages, seed=village_count + 21)
-
-        plan = build_plan(villages, plans, GEOMETRY, MODEL)
+    def test_merchant_arithmetic_matches_the_cost_model(self, village_count, offset):
+        villages, plans, plan = planned(village_count, village_count + offset)
 
         for route in plan.routes:
             expected = route_cost(
@@ -635,12 +803,10 @@ class TestStructuralInvariants:
             assert route.merchants_per_send == expected.merchants_per_send
             assert route.sets_in_flight == expected.sets_in_flight
 
+    @pytest.mark.parametrize("offset", INVARIANT_SEED_OFFSETS)
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
-    def test_committed_merchants_equal_the_sum_of_the_routes(self, village_count):
-        villages = make_account(village_count, seed=village_count + 31)
-        plans, _ = make_plans(villages, seed=village_count + 31)
-
-        plan = build_plan(villages, plans, GEOMETRY, MODEL)
+    def test_committed_merchants_equal_the_sum_of_the_routes(self, village_count, offset):
+        villages, plans, plan = planned(village_count, village_count + offset)
 
         per_origin: dict[int, int] = {vid: 0 for vid in villages}
         for route in plan.routes:
@@ -650,13 +816,11 @@ class TestStructuralInvariants:
 
 
 class TestBudgetIsReportedNotHidden:
+    @pytest.mark.parametrize("offset", INVARIANT_SEED_OFFSETS)
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
-    def test_every_over_budget_village_is_reported(self, village_count):
+    def test_every_over_budget_village_is_reported(self, village_count, offset):
         """Known issue #6: the cap must never be breached invisibly."""
-        villages = make_account(village_count, seed=village_count + 41)
-        plans, _ = make_plans(villages, seed=village_count + 41)
-
-        plan = build_plan(villages, plans, GEOMETRY, MODEL)
+        villages, plans, plan = planned(village_count, village_count + offset)
 
         reported = {o.village_id for o in plan.over_budget}
         for vid, used in plan.merchants_committed.items():
@@ -1134,7 +1298,11 @@ class TestCropRelay:
             f"routed through the far low-id hub (2) while the nearer hub (9) was available: {hops}"
         )
 
-    @pytest.mark.parametrize("village_count", [5, 12, 22, 40])
+    # 40 marked like `ACCOUNT_SIZES` does it, rather than switching to that list:
+    # the sizes here are this test's own choice, and widening them would add
+    # cases rather than mark the one that costs. Unmarked, `-m "not slow"`
+    # skipped every other 40-village case and still paid for this one.
+    @pytest.mark.parametrize("village_count", [5, 12, 22, pytest.param(40, marks=pytest.mark.slow)])
     def test_relay_never_makes_a_plan_worse(self, village_count):
         """Relay is adopted only when it strictly lowers the objective.
 
@@ -1172,7 +1340,11 @@ class TestRelayGraphStaysShallow:
     relaying a leg that ended at an existing hub extended the chain.
     """
 
-    @pytest.mark.parametrize("village_count", [5, 12, 22, 40])
+    # 40 marked like `ACCOUNT_SIZES` does it, rather than switching to that list:
+    # the sizes here are this test's own choice, and widening them would add
+    # cases rather than mark the one that costs. Unmarked, `-m "not slow"`
+    # skipped every other 40-village case and still paid for this one.
+    @pytest.mark.parametrize("village_count", [5, 12, 22, pytest.param(40, marks=pytest.mark.slow)])
     def test_crop_never_forms_a_chain_or_a_two_way_pair(self, village_count):
         villages = make_account(village_count, seed=village_count + 301)
         plans, _ = make_plans(villages, seed=village_count + 301)
@@ -1386,8 +1558,9 @@ class TestDeterminism:
 
 
 class TestFlowConservation:
+    @pytest.mark.parametrize("offset", INVARIANT_SEED_OFFSETS)
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
-    def test_every_village_nets_exactly_what_its_allocation_asked_for(self, village_count):
+    def test_every_village_nets_exactly_what_its_allocation_asked_for(self, village_count, offset):
         """Inflow minus outflow equals the allocation, for EVERY village.
 
         This supersedes the older pair of one-directional checks ("a receiver
@@ -1399,10 +1572,7 @@ class TestFlowConservation:
         matters -- nothing may be created or destroyed at any village -- and it
         holds whether or not relay fires, so it is the stronger statement.
         """
-        villages = make_account(village_count, seed=village_count + 71)
-        plans, _ = make_plans(villages, seed=village_count + 71)
-
-        plan = build_plan(villages, plans, GEOMETRY, MODEL)
+        villages, plans, plan = planned(village_count, village_count + offset)
 
         for resource, resource_plan in plans.items():
             inflow: dict[int, float] = {}
@@ -1455,15 +1625,13 @@ class TestFlowConservation:
         # The 1,000 that *could* be shipped still is.
         assert plan.routes[0].cargo_per_hour[Resource.IRON] == pytest.approx(1000.0)
 
+    @pytest.mark.parametrize("offset", INVARIANT_SEED_OFFSETS)
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
-    def test_no_village_sends_more_material_than_its_surplus(self, village_count):
+    def test_no_village_sends_more_material_than_its_surplus(self, village_count, offset):
         """For W/C/I gross outflow is still capped by the village's own surplus:
         those never relay, so there is no forwarded cargo to account for. Crop is
         covered by the net-flow invariant above instead."""
-        villages = make_account(village_count, seed=village_count + 81)
-        plans, _ = make_plans(villages, seed=village_count + 81)
-
-        plan = build_plan(villages, plans, GEOMETRY, MODEL)
+        villages, plans, plan = planned(village_count, village_count + offset)
 
         for resource in (Resource.LUMBER, Resource.CLAY, Resource.IRON):
             resource_plan = plans[resource]

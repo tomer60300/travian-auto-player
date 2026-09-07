@@ -153,6 +153,37 @@ show_error_codes = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Pinned so a fixture's loop scope is a decision rather than a default that
+# moves under us on the next pytest-asyncio release, which is what the
+# deprecation warning it emitted was about.
+asyncio_default_fixture_loop_scope = "function"
+# `--dist worksteal` and NOT `-n`. Measured 2026-09-07 over the full suite,
+# wall clock including `uv run`:
+#
+#     -n 8  --dist load        157s   (the default, what we ran before)
+#     -n 8  --dist worksteal   110s
+#     -n 12 --dist worksteal   123s
+#     -n 12 --dist load        138s
+#
+# worksteal is worth 30% because this suite's cost is a long tail -- the
+# slowest single case is ~30s and the top 40 are ~424 CPU-seconds -- and
+# xdist's default `load` hands out fixed chunks up front, so one worker keeps
+# the tail while the rest idle. worksteal lets an idle worker take it.
+#
+# MORE WORKERS ARE SLOWER: every worker re-imports pytest, runs conftest's
+# isolation and collects all 149 test modules, ~4.3s each, so -n 12 spends
+# more on bootstrap than it wins back on 12 cores.
+#
+# `-n` is deliberately NOT here. It belongs on the full run only: for a
+# single-file run the 9-process bootstrap costs more than the tests do, and
+# that run is the inner loop this suite is most often used in.
+addopts = "--dist worksteal"
+filterwarnings = [
+    # Starlette's own deprecation, emitted by `fastapi.testclient` at import
+    # and therefore on every collection. Nothing here can act on it until
+    # FastAPI moves, and it buries warnings we could act on.
+    "ignore:Using `httpx` with `starlette.testclient`:DeprecationWarning",
+]
 markers = [
     "slow: heavy planner cases; skip while iterating with -m \"not slow\"",
 ]

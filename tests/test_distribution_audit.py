@@ -987,6 +987,13 @@ class TestTheGuardsActuallyGuard:
         with _no_plan_cache(), self.MUTATIONS[name](), pytest.raises(AssertionError):
             self.GUARDS[name]()
 
+    # Slow, and the control for the matrix above rather than a property of its
+    # own: each case re-runs a real planner guard that already runs as its own
+    # test elsewhere, so it is six extra plan solves for a second opinion on
+    # code the suite has already exercised. The full gate still runs it -- that
+    # second opinion is the whole point, since a guard that cannot pass clean
+    # would make every xfail above meaningless.
+    @pytest.mark.slow
     @pytest.mark.parametrize("name", sorted(GUARDS))
     def test_every_guard_passes_on_unmutated_code(self, name: str) -> None:
         self.GUARDS[name]()

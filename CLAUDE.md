@@ -103,14 +103,55 @@ Every task MUST follow this exact pipeline. Do not skip steps.
 
 ### Phase 3: Verify
 
-Scope the gate to what you actually changed. Budget a couple of minutes for the
-full backend suite in parallel (`-n 8`), not one: measured 2026-09-05 on this
-machine, **135s over 2,646 tests** (2,646 passed, 2 skipped) — and it has stayed
-near two minutes as the suite grew from 1,911 tests (107s warm, 199s cold)
-through 2,031 (99s), 2,431 (102s) and 2,573 (129s), against 235–240s serial. The wall time is dominated by the slowest few
-cases, not the count, so adding tests has cost far less than it looks like it
-should. Even at two minutes, running it to verify a Markdown edit verifies
-nothing and is pure waste.
+Scope the gate to what you actually changed. **The full suite is a pre-commit
+gate, not an edit-test loop.** Measured 2026-09-07 on this machine, wall clock
+including `uv run`:
+
+| run | wall | tests |
+|---|---|---|
+| one test file, no xdist — **the inner loop** | **~5s** | 53 |
+| `-n 8 -m "not slow"` | **48s** | 3,663 |
+| `-n 8`, full gate | **~110s** | 3,828 |
+
+Those are a quiet machine. Repeated runs while another agent was working the
+same checkout measured 109s, 122s and once 154s — so treat a single slow run
+as contention, not a regression, and re-measure before believing it.
+
+History, so the trend is legible: 1,911 tests took 107s warm / 199s cold, then
+2,031 (99s), 2,431 (102s), 2,573 (129s), 2,646 (135s), and 3,252 took **157s**
+before the 2026-09-07 work below. That work took it to 111s while *adding* 576
+tests — so the suite is 29% faster carrying 18% more than it did an hour
+earlier, and nothing was deleted, skipped or weakened to get there.
+
+Three things got it there, and they are worth knowing before you try to make it
+faster again:
+
+- **`--dist worksteal`, now in `addopts`** (157s → 110s, 30% for free). The cost
+  is a long tail — the slowest case is ~30s and the top 40 are ~424 CPU-seconds
+  — and xdist's default `load` hands out fixed chunks up front, so one worker
+  keeps the tail while seven idle.
+- **A cross-process plan cache** in `tests/test_distribution_optimizer.py`. An
+  in-process memo is worth nothing under xdist and actually cost 14s: read
+  `planned()`'s docstring before touching it, especially the note on why a
+  monkeypatching test must never come through it. It also let nine invariants
+  share nine accounts instead of owning one each — the same 72 solves that file
+  always did, now backing 648 checks instead of 72.
+- **Fixing three `slow`-marker leaks.** `-m "not slow"` used to buy 17%; it now
+  buys 57%.
+
+What did NOT buy time, so nobody re-treads it: `--dist loadfile` (pinning a file
+to one worker makes `test_distribution_audit.py`, 123.5s of CPU on its own, the
+long pole); a disk cache for that file's `_post_plan` (29% in-process hit rate,
+against having to touch the machinery that stops a mutation guard passing
+falsely); and decoupling `distribution_synthetic.py` from the web layer (the
+files paying that import build `PlanRequest` and call `post_plan` anyway).
+
+**More workers are slower.** `-n 12` measured 123s against `-n 8`'s 110s: every
+worker re-imports pytest, runs conftest's isolation and collects all 149 test
+modules, ~4.3s each. For the same reason `-n` is deliberately NOT in `addopts`
+— on a single-file run the 9-process bootstrap costs more than the tests do.
+
+Even at 97s, running the suite to verify a Markdown edit verifies nothing.
 
 **Always:**
 1. Backend linting, if any Python changed: `uv run ruff check . && uv run ruff format --check .`
@@ -138,15 +179,29 @@ nothing and is pure waste.
    alike: the conftest marks only the paths it invented itself
    (`PYTEST_TRAVIAN_SUITE_DB_PATH`) and re-isolates only those. So an
    `already exists` failure under `-n 8` is now a real finding rather than
-   this. The other side of the same coin: with the default `--dist load` two
-   tests from one module can land on different workers, so a test must never
-   lean on rows another test wrote.
+   this. The other side of the same coin: tests from one module land on
+   different workers, so a test must never lean on rows another test wrote —
+   and a module-scoped fixture is really a PER-WORKER fixture, which is how an
+   expensive shared plan came to be rebuilt eight times.
    While iterating, `-m "not slow"` skips the heavy cases: the oracle
    agreement checks, the relabelling permutations, the mutation guards, and
-   every 40-village planner case. Measured 2026-09-03 with `-n 8` over 2,031
-   tests: 99s full, 82s skipping slow — the marker buys less than it looks like
-   it should, because the slow cases run in parallel with everything else.
+   every 40-village planner case. Measured 2026-09-07 with `-n 8`: **48s over
+   3,663 tests against 111s over 3,828** — the marker is worth reaching for
+   again, now that the three cases leaking past it have been marked.
    Run the full set (still `-n 8`) before committing.
+
+**The inner loop — do this, not the full suite, while you work:**
+
+```bash
+# the area you touched. NO -n: xdist spawns 9 processes and each pays ~4.3s
+uv run --extra dev --extra web pytest tests/test_<area>.py -q
+# after a red run, just what failed
+uv run --extra dev --extra web pytest --lf -q
+# everything but the heavy planner cases
+uv run --extra dev --extra web pytest -q -n 8 -m "not slow"
+# the gate, before you commit
+uv run --extra dev --extra web pytest -q -n 8
+```
 
 **Frontend changed:**
 5. `cd frontend && npx eslint . --max-warnings=20 && npm test`
