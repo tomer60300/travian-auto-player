@@ -36,10 +36,12 @@ be told which village and which role made their declaration impossible.
 Three stages, per profile section 14 (``cluster -> assign -> improve``):
 
 1. **Greedy seed** -- :func:`_flows_for_resource` matches each receiver to its
-   nearest senders, largest demand first. Deterministic and explainable, but
-   order-dependent and blind to merchant cost.
+   nearest senders, largest demand first, then repairs unmet demand through
+   residual augmenting paths. This maximizes direct cargo served under the
+   exclusions, but does not optimize merchant cost.
 2. **Merchant-aware local search** -- :func:`_improve_flows` reassigns that seed
-   with 2x2 swaps, keeping only moves that strictly lower the lexicographic
+   with 2x2 swaps and coordinated three-route rotations, keeping only moves
+   that strictly lower the lexicographic
    objective ``(over_budget_excess, total_merchants + SOFT_BUDGET_PRICE x
    soft_excess, route_count)``: hard feasibility first, then the merchant total
    with crowding past each village's soft cap priced into it, so spreading load
@@ -49,8 +51,9 @@ Three stages, per profile section 14 (``cluster -> assign -> improve``):
 3. **Latency pass** -- :func:`_spend_idle_merchants_on_latency` then hands each
    village's *idle* merchants (those the SOFT budget allows but the
    merchant-minimal plan left unused -- never the headroom reserve) to the
-   routes furthest over the latency target, shortening
-   their cycles while keeping merchants full (:data:`MIN_SEND_FILL`). It spends
+   best combination of shorter cycles using a per-origin dynamic program.
+   It minimizes target violations, then summed latency, then merchants, while
+   respecting the minimum send fill (:data:`MIN_SEND_FILL`). It spends
    strictly within budget, so feasibility never regresses, and runs only when a
    target is set. Its reach is bounded by geometry: on a spread-out account the
    one-way trip dwarfs the cycle wait, so cycle choice can only do so much --
@@ -74,7 +77,8 @@ Three stages, per profile section 14 (``cluster -> assign -> improve``):
 5. **Declared material relay** -- :func:`_relay_tier_flows`, which is not part
    of the search at all. Whatever the direct pass could not reach is served over
    two legs through the villages the operator named, and the result is merged
-   into the assignment after :func:`_improve_flows` has finished. It runs on
+   into the assignment after :func:`_improve_flows` has finished. Its cargo is
+   nevertheless priced as fixed background load during that search. It runs on
    materials only, because crop already has the searched relay above.
 
 What it still does *not* do is claim global optimality (the problem is NP-hard,
@@ -84,8 +88,10 @@ A village over its merchant budget is reported, never hidden.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from itertools import combinations
 
 from .allocation import EPSILON, MATERIALS, AllocationMode, Resource, ResourcePlan, village_label
 from .findings import Category, Finding
@@ -217,6 +223,11 @@ class VillageState:
     @property
     def coords(self) -> tuple[int, int]:
         return (self.x, self.y)
+
+    @property
+    def routing_key(self) -> tuple[int, int, int, int, str]:
+        """Geography first; distinguish synthetic co-located villages without IDs."""
+        return (*self.coords, self.merchant_count, self.trade_office_level, self.name)
 
     def spare_merchants(self, reserve: int = DEFAULT_MERCHANT_RESERVE) -> int:
         """What the FLEET can field: the merchants it has, less the reserve."""
@@ -668,7 +679,7 @@ def _flows_for_resource(
     names: Mapping[int, str] | None = None,
     excluded: Mapping[int, set[int]] | None = None,
 ) -> tuple[dict[tuple[int, int], float], list[Shortfall]]:
-    """Match receivers to their nearest senders, largest demand first.
+    """Seed nearest-first, then repair shortfalls with residual reassignments.
 
     Largest-first keeps the awkward villages from being left with only distant
     surplus, and iterating in a sorted order makes the result deterministic --
@@ -695,11 +706,67 @@ def _flows_for_resource(
     }
     demand = sorted(
         (v for v in plan.receivers if v.village_id in villages),
-        key=lambda v: (-v.ship_per_hour, villages[v.village_id].coords),
+        key=lambda v: (-v.ship_per_hour, villages[v.village_id].routing_key),
     )
 
     flows: dict[tuple[int, int], float] = {}
     shortfalls: list[Shortfall] = []
+
+    def augment(destination: int, needed: float) -> float:
+        """Find residual supply, undoing earlier assignments along the path."""
+        start = (True, destination)
+        parents: dict[tuple[bool, int], tuple[bool, int] | None] = {start: None}
+        queue = deque([start])
+        while queue:
+            node = queue.popleft()
+            receiver_node, vid = node
+            if not receiver_node and surplus[vid] > EPSILON:
+                path = [node]
+                while parents[path[-1]] is not None:
+                    parent = parents[path[-1]]
+                    assert parent is not None
+                    path.append(parent)
+                amount = min(needed, surplus[vid])
+                for previous, current in zip(path, path[1:]):
+                    if previous[0]:
+                        amount = min(amount, flows[(current[1], previous[1])])
+                for previous, current in zip(path, path[1:]):
+                    edge = (current[1], previous[1]) if previous[0] else (previous[1], current[1])
+                    flows[edge] = flows.get(edge, 0.0) + (-amount if previous[0] else amount)
+                    if flows[edge] <= EPSILON:
+                        del flows[edge]
+                surplus[vid] -= amount
+                return amount
+            if receiver_node:
+                forbidden: Collection[int] = (excluded or {}).get(vid, frozenset())
+                neighbors = [
+                    (False, origin)
+                    for origin in sorted(
+                        surplus,
+                        key=lambda o: (
+                            geometry.distance(villages[o].coords, villages[vid].coords),
+                            villages[o].routing_key,
+                        ),
+                    )
+                    if origin != vid and origin not in forbidden
+                ]
+            else:
+                neighbors = [
+                    (True, dest)
+                    for origin, dest in sorted(
+                        flows,
+                        key=lambda edge: (
+                            villages[edge[0]].routing_key,
+                            villages[edge[1]].routing_key,
+                        ),
+                    )
+                    if origin == vid and flows[(origin, dest)] > EPSILON
+                ]
+            for neighbor in neighbors:
+                if neighbor not in parents:
+                    parents[neighbor] = node
+                    queue.append(neighbor)
+        return 0.0
 
     for receiver in demand:
         remaining = receiver.ship_per_hour
@@ -708,7 +775,7 @@ def _flows_for_resource(
         # bad trade -- it is minimising merchants across the whole plan and has no
         # way to know those nine are wanted elsewhere. That judgement belongs to
         # whoever runs the account.
-        banned = (excluded or {}).get(receiver.village_id, frozenset())
+        banned: Collection[int] = (excluded or {}).get(receiver.village_id, frozenset())
         candidates = sorted(
             (
                 vid
@@ -717,7 +784,7 @@ def _flows_for_resource(
             ),
             key=lambda vid: (
                 geometry.distance(villages[vid].coords, villages[receiver.village_id].coords),
-                villages[vid].coords,
+                villages[vid].routing_key,
             ),
         )
         for origin in candidates:
@@ -729,6 +796,12 @@ def _flows_for_resource(
             )
             surplus[origin] -= taken
             remaining -= taken
+
+        while remaining > EPSILON:
+            repaired = augment(receiver.village_id, remaining)
+            if repaired <= EPSILON:
+                break
+            remaining -= repaired
 
         if remaining > EPSILON:
             # WHY it could not be routed, not just that it could not. The loop
@@ -923,12 +996,12 @@ def _relay_tier_flows(
                 for vid in relay_for[relay]
                 if unmet.get(vid, 0.0) > EPSILON and vid not in relays
             },
-            key=lambda vid: (-unmet[vid], villages[vid].coords),
+            key=lambda vid: (-unmet[vid], villages[vid].routing_key),
         )
         wanted = sum(unmet[vid] for vid in downstream)
         if wanted <= EPSILON:
             continue
-        banned = (excluded or {}).get(relay, frozenset())
+        banned: Collection[int] = (excluded or {}).get(relay, frozenset())
 
         def over_budget(vid: int, relay: int = relay, wanted: float = wanted) -> int:
             """Merchants this source would commit beyond its remaining budget.
@@ -954,7 +1027,7 @@ def _relay_tier_flows(
             key=lambda vid: (
                 over_budget(vid),
                 geometry.distance(villages[vid].coords, villages[relay].coords),
-                villages[vid].coords,
+                villages[vid].routing_key,
             ),
         )
         collected = 0.0
@@ -1037,7 +1110,7 @@ _SwapMove = tuple[
     tuple[int, float, int, float],
     list[tuple[FlowKey, "Resource", float]],
     _SwapState,
-    tuple[tuple[tuple[int, int], tuple[int, int]], ...],
+    tuple[tuple[tuple[int, int, int, int, str], tuple[int, int, int, int, str]], ...],
 ]
 Assignment = dict[Resource, dict[FlowKey, float]]
 
@@ -1286,110 +1359,64 @@ def _spend_idle_merchants_on_latency(
     min_send_fill: float = MIN_SEND_FILL,
     max_cycle: Mapping[int, int] | None = None,
 ) -> list[Route]:
-    """Shorten over-target routes by spending each village's idle merchants.
+    """Optimize each origin's cycle choices within its soft merchant budget.
 
-    Merchant minimisation drives routes to long cycles (a 24h cycle can save one
-    merchant over a 3h one), so the cheapest plan is also the slowest — measured
-    at a median 5.6h against a 2h target. Yet villages carry idle merchants the
-    budget already allows. This pass hands those idle merchants to the routes
-    that most need speed: for each village it repeatedly picks the affordable
-    shorter cycle giving the best latency cut per merchant, spending strictly
-    within ``budget - already_committed`` so a village can never be pushed over
-    its cap. The caller decides which cap: build_plan hands in the SOFT budgets,
-    so speed is bought only with merchants the headroom policy considers
-    spendable -- never with the reserve the plan promised to leave uncommitted. Compliant routes (<= target) are left alone rather than
-    over-shortened, and a route whose one-way trip alone exceeds the target is
-    still sped up as far as the spare budget reaches.
-
-    Runs only when a latency target is set; with ``None`` the plan stays purely
-    merchant-minimal.
+    Minimize target violations, then summed latency, then merchant commitment.
+    Keep original cycles eligible regardless of fill; shortening must meet fill.
     """
     result = list(routes)
     by_origin: dict[int, list[int]] = {}
-    for index, route in enumerate(result):
+    for index, route in enumerate(routes):
         by_origin.setdefault(route.origin, []).append(index)
-
-    for origin in sorted(by_origin):
+    for origin, indices in by_origin.items():
+        indices.sort(key=lambda i: villages[routes[i].destination].routing_key)
+        budget = budgets.get(origin, 0)
+        if sum(routes[i].merchants_committed for i in indices) > budget:
+            continue
         capacity = merchant_model.capacity(villages[origin].trade_office_level)
-        indices = by_origin[origin]
-        spare = budgets.get(origin, 0) - sum(result[i].merchants_committed for i in indices)
-        while spare > 0:
-            # SEVEN elements in the key, not five: two geometry tie-breakers
-            # were added to it and this was never widened.
-            best: (
-                tuple[
-                    tuple[int, int, float, int, int, tuple[int, int], tuple[int, int]],
-                    int,
-                    int,
-                    int,
-                    int,
-                ]
-                | None
-            ) = None
-            for i in indices:
-                route = result[i]
-                # Every route is a candidate, not only the ones over target.
-                # A 1h cycle really is better than a 3h one, so once the routes
-                # that breach the target have been dealt with, leftover idle
-                # merchants keep buying speed on the rest. Routes that already
-                # comply are simply ranked last, via `urgency` below.
-                urgency = int(route.latency_hours > latency_target)
-                one_way = route.one_way_minutes
-                for cost in cycle_sweep(
-                    route.hourly_total,
-                    2.0 * one_way,
-                    capacity,
-                    _cycles_for(route.destination, cycles, max_cycle),
-                ):
-                    if cost.cycle_hours >= route.cycle_hours:
-                        continue  # only a shorter cycle lowers latency
-                    delta = cost.merchants_committed - route.merchants_committed
-                    if delta <= 0 or delta > spare:
-                        continue
-                    new_latency = cost.cycle_hours + one_way / 60.0
-                    if new_latency >= route.latency_hours:
-                        continue
-                    # Don't buy speed with half-empty merchants (axis 2).
-                    if cost.batch < min_send_fill * cost.merchants_per_send * capacity:
-                        continue
-                    compliant = int(new_latency <= latency_target)
-                    per_merchant = (route.latency_hours - new_latency) / delta
-                    # Fix what breaches the target first, then buy the biggest
-                    # remaining latency cut per merchant spent.
-                    # The last two keys are geometry, so a tie cannot fall to
-                    # the route's position in an id-ordered list.
-                    key = (
-                        urgency,
-                        compliant,
-                        per_merchant,
-                        -delta,
-                        -cost.cycle_hours,
-                        villages[route.origin].coords,
-                        villages[route.destination].coords,
+        states: dict[int, tuple[int, int, tuple[Route, ...]]] = {0: (0, 0, ())}
+        for index in indices:
+            route = routes[index]
+            options = [route]
+            for cost in cycle_sweep(
+                route.hourly_total,
+                2 * route.one_way_minutes,
+                capacity,
+                _cycles_for(route.destination, cycles, max_cycle),
+            ):
+                if cost.cycle_hours >= route.cycle_hours:
+                    continue
+                if cost.batch < min_send_fill * cost.merchants_per_send * capacity:
+                    continue
+                options.append(
+                    Route(
+                        origin,
+                        route.destination,
+                        route.cargo_per_hour,
+                        cost.cycle_hours,
+                        cost.merchants_per_send,
+                        cost.sets_in_flight,
+                        route.one_way_minutes,
                     )
-                    if best is None or key > best[0]:
-                        best = (
-                            key,
-                            i,
-                            cost.cycle_hours,
-                            cost.merchants_per_send,
-                            cost.sets_in_flight,
-                        )
-                        best_delta = delta
-            if best is None:
-                break
-            _, i, cycle_hours, merchants_per_send, sets_in_flight = best
-            route = result[i]
-            result[i] = Route(
-                origin=route.origin,
-                destination=route.destination,
-                cargo_per_hour=route.cargo_per_hour,
-                cycle_hours=cycle_hours,
-                merchants_per_send=merchants_per_send,
-                sets_in_flight=sets_in_flight,
-                one_way_minutes=route.one_way_minutes,
-            )
-            spare -= best_delta
+                )
+            following: dict[int, tuple[int, int, tuple[Route, ...]]] = {}
+            for used, (violations, hours, chosen) in states.items():
+                for option in options:
+                    total = used + option.merchants_committed
+                    if total > budget:
+                        continue
+                    candidate = (
+                        violations + int(option.latency_hours > latency_target),
+                        hours + option.cycle_hours,
+                        (*chosen, option),
+                    )
+                    incumbent = following.get(total)
+                    if incumbent is None or candidate[:2] < incumbent[:2]:
+                        following[total] = candidate
+            states = following
+        _, best = min(states.items(), key=lambda item: (*item[1][:2], item[0]))
+        for index, route in zip(indices, best[2], strict=True):
+            result[index] = route
     return result
 
 
@@ -1397,6 +1424,10 @@ def _spend_idle_merchants_on_latency(
 # deduped and taken largest-first; the cap bounds refinement cost without
 # silently dropping the full transfer, which is always included.
 MAX_BREAKPOINT_CANDIDATES = 12
+
+# Compound neighborhoods grow cubically. Bound work across the entire search,
+# and surface exhaustion instead of claiming the neighborhood was exhausted.
+MAX_ROTATION_CANDIDATES = 200_000
 
 
 def breakpoint_candidates(
@@ -1479,6 +1510,7 @@ def _improve_flows(
     # a caller that does not supply it gets direct routes rather than a search
     # quietly free to draft any village it likes.
     relay_hub_candidates: Collection[int] = (),
+    fixed_assignment: Assignment | None = None,
 ) -> tuple[Assignment, bool]:
     """Lower merchant commitment by reassigning flow, seeded by the greedy plan.
 
@@ -1487,12 +1519,14 @@ def _improve_flows(
     land on far-flung leftover receivers and blow its merchant budget. This is
     the "local improvement" pass the profile (§14) always intended.
 
-    The one move is a **2x2 swap** within a single resource: two flows
+    The primary move is a **2x2 swap** within a single resource: two flows
     ``o1->d1`` and ``o2->d2`` become ``o1->d2`` and ``o2->d1``, shifting the
     same rate ``t = min(both)``. It preserves every origin's total outflow and
     every destination's total inflow, so conservation, the surplus ceiling, the
     no-two-way-pair rule and the no-waterfall rule all survive untouched — a
-    sender stays a sender, a receiver stays a receiver. Cross-resource bundling
+    sender stays a sender, a receiver stays a receiver. Three-route rotations
+    preserve the same margins and can escape pairwise local minima. Neither
+    neighborhood establishes global optimality. Cross-resource bundling
     falls out for free: cost is measured on the *merged* pair cargo, so a swap
     that lands a resource on a pair another resource already uses is rewarded.
 
@@ -1507,7 +1541,8 @@ def _improve_flows(
 
     Returns:
         ``(flows, converged)``. ``converged`` is False when ``max_passes`` ran
-        out with improvements still available — the caller must surface that,
+        out, or the compound-candidate budget was exhausted. Better moves may
+        remain — the caller must surface that,
         because a truncated search overstates ``over_budget_excess`` (the *first*
         objective key), and that number drives both the over-budget report and
         the Trade Office upgrade advice built from it.
@@ -1606,6 +1641,12 @@ def _improve_flows(
         return cached
 
     pair = _merge_pair_cargo(flows)
+    # Declared material relays cannot be rewired, but their merged cargo and
+    # merchant use must participate in every candidate's objective.
+    for key, cargo in _merge_pair_cargo(fixed_assignment or {}).items():
+        merged = pair.setdefault(key, {})
+        for resource, amount in cargo.items():
+            merged[resource] = merged.get(resource, 0.0) + amount
     # Tonnage per pair, kept in sync by _commit_changes rather than re-summed.
     # The scored candidate's own sum is what gets stored, so the value here is
     # always bit-identical to `sum(pair[key].values())` -- the pair dicts are
@@ -1801,8 +1842,8 @@ def _improve_flows(
                 pair_merch[key] = new_merch[key]
             else:
                 pair_merch.pop(key, None)
-        for origin, delta in per_origin.items():
-            committed[origin] = committed.get(origin, 0) + delta
+        for origin, merchant_delta in per_origin.items():
+            committed[origin] = committed.get(origin, 0) + merchant_delta
         for key, resource, delta in changes:
             legs = flows[resource]
             legs[key] = legs.get(key, 0.0) + delta
@@ -1947,9 +1988,9 @@ def _improve_flows(
                 key = (
                     delta,
                     one_way_cache.get((origin, hub), 0.0),
-                    villages[hub].coords,
-                    villages[origin].coords,
-                    villages[destination].coords,
+                    villages[hub].routing_key,
+                    villages[origin].routing_key,
+                    villages[destination].routing_key,
                 )
                 if best is None or key < best[0]:
                     best = (key, hub, changes, state)
@@ -2072,13 +2113,58 @@ def _improve_flows(
                     geo = tuple(
                         sorted(
                             (
-                                (villages[o1].coords, villages[d1].coords),
-                                (villages[o2].coords, villages[d2].coords),
+                                (villages[o1].routing_key, villages[d1].routing_key),
+                                (villages[o2].routing_key, villages[d2].routing_key),
                             )
                         )
                     )
                     if best is None or (improving[0], geo) < (best[0], best[3]):
                         best = (improving[0], improving[1], improving[2], geo)
+        return best
+
+    rotation_candidates = 0
+    rotation_truncated = False
+
+    def _best_rotation() -> _SwapMove | None:
+        """Escape pairwise fixed points with a coordinated three-route cycle."""
+        nonlocal rotation_candidates, rotation_truncated
+        best = None
+        for resource, legs in sorted(flows.items(), key=lambda item: item[0].value):
+            edges = sorted(
+                (edge for edge, amount in legs.items() if amount > EPSILON),
+                key=lambda e: (villages[e[0]].routing_key, villages[e[1]].routing_key),
+            )
+            for triple in combinations(edges, 3):
+                if rotation_candidates >= MAX_ROTATION_CANDIDATES:
+                    rotation_truncated = True
+                    return best
+                rotation_candidates += 1
+                origins = [e[0] for e in triple]
+                destinations = [e[1] for e in triple]
+                if len(set(origins)) != 3 or len(set(destinations)) != 3:
+                    continue
+                amount = min(legs[e] for e in triple)
+                for offset in (1, 2):
+                    grown = [(origins[i], destinations[(i + offset) % 3]) for i in range(3)]
+                    if any(o == d or not _may_send(o, d) for o, d in grown):
+                        continue
+                    if resource is Resource.CROP and hub_ids:
+                        prospective = _crop_edges() | set(grown)
+                        prospective.difference_update(
+                            e for e in triple if legs[e] <= amount + EPSILON
+                        )
+                        if not _crop_shape_ok(prospective):
+                            continue
+                    changes = [(e, resource, -amount) for e in triple]
+                    changes.extend((e, resource, amount) for e in grown)
+                    delta, state = _score_changes(changes)
+                    if delta >= (0, 0, 0, 0):
+                        continue
+                    geo = tuple(
+                        (villages[o].routing_key, villages[d].routing_key) for o, d in grown
+                    )
+                    if best is None or (delta, geo) < (best[0], best[3]):
+                        best = (delta, changes, state, geo)
         return best
 
     converged = False
@@ -2099,7 +2185,12 @@ def _improve_flows(
             _delta, changes, state, _geo = move
             _commit_changes(changes, state)
             continue
-        converged = True
+        move = _best_rotation()
+        if move is not None:
+            _delta, changes, state, _geo = move
+            _commit_changes(changes, state)
+            continue
+        converged = not rotation_truncated
         break
     return flows, converged
 
@@ -2228,7 +2319,7 @@ def build_plan(
     # wherever a cheaper routing exists. Never worse than the seed on
     # (excess, merchants) AT THIS STAGE -- the latency pass afterwards spends
     # idle merchants on speed deliberately, so the end-to-end guarantee is
-    # per-phase: excess never rises anywhere; the merchant total is minimal here
+    # per-phase: excess never rises anywhere; the cost is locally improved here
     # and may rise later, strictly within per-village budgets (§8.3, §14).
     #
     # The HELD-BACK count is rounded half-up, not the cap truncated. Truncating
@@ -2276,6 +2367,7 @@ def build_plan(
         max_cycle=max_cycle_by_destination,
         excluded_origins=excluded_origins_by_destination,
         relay_hub_candidates=relay_hub_candidates,
+        fixed_assignment=tier,
     )
     if not converged:
         # Never let a truncated search masquerade as a converged one: it inflates
@@ -2285,31 +2377,30 @@ def build_plan(
             Finding(
                 category=Category.SEARCH_TRUNCATED,
                 message=(
-                    f"route search stopped after {max_improve_passes} improvement passes "
-                    f"with better assignments still available; the over-budget figures "
-                    f"below may overstate the real shortfall. Raise max_improve_passes to "
-                    f"finish the search."
+                    f"route search reached a work limit ({max_improve_passes} improvement "
+                    f"passes or {MAX_ROTATION_CANDIDATES} three-route candidates); "
+                    f"better assignments may remain. The over-budget figures below "
+                    f"are not proof that no feasible routing exists."
                 ),
-                detail=f"stopped after {max_improve_passes} passes",
+                detail="local search work limit reached",
             )
         )
     # The declared tier joins the plan HERE, after the search, and that is the
     # whole of why Design B is a fraction of Design A's risk.
     #
-    # `_improve_flows`' one move is a 2x2 swap, which preserves every origin's
+    # `_improve_flows`' swaps and rotations preserve every origin's
     # outflow and every destination's inflow -- that conservation is what makes
     # the no-two-way-pair and no-waterfall rules survive it. It is also blind to
     # relay shape for anything but crop (`_crop_shape_ok` is consulted on crop
     # edges alone), so a material tier seeded into the assignment could be
     # rewired by an ordinary swap into a self-loop or a chain, and the objective
-    # would not know it had done anything wrong. Keeping the tier out means the
-    # search's objective is untouched, the crop relay mover is untouched, and
+    # would not know it had done anything wrong. Keeping the tier fixed means
     # the two legs section 5 dictates are the two legs that get built.
     #
-    # What the search consequently does not do is PRICE the tier's merchants,
-    # and that is honest rather than convenient: the tier's shape is the
-    # operator's declaration, so there is no alternative assignment the search
-    # could have preferred. The merchants are still counted -- `committed` below
+    # The search PRICES the tier through fixed_assignment, including cargo
+    # bundled onto the same pair, without changing its declared legs. The
+    # fixed cargo is merged into the returned assignment only here, once.
+    # The merchants are still counted -- `committed` below
     # is built from the finished route list -- so the per-village cap is
     # measured against the collecting legs too (section 5: "the relay leg counts
     # inside the 8"), and a breach is reported.
@@ -2347,9 +2438,8 @@ def build_plan(
         if sum(pair_cargo[(origin, destination)].values()) > EPSILON
     ]
 
-    # Spend each village's idle merchants (within budget) to shorten the routes
-    # furthest over the latency target; skipped entirely when no target is set,
-    # leaving the plan purely merchant-minimal.
+    # Jointly choose shorter cycles per origin within its budget. With no
+    # latency target, retain the locally merchant-optimized route set.
     if max_latency_hours is not None:
         # Handed the SOFT budgets, deliberately. This pass spends idle merchants
         # on shorter cycles, and spending up to the hard budget undoes the exact

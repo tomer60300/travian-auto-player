@@ -158,6 +158,7 @@ import { describeBlockers, nightBlockers, planBlockers, runBlockers } from '../u
 import { planStatus, relayLegIndex, verdictSummary } from '../utils/plannerFindings'
 import { routeSheetRow, routeSheetText } from '../utils/plannerSheet'
 import { groupWarnings } from '../utils/warningGroups'
+import { SNAPSHOT_LIVE_TTL_MS, liveSnapshotAllowed, sweepComplete, undoComplete } from '../utils/plannerSafety'
 import {
   filterVillages,
   nextSort,
@@ -295,7 +296,6 @@ const splitProtected = (text) =>
 // to minute and decide whether the plan can be staffed at all. That keeps the
 // strict gate.
 const SNAPSHOT_PLAN_TTL_MS = 4 * 60 * 60 * 1000 // 4 hours
-const SNAPSHOT_LIVE_TTL_MS = 30 * 60 * 1000 // 30 minutes
 const LS_MERCHANT = 'planner_merchant_model'
 // Named allocation profiles (e.g. Day / Night). Trade Office and the merchant
 // model stay account-wide — only the allocations differ per profile, so
@@ -982,6 +982,7 @@ export default function ResourcePlanner() {
   const [confirmDeleteProfile, setConfirmDeleteProfile] = useState(null)
   const [profileNaming, setProfileNaming] = useState(null)
   const [confirmLive, setConfirmLive] = useState(false)
+  const [confirmSweep, setConfirmSweep] = useState(false)
   // What undoing one live run would take: `{ traceId, busy, result, error }`.
   // One at a time, keyed by the trace id, so opening the undo for a history row
   // replaces the answer rather than showing one run's steps under another's
@@ -1142,6 +1143,16 @@ export default function ResourcePlanner() {
   // Durable audit of the last LIVE run (see LS_LAST_RUN): survives the input
   // edits that clear execResult, and page reloads.
   const [lastRun, setLastRun] = useState(null)
+
+  useEffect(() => {
+    setRunHistory(null)
+    setHistoryLoading(false)
+    setRevert(null)
+    setRevertRun(null)
+    setConfirmRevert(null)
+    setConfirmSweep(false)
+    setConfirmLive(false)
+  }, [accountKey])
 
   const storageKey = useCallback(
     (base) => (accountKey ? `${base}::${accountKey}` : null),
@@ -2818,16 +2829,19 @@ export default function ResourcePlanner() {
   // nothing against the game, so it is safe to call whenever the operator opens
   // the panel rather than on a timer.
   const loadRunHistory = useCallback(async () => {
+    const requestedFor = accountKey
     setHistoryLoading(true)
     try {
       const res = await api.get('/distribution/run-history', { params: { limit: 20 } })
+      if (requestedFor !== currentAccountKey()) return
       setRunHistory(res.data)
     } catch (err) {
+      if (requestedFor !== currentAccountKey()) return
       toast.error(errorDetail(err, 'Could not read the run history'))
     } finally {
-      setHistoryLoading(false)
+      if (requestedFor === currentAccountKey()) setHistoryLoading(false)
     }
-  }, [toast])
+  }, [accountKey, currentAccountKey, toast])
 
   /** Ask `/routes/revert-plan` what undoing one run would take, or do it.
    *
@@ -2845,6 +2859,7 @@ export default function ResourcePlanner() {
   const requestRevert = useCallback(
     async (traceId, applyDisable, applyDelete) => {
       if (!traceId) return
+      const requestedFor = accountKey
       setRevert({ traceId, busy: true, result: null, error: null })
       try {
         const res = await api.post(
@@ -2863,18 +2878,22 @@ export default function ResourcePlanner() {
           // the same headroom the reconcile sweep takes.
           { timeout: 180000 }
         )
+        if (requestedFor !== currentAccountKey()) return
         setRevert({ traceId, busy: false, result: res.data, error: null })
         const wrote = applyDisable || applyDelete
         if (!wrote) return
-        const outstanding = Object.keys(res.data.must_delete_by_hand ?? {}).length
+        const outstanding = Object.values(res.data.must_delete_by_hand ?? {}).filter((rows) => rows.length).length
         if (res.data.problems?.length) {
           toast.error(res.data.problems[0])
         } else if (outstanding) {
           toast.error(`Routes at ${outstanding} village(s) still need deleting by hand`)
+        } else if (!undoComplete(res.data)) {
+          toast.error('Undo is incomplete — restore the outstanding route state shown below')
         } else {
           toast.success('The run is undone — nothing left outstanding')
         }
       } catch (err) {
+        if (requestedFor !== currentAccountKey()) return
         setRevert({
           traceId,
           busy: false,
@@ -2883,7 +2902,7 @@ export default function ResourcePlanner() {
         })
       }
     },
-    [merchantModel, snapshot, toast]
+    [accountKey, currentAccountKey, merchantModel, snapshot, toast]
   )
 
   // Reads the same fields the rows render, so the strip can never disagree
@@ -3015,8 +3034,7 @@ export default function ResourcePlanner() {
       // snapshot just went stale — the one person who needs to look.
       if (
         !dryRun &&
-        !useStaleSnapshot &&
-        (snapshotFetchedAt == null || Date.now() - snapshotFetchedAt > SNAPSHOT_LIVE_TTL_MS)
+        !liveSnapshotAllowed(snapshotFetchedAt, useStaleSnapshot)
       ) {
         toast.error(
           'Snapshot is too old to write from — free merchants and stocks decide ' +
@@ -3252,6 +3270,8 @@ export default function ResourcePlanner() {
   // Writes into the ACTIVE profile, so the operator picks Night first and sees
   // the numbers land in the table they are already looking at. Costs nothing, so
   // it can be redone freely while they settle on a baseline.
+  const nightInputRev = useRef(0)
+  useEffect(() => { nightInputRev.current += 1 }, [baselineFill, targetFill])
   const buildNightProfile = useCallback(async () => {
     // Same single-window rule as `buildPlan`: `/night-profile` carries the plan
     // request, so it carries the attendance requirement with it.
@@ -3290,6 +3310,11 @@ export default function ResourcePlanner() {
       refuseBlockers(blockers)
       return
     }
+    const requestedFor = accountKey
+    const requestedRev = planInputRev.current
+    const requestedNightRev = nightInputRev.current
+    const stillCurrent = () => requestedFor === currentAccountKey() &&
+      requestedRev === planInputRev.current && requestedNightRev === nightInputRev.current
     setDeriving(true)
     try {
       const res = await api.post('/distribution/night-profile', {
@@ -3297,6 +3322,7 @@ export default function ResourcePlanner() {
         baseline_fill: Number(baselineFill) / 100,
         target_fill: Number(targetFill) / 100,
       })
+      if (!stillCurrent()) return
       const incoming = res.data.allocations || {}
       setAllocations((prev) => {
         const next = { ...prev }
@@ -3318,7 +3344,7 @@ export default function ResourcePlanner() {
         toast.success(`Night profile built for a ${baselineFill}% → ${targetFill}% night`)
       }
     } catch (err) {
-      toast.error(errorDetail(err, 'Could not build the night profile'))
+      if (stillCurrent()) toast.error(errorDetail(err, 'Could not build the night profile'))
     } finally {
       setDeriving(false)
     }
@@ -3326,6 +3352,8 @@ export default function ResourcePlanner() {
     buildPlanPayload,
     baselineFill,
     targetFill,
+    accountKey,
+    currentAccountKey,
     setAllocations,
     toast,
     activeAttendanceOwed,
@@ -3353,6 +3381,8 @@ export default function ResourcePlanner() {
   // alone outlast the client timeout before a single write delay or idle browse.
   // The gap between chunks is the session break a long operation needs, and the
   // server picks its length so the client is not returning on a metronome.
+  const sweepStaleConsent = useRef(useStaleSnapshot)
+  useEffect(() => { sweepStaleConsent.current = useStaleSnapshot }, [useStaleSnapshot])
   const runReconcileSweep = useCallback(async () => {
     // The same gate `executePlan` opens with, and this was the one write path
     // without it: the sweep checked only that a plan existed and then went
@@ -3371,15 +3401,26 @@ export default function ResourcePlanner() {
       return
     }
     sweepCancel.current = false
+    const requestedFor = accountKey
+    const requestedRev = planInputRev.current
     setSweeping(true)
     const sweptAll = []
     const problems = []
     let outstanding = null // null = first chunk, visit everything
     let chunk = 0
     let lastCreatesLeft = -1
+    let previousCreatesLeft = -1
     let unsettled = false
     try {
       for (;;) {
+        if (requestedFor !== currentAccountKey() || requestedRev !== planInputRev.current) {
+          problems.push('Account or plan inputs changed; no further chunks were sent')
+          break
+        }
+        if (!liveSnapshotAllowed(snapshotFetchedAt, sweepStaleConsent.current)) {
+          problems.push('Snapshot is too old to write from; fetch fresh state or explicitly allow stale state')
+          break
+        }
         chunk += 1
         setSweepProgress({ chunk, swept: sweptAll.length, outstanding, waiting: 0, problems })
         const res = await api.post(
@@ -3420,9 +3461,17 @@ export default function ResourcePlanner() {
           // traffic; three minutes is headroom, not an invitation to hang.
           { timeout: 180000 }
         )
-        sweptAll.push(...(res.data.swept_origins || []))
+        if (requestedFor !== currentAccountKey()) return
+        for (const origin of res.data.swept_origins || []) {
+          if (!sweptAll.includes(origin)) sweptAll.push(origin)
+        }
         problems.push(...(res.data.problems || []))
         outstanding = res.data.unswept_origins || []
+        lastCreatesLeft = wholeDay ? Number(res.data.remaining) || 0 : 0
+        if (res.data.stopped_early || res.data.gold_club_blocked || res.data.outstanding > 0) {
+          problems.push('The server reported stopped, blocked, or unresolved work; inspect the run before retrying')
+          break
+        }
         // The run is over. The server deferred every remaining origin WITHOUT
         // reading it, so `unswept_origins` is full and the loop would pause and
         // ask for exactly the same set again -- for ever, against a village it
@@ -3437,19 +3486,20 @@ export default function ResourcePlanner() {
         // Stall guard: a blocked account (Gold Club refused, repeated failures)
         // can leave `remaining` frozen -- looping on it would hammer the game
         // with identical chunks forever.
-        if (createsLeft && createsLeft === lastCreatesLeft && !outstanding.length) {
+        if (createsLeft && createsLeft === previousCreatesLeft && !outstanding.length) {
           problems.push(
             `${createsLeft} route(s) stayed uncreated across two passes — ` +
               `stopping rather than repeating identical requests; see the problems above`
           )
           break
         }
-        lastCreatesLeft = createsLeft
+        previousCreatesLeft = createsLeft
         if ((!outstanding.length && !createsLeft) || !wait) break
         if (sweepCancel.current) break
         // Counted down visibly: a progress bar that sits still for four minutes
         // reads as a hang, and the operator would reload and lose the loop.
         for (let left = Math.ceil(wait); left > 0; left -= 1) {
+          if (requestedFor !== currentAccountKey()) return
           if (sweepCancel.current) break
           setSweepProgress({
             chunk,
@@ -3462,7 +3512,7 @@ export default function ResourcePlanner() {
         }
         if (sweepCancel.current) break
       }
-      const done = !outstanding || outstanding.length === 0
+      const done = sweepComplete(outstanding, lastCreatesLeft, problems, unsettled)
       setSweepProgress({
         chunk,
         swept: sweptAll.length,
@@ -3470,19 +3520,20 @@ export default function ResourcePlanner() {
         waiting: 0,
         problems,
         done,
+        createsLeft: Math.max(0, lastCreatesLeft),
         unsettled,
       })
       useLogStore
         .getState()
-        .addLog(problems.length ? 'warning' : 'success', 'planner', done
+        .addLog(done ? 'success' : 'warning', 'planner', done
           ? `Reconciliation sweep complete: ${sweptAll.length} village(s) swept`
-          : `Reconciliation sweep stopped with ${outstanding.length} village(s) outstanding`,
+          : `Reconciliation sweep stopped with ${outstanding?.length ?? 0} village(s) and ${Math.max(0, lastCreatesLeft)} create(s) outstanding`,
         { swept: sweptAll, outstanding, problems })
       if (!done) {
         // Never let a partial sweep read as a finished one — that is the exact
         // false confidence this whole path exists to remove.
         toast.error(
-          `Sweep incomplete: ${outstanding.length} village(s) not reached. ` +
+          `Sweep incomplete: ${outstanding?.length ?? 0} village(s) not reached, ${Math.max(0, lastCreatesLeft)} create(s) deferred. ${problems[0] ?? ''} ` +
             `Run it again — until it finishes, old routes may still be shipping.`
         )
       } else if (problems.length) {
@@ -3491,10 +3542,12 @@ export default function ResourcePlanner() {
         toast.success(`Swept ${sweptAll.length} village(s) — nothing stale left`)
       }
     } catch (err) {
+      if (requestedFor !== currentAccountKey()) return
       toast.error(errorDetail(err, 'Reconciliation sweep failed'))
       setSweepProgress((p) => ({ ...(p || {}), failed: true, outstanding: outstanding || [] }))
     } finally {
       setSweeping(false)
+      if (requestedFor !== currentAccountKey()) setSweepProgress(null)
     }
   }, [
     plan,
@@ -3507,6 +3560,9 @@ export default function ResourcePlanner() {
     runIssues,
     refuseBlockers,
     toast,
+    accountKey,
+    currentAccountKey,
+    snapshotFetchedAt,
   ])
 
   // Live unallocated counter, so slack is visible while typing rather than
@@ -7558,9 +7614,10 @@ export default function ResourcePlanner() {
                       from, so a village the plan dropped keeps its old routes —
                       and switching profiles drops several. One surviving route
                       breaks the plan: its destination overflows while its origin
-                      drains. This visits all {villages.length} villages and only
-                      switches routes OFF, never on, so it is safe to stop and
-                      resume. It runs in chunks of {SWEEP_VILLAGES_PER_CHUNK} with
+                      drains. This visits all {villages.length} villages. {wholeDay
+                        ? 'Whole-day mode also creates, re-enables, updates, and may prune routes; review its live-write scope before starting.'
+                        : 'Single-profile mode disables stale routes without creating new routes.'}
+                      {' '}It runs in chunks of {SWEEP_VILLAGES_PER_CHUNK} with
                       a pause between them, and takes minutes, not seconds.
                     </p>
                     <div className="flex gap-2">
@@ -7578,8 +7635,8 @@ export default function ResourcePlanner() {
                         <button
                           type="button"
                           className="btn-secondary text-xs py-1.5 whitespace-nowrap"
-                          disabled={executing || !plan || canary}
-                          onClick={runReconcileSweep}
+                          disabled={executing || !plan || canary || !liveSnapshotAllowed(snapshotFetchedAt, useStaleSnapshot)}
+                          onClick={wholeDay ? () => setConfirmSweep(true) : runReconcileSweep}
                         >
                           Reconcile all villages
                         </button>
@@ -7607,6 +7664,7 @@ export default function ResourcePlanner() {
                         ? ` · pausing ${sweepProgress.waiting}s before the next chunk`
                         : ''}
                       {sweepProgress.done ? ' · COMPLETE — nothing stale left' : ''}
+                      {sweepProgress.createsLeft > 0 ? ` · ${sweepProgress.createsLeft} create(s) deferred` : ''}
                       {/* Not "outstanding": the villages left are ones the
                           server declined to read at all, and the operator's
                           next action is to wait rather than to press again. */}
@@ -8917,6 +8975,18 @@ export default function ResourcePlanner() {
         onCancel={() => setConfirmRevert(null)}
       />
 
+      <ConfirmDialog
+        open={confirmSweep}
+        title="Reconcile and provision the whole-day schedule"
+        message={<>This visits every village and can create, disable, re-enable, update,
+          and prune routes according to the reviewed settings. It sends live game requests
+          in multiple chunks. Stopping leaves a partial schedule; review all outstanding work.</>}
+        confirmText="Start live reconciliation"
+        cancelText="Not yet"
+        variant="danger"
+        onConfirm={() => { setConfirmSweep(false); runReconcileSweep() }}
+        onCancel={() => setConfirmSweep(false)}
+      />
       <ConfirmDialog
         open={confirmLive}
         title="Write these routes to the game"

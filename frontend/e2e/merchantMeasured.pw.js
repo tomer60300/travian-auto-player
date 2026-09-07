@@ -141,7 +141,7 @@ test.describe('the measured-merchant-model acknowledgement', () => {
 
     expect(store.puts[0].merchant_capacity_measured).toBe(true)
     // Both halves of the bump, or a fresh export answers 422 "NEWER build".
-    expect(store.puts[0].version).toBe(11)
+    expect(store.puts[0].version).toBe(12)
   })
 
   test('comes back out of the store as the answer that was saved', async ({ page }) => {

@@ -124,9 +124,8 @@ test.describe('the window prune is remembered', () => {
     expect(store.puts[0].prune_to_window).toBe(false)
     // The version rose for it, on the rule this document follows: a build that
     // cannot read the field must refuse the file rather than half-load it.
-    // 11 since the measured merchant model landed; the prune this spec is about
-    // is what took it to 10.
-    expect(store.puts[0].version).toBe(11)
+    // The current format is 12; the prune setting must still travel in it.
+    expect(store.puts[0].version).toBe(12)
   })
 
   test('comes back out of the store as the answer that was saved', async ({ page }) => {

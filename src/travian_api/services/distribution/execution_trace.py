@@ -29,6 +29,7 @@ written is worse.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -45,6 +46,33 @@ TRACE_DIR = Path.home() / ".travian" / "traces"
 # run: the largest plan this app builds is a few hundred routes, and each one
 # emits a handful of events.
 MAX_EVENTS = 20_000
+
+
+def account_identity(session: Any) -> str | None:
+    """Opaque server/login binding; never infer identity from overlapping village IDs."""
+    server = getattr(session, "server_url", None)
+    username = getattr(getattr(session, "settings", None), "username", None)
+    if not isinstance(server, str) or not server or not isinstance(username, str) or not username:
+        return None
+    return hashlib.sha256(json.dumps([server.rstrip("/"), username]).encode()).hexdigest()
+
+
+def read_owned_events(run_id: str, user_id: int, account: str | None) -> list[dict[str, Any]]:
+    """Fail closed on legacy, foreign, or malformed trace ownership."""
+    path = TRACE_DIR / f"exec-{run_id}.jsonl"
+    events = []
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+    start = next((e for e in events if e.get("kind") == "run_start"), {})
+    if not account or start.get("user") != user_id or start.get("account") != account:
+        raise FileNotFoundError("No accessible trace for this account")
+    return events
 
 
 class ExecutionTrace:

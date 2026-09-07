@@ -182,7 +182,11 @@ test.describe('the sweep stops when the run has stopped', () => {
     await openPlan(page)
     await page.getByRole('button', { name: 'Reconcile all villages' }).click()
 
-    await expect(page.getByText(/COMPLETE — nothing stale left/)).toBeVisible({ timeout: 15_000 })
+    await expect.poll(() => calls.n, { timeout: 15_000 }).toBe(2)
+    await expect(page.getByRole('button', { name: 'Reconcile all villages' })).toBeVisible()
+    // Visiting the remaining origins does not resolve the earlier refusal.
+    await expect(page.getByText(/COMPLETE — nothing stale left/)).toHaveCount(0)
+    await expect(page.getByRole('listitem').filter({ hasText: REFUSED })).toBeVisible()
     expect(calls.n).toBe(2)
   })
 })

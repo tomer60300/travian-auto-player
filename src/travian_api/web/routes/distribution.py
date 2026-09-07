@@ -104,7 +104,7 @@ from travian_api.services.distribution.roles import (
     crop_drift_findings,
     keeps_a_morning_floor,
 )
-from travian_api.services.distribution.route_revert import describe, plan_revert
+from travian_api.services.distribution.route_revert import describe, plan_recorded_revert
 from travian_api.services.distribution.run_history import (
     AccountRollup,
     RunHistory,
@@ -5659,14 +5659,17 @@ async def post_revert_plan(
     names the rows still outstanding.
     """
     try:
+        events = execution_trace.read_owned_events(
+            body.trace_id, user.id, execution_trace.account_identity(session)
+        )
         before = read_inventories(body.trace_id)
     except FileNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=(
-                f"No trace for run {body.trace_id}. Without the pre-run inventory "
-                f"every existing route would look newly created, so this refuses "
-                f"rather than guess."
+                f"No accessible account-bound trace for run {body.trace_id}. "
+                f"Connect the matching account. Legacy traces without ownership "
+                f"metadata require manual inspection; this refuses rather than guess."
             ),
         ) from None
     if not before:
@@ -5684,6 +5687,17 @@ async def post_revert_plan(
         )
 
     svc = session.trade_route_service
+    endings = [e for e in events if e.get("kind") == "run_end"]
+    verified = {
+        e["origin"]: e for e in events if e.get("kind") == "verified" and "undo_created_ids" in e
+    }
+    for event in events:
+        if event.get("kind") in ("read_back_disagreed", "verify_failed"):
+            verified.pop(event.get("origin"), None)
+    if not endings or endings[-1].get("truncated"):
+        raise HTTPException(
+            status_code=409, detail="This run lacks a complete undo record; inspect it manually."
+        )
     origins = [o for o in (body.origins or sorted(before)) if o in before]
     if not origins:
         raise HTTPException(
@@ -5718,9 +5732,14 @@ async def post_revert_plan(
         must_delete: dict[int, list[int]] = {}
         restore: dict[int, list[str]] = {}
         requests_used = 0
-        clean = True
+        vanished_count = 0
 
         for origin in origins:
+            if origin not in verified:
+                problems.append(
+                    f"village {origin}: no verified post-run inventory; nothing changed, inspect manually"
+                )
+                continue
             try:
                 now = await svc.list_existing_routes(origin, map_span=body.map_span)
                 requests_used += 2  # dorf2 + the marketplace tab
@@ -5731,26 +5750,37 @@ async def post_revert_plan(
                     f"village {origin}: could not re-read the marketplace ({exc}); "
                     f"nothing concluded or changed for this village"
                 )
-                clean = False
                 continue
 
-            after = [
-                {"route_id": e.route_id, "dest": e.dest_village_id, "active": e.active} for e in now
+            after = [{**r, "dest": r["dest_village_id"]} for r in _row_snapshot(now)]
+            closing = [
+                {**r, "dest": r.get("dest_village_id", r.get("dest"))}
+                for r in verified[origin]["rows"]
             ]
-            plan = plan_revert(origin, before[origin], after)
+            try:
+                plan = plan_recorded_revert(
+                    origin,
+                    before[origin],
+                    closing,
+                    after,
+                    set(verified[origin]["undo_created_ids"]),
+                )
+            except ValueError as exc:
+                problems.append(f"village {origin}: {exc}; nothing changed")
+                continue
             steps.extend(describe(plan))
+            vanished_count += len(plan.vanished)
             if plan.is_clean:
                 continue
-            clean = False
             created[origin] = plan.manual_delete_ids
             must_delete[origin] = plan.manual_delete_ids
-            if plan.to_restore:
+            if plan.to_restore or plan.manual_restore:
                 restore[origin] = [
                     f"route {rid} -> {'enabled' if was else 'disabled'}"
                     for rid, was in plan.to_restore
-                ]
+                ] + plan.manual_restore
 
-            if body.apply_disable and plan.disable_ids:
+            if (body.apply_disable or body.apply_delete) and plan.disable_ids:
                 live = [e for e in now if e.route_id in set(plan.disable_ids)]
                 try:
                     result = await svc.disable_routes(origin, live)
@@ -5803,10 +5833,17 @@ async def post_revert_plan(
                             f"and {still_on} are STILL RUNNING"
                         )
                         continue
-                    disabled_now[origin] = plan.disable_ids
+                    remaining_ids = {e.route_id for e in after}
+                    disabled_now[origin] = [rid for rid in plan.disable_ids if rid in remaining_ids]
+                    now = after
+                    plan.created[:] = [r for r in plan.created if r.route_id in remaining_ids]
+                    if plan.manual_delete_ids:
+                        must_delete[origin] = plan.manual_delete_ids
+                    else:
+                        must_delete.pop(origin, None)
                     steps.append(
-                        f"village {origin}: disabled {len(plan.disable_ids)} created "
-                        f"route(s) - confirmed inert, but they still need deleting"
+                        f"village {origin}: created routes confirmed inert or gone; "
+                        f"{len(plan.manual_delete_ids)} still need deleting"
                     )
                 else:
                     detail = result.detail if result is not None else "no request was made"
@@ -5814,8 +5851,20 @@ async def post_revert_plan(
                         f"village {origin}: could not disable created routes "
                         f"{plan.disable_ids} ({detail}); they are STILL RUNNING"
                     )
+                    continue
 
             if body.apply_delete and plan.manual_delete_ids:
+                try:
+                    plan_recorded_revert(
+                        origin,
+                        before[origin],
+                        closing,
+                        [{**r, "dest": r["dest_village_id"]} for r in _row_snapshot(now)],
+                        set(verified[origin]["undo_created_ids"]),
+                    )
+                except ValueError as exc:
+                    problems.append(f"village {origin}: {exc}; deletion refused")
+                    continue
                 # Deliberately after the disable. Disabling stops the resources
                 # moving and is reversible; deleting is neither. If the delete fails
                 # the routes are at least already inert.
@@ -5872,7 +5921,7 @@ async def post_revert_plan(
             deleted_now=deleted_now,
             must_delete_by_hand=must_delete,
             restore_state=restore,
-            clean=clean,
+            clean=not (problems or any(must_delete.values()) or restore) and not vanished_count,
             requests_used=requests_used,
             problems=problems,
         )
@@ -7025,6 +7074,7 @@ async def post_execute(
     trace.event(
         "run_start",
         user=user.id,
+        account=execution_trace.account_identity(session),
         dry_run=False,
         # What the request asked for, what that resolved to, and whether the
         # server was even allowed to honour it. Three separate facts: a trace
@@ -9119,6 +9169,21 @@ async def post_execute(
                                 # 24/N fan-out model held on this account.
                                 rows_forecast=sum(a.game_rows for a, _ in created_here),
                                 new_route_ids=[e.route_id for e in fresh],
+                                # Only exact read-back matches to this run's successful
+                                # creates are eligible for automatic undo.
+                                undo_created_ids=[
+                                    e.route_id
+                                    for e in after
+                                    if e.route_id not in before_ids
+                                    and any(
+                                        _desired_key(r) in _existing_keys(e)
+                                        and _row_minute(e) in _fanout_minutes(r)
+                                        and e.cargo is not None
+                                        and {k: v for k, v in e.cargo.items() if v}
+                                        == {k: v for k, v in r.cargo.items() if v}
+                                        for _, r in created_here
+                                    )
+                                ],
                                 # The page as it stood after this origin's
                                 # writes, in full. The ids alone say which rows
                                 # are this run's; they do not say what those
@@ -10050,7 +10115,11 @@ async def get_run_history(
     verified, seen to land as a route; it says nothing about what happened to
     it after that.
     """
-    history: RunHistory = summarise_runs(execution_trace.TRACE_DIR, limit=limit)
+    history: RunHistory = summarise_runs(
+        execution_trace.TRACE_DIR,
+        limit=limit,
+        owner=(_user.id, execution_trace.account_identity(session_manager.get(_user.id))),
+    )
     return RunHistoryResponse(
         runs=[_run_summary_response(run) for run in history.runs],
         rollup=_rollup_response(history.rollup),

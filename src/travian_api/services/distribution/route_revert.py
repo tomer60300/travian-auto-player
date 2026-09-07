@@ -18,7 +18,9 @@ a run while leaving live routes behind would be far worse than one that says
 plainly which rows are still outstanding -- so when deletion was not requested,
 or did not work, this names the exact rows a person has to remove by hand.
 
-Everything here is a pure function over two inventories. No requests, no clock.
+`plan_revert` is only a two-inventory difference, not attribution to a run.
+Live undo uses `plan_recorded_revert` with the selected run's verified closing
+inventory and attributed create IDs. No requests, no clock in either function.
 """
 
 from __future__ import annotations
@@ -55,6 +57,7 @@ class RevertPlan:
     vanished: list[RouteState] = field(default_factory=list)
     # Pre-existing rows whose enabled flag the run moved: (route_id, was_active).
     to_restore: list[tuple[int, bool]] = field(default_factory=list)
+    manual_restore: list[str] = field(default_factory=list)
 
     @property
     def disable_ids(self) -> list[int]:
@@ -79,7 +82,7 @@ class RevertPlan:
     @property
     def is_clean(self) -> bool:
         """Nothing to undo: the run left this village exactly as it found it."""
-        return not (self.created or self.to_restore or self.vanished)
+        return not (self.created or self.to_restore or self.vanished or self.manual_restore)
 
 
 def _as_states(rows: Iterable[Mapping[str, Any]]) -> dict[int, RouteState]:
@@ -132,6 +135,55 @@ def plan_revert(
     return plan
 
 
+def plan_recorded_revert(
+    origin: int,
+    before: Iterable[Mapping[str, Any]],
+    recorded_after: Iterable[Mapping[str, Any]],
+    current: Iterable[Mapping[str, Any]],
+    created_ids: set[int],
+) -> RevertPlan:
+    """Undo only attributed changes, refusing subsequently edited route content."""
+    old = {r["route_id"]: r for r in before}
+    recorded = {r["route_id"]: r for r in recorded_after}
+    now = {r["route_id"]: r for r in current}
+    plan = RevertPlan(origin)
+    for rid in sorted(created_ids - old.keys()):
+        if rid not in recorded:
+            raise ValueError(f"route {rid}: missing verified post-run state")
+        if rid not in now:
+            continue
+        # Disabled is allowed: an earlier undo attempt may have stopped it.
+        if any(now[rid].get(k) != v for k, v in recorded[rid].items() if k != "active"):
+            raise ValueError(f"route {rid}: changed since this run; inspect it manually")
+        plan.created.append(_as_states([now[rid]])[rid])
+    for rid in sorted(old.keys() & recorded.keys()):
+        changed = {
+            k: v
+            for k, v in old[rid].items()
+            if k in ("dest", "cargo", "dispatch_minute", "dest_x", "dest_y")
+            and recorded[rid].get(k) != v
+            and now.get(rid, {}).get(k) != v
+        }
+        if changed:
+            plan.manual_restore.append(f"route {rid}: manually restore original fields {changed}")
+        if old[rid].get("active") == recorded[rid].get("active"):
+            continue  # a later run's toggle is not ours to restore
+        if rid not in now:
+            plan.vanished.append(_as_states([old[rid]])[rid])
+        elif now[rid].get("active") != old[rid].get("active"):
+            plan.to_restore.append((rid, bool(old[rid].get("active", True))))
+    for rid in sorted(old.keys() - recorded.keys()):
+        if rid not in now:
+            plan.vanished.append(_as_states([old[rid]])[rid])
+            plan.manual_restore.append(f"route {rid}: manually recreate original row {old[rid]}")
+    ambiguous = (recorded.keys() - old.keys() - created_ids) & now.keys()
+    if ambiguous:
+        plan.manual_restore.append(
+            f"Inspect unattributed rows {sorted(ambiguous)} manually; automatic undo does not own them"
+        )
+    return plan
+
+
 def describe(plan: RevertPlan) -> list[str]:
     """The plan as lines for an operator, ordered the way it must be carried out.
 
@@ -142,6 +194,7 @@ def describe(plan: RevertPlan) -> list[str]:
         return [f"village {plan.origin}: unchanged, nothing to revert"]
 
     lines: list[str] = []
+    lines.extend(f"village {plan.origin}: {step}" for step in plan.manual_restore)
     if plan.disable_ids:
         lines.append(
             f"village {plan.origin}: FIRST disable {len(plan.disable_ids)} created "
@@ -168,8 +221,8 @@ def describe(plan: RevertPlan) -> list[str]:
     if plan.vanished:
         lines.append(
             f"village {plan.origin}: WARNING — {len(plan.vanished)} route(s) that "
-            f"existed before are gone: {[r.route_id for r in plan.vanished]}. This "
-            f"run did not delete them, so something else changed this village "
-            f"and the rest of this comparison may not reflect what the run did."
+            f"existed before are gone: {[r.route_id for r in plan.vanished]}. "
+            f"Inspect the recorded changes before restoring them; later activity "
+            f"may not reflect what the run did."
         )
     return lines

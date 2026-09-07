@@ -237,7 +237,9 @@ def _rollup(runs: list[RunSummary]) -> AccountRollup:
     )
 
 
-def summarise_runs(trace_dir: Path, limit: int = 20) -> RunHistory:
+def summarise_runs(
+    trace_dir: Path, limit: int = 20, *, owner: tuple[int, str | None] | None = None
+) -> RunHistory:
     """The `limit` most recent live-execution traces in `trace_dir`, summarised.
 
     Zero I/O beyond reading files already in `trace_dir`; no game requests. A
@@ -247,5 +249,15 @@ def summarise_runs(trace_dir: Path, limit: int = 20) -> RunHistory:
         return RunHistory(runs=[], rollup=_rollup([]))
 
     paths = sorted(trace_dir.glob(_TRACE_GLOB), key=lambda p: p.stat().st_mtime, reverse=True)
+    if owner is not None:
+        user_id, account = owner
+
+        def owned(path: Path) -> bool:
+            start = next((e for e in _read_events(path) if e.get("kind") == "run_start"), {})
+            return bool(
+                account and start.get("user") == user_id and start.get("account") == account
+            )
+
+        paths = [path for path in paths if owned(path)]
     runs = [_summarise_one(path) for path in paths[:limit]]
     return RunHistory(runs=runs, rollup=_rollup(runs))
