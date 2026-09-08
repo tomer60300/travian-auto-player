@@ -713,43 +713,142 @@ def trade_route_page_recognised(html: str) -> bool:
     return _trade_route_view_data(html) is not None
 
 
-def _routes_from_view(view: Dict[str, Any], map_span: int) -> List[Dict[str, Any]]:
-    """The route list inside an already-located marketplace view model."""
+class MarketplaceModelInvalid(ValueError):
+    """The page carried a trade-route model, but one that cannot be trusted.
 
+    Distinct from "no model at all", which the readers still answer with None,
+    and distinct from "no routes", which is a legitimate empty list. This is the
+    third case the 2026-09-08 auto-executor review found had no representation:
+    a recognised wrapper whose contents are missing, null, or only partly
+    parseable. Every one of those used to read as an empty village, and an empty
+    village is the answer that makes the reconciler create the whole plan on top
+    of whatever is already running.
+
+    A parser-level error on purpose. The service turns it into
+    :class:`~travian_api.services.trade_route_service.MarketplaceUnreadable`,
+    because from a caller's point of view "unreadable" and "readable but wrong"
+    have the same remedy: do not write against it.
+    """
+
+
+def marketplace_village_id(view: Any) -> Optional[int]:
+    """Which village this marketplace model describes, or None if it will not say.
+
+    ``ownPlayer.currentVillageId`` is the page's own statement of the village the
+    session is on, and it is present in the real Europe 2 model. The read-back
+    query has always checked it; the review found the INITIAL read did not, so a
+    redirect or a concurrent ``?newdid=`` could hand back another village's
+    routes and have them classified as this origin's existing schedule.
+    """
+    if not isinstance(view, dict):
+        return None
+    own_player = view.get("ownPlayer")
+    if not isinstance(own_player, dict):
+        return None
+    current = own_player.get("currentVillageId")
+    return current if isinstance(current, int) and not isinstance(current, bool) else None
+
+
+def _routes_from_view(
+    view: Dict[str, Any], map_span: int
+) -> tuple[List[Dict[str, Any]], List[str]]:
+    """The route rows in a located marketplace model, and what would not parse.
+
+    Returns ``(rows, problems)`` rather than raising, because the two callers
+    want different things from the same pass: :func:`parse_trade_routes` is
+    documented as lenient and reads for display, while the readers behind a
+    WRITE must refuse anything they could not fully account for. One
+    implementation, two policies -- a flag parameter here would be the same
+    thing said worse.
+
+    A problem is never a row silently dropped. Every skip in this function
+    records one, because a skipped row is a route the reconciler will not know
+    exists and may therefore duplicate.
+    """
+    problems: List[str] = []
     try:
         collections = view["ownPlayer"]["village"]["marketplace"]["tradeRoutes"]
     except (KeyError, TypeError):
-        return []
+        return [], ["the model carries no ownPlayer.village.marketplace.tradeRoutes"]
     if not isinstance(collections, list):
-        return []
+        return [], [f"tradeRoutes is {type(collections).__name__}, not a list of collections"]
 
     routes: List[Dict[str, Any]] = []
     seen: set[int] = set()
-    for collection in collections:
+    for index, collection in enumerate(collections):
         if not isinstance(collection, dict):
+            problems.append(f"collection {index} is {type(collection).__name__}, not an object")
             continue
         destination = collection.get("to") or {}
+        source = collection.get("from") or {}
+        from_village_id = source.get("id") if isinstance(source, dict) else None
         try:
             dest_village_id = int(destination["id"])
         except (KeyError, TypeError, ValueError):
-            continue  # a destination we cannot address is not actionable
+            # A destination we cannot address is not actionable -- but if it
+            # holds rows, those rows are real routes we have just failed to see.
+            held = collection.get("routes") or []
+            problems.append(
+                f"collection {index} has no addressable destination"
+                + (f" and holds {len(held)} route row(s)" if held else "")
+            )
+            continue
         dest_name = destination.get("name") or ""
         dest_map_id = destination.get("mapId")
-        for entry in collection.get("routes") or []:
+        # The rows container itself, checked before it is walked. `or []` used to
+        # stand in for this, which silently turned `null`, `{}` and `""` into "no
+        # routes at this destination" -- the exact reading AE-03 exists to
+        # prevent, one level deeper than the first fix reached -- and let a
+        # non-iterable escape as a bare TypeError.
+        entries = collection.get("routes")
+        if not isinstance(entries, list):
+            problems.append(
+                f"collection {index} carries routes as {type(entries).__name__}, not a list of rows"
+            )
+            continue
+        for entry in entries:
             if not isinstance(entry, dict):
+                problems.append(f"a row of collection {index} is not an object")
                 continue
             try:
                 route_id = int(entry["id"])
             except (KeyError, TypeError, ValueError):
+                problems.append(f"a row of collection {index} carries no usable route id")
                 continue
             if route_id in seen:
                 continue
             seen.add(route_id)
-            cargo = entry.get("carriedResources") or {}
+            cargo_raw = entry.get("carriedResources") or {}
+            if not isinstance(cargo_raw, dict):
+                problems.append(f"route {route_id} carries cargo that is not an object")
+                continue
+            try:
+                # Every field that has to become a number is converted HERE, so a
+                # value the game did not send as one is a refusal rather than an
+                # exception escaping the parser. A raw ValueError would bypass the
+                # service's translation and surface as a 500 -- from a read whose
+                # whole job is to say what is on the marketplace.
+                cargo = {
+                    resource: int(cargo_raw.get(resource, 0) or 0)
+                    for resource in ("lumber", "clay", "iron", "crop")
+                }
+            except (TypeError, ValueError):
+                problems.append(f"route {route_id} carries cargo that is not numeric")
+                continue
             coords = map_id_to_coords(dest_map_id, map_span) if dest_map_id is not None else None
             routes.append(
                 {
                     "route_id": route_id,
+                    # Which village the page says this row is sent FROM. The
+                    # per-collection half of the identity check: a model can
+                    # name the right village at the top and still carry another
+                    # one's routes underneath.
+                    "from_village_id": (
+                        from_village_id
+                        if isinstance(from_village_id, int)
+                        and not isinstance(from_village_id, bool)
+                        else None
+                    ),
                     "dest_village_id": dest_village_id,
                     "dest_name": dest_name,
                     "dest_map_id": int(dest_map_id) if isinstance(dest_map_id, int) else None,
@@ -779,13 +878,10 @@ def _routes_from_view(view: Dict[str, Any], map_span: int) -> List[Dict[str, Any
                         if isinstance(entry.get("departureAt"), (int, float))
                         else None
                     ),
-                    "cargo": {
-                        resource: int(cargo.get(resource, 0) or 0)
-                        for resource in ("lumber", "clay", "iron", "crop")
-                    },
+                    "cargo": cargo,
                 }
             )
-    return routes
+    return routes, problems
 
 
 def parse_trade_routes(html: str, map_span: int = DEFAULT_MAP_SPAN) -> List[Dict[str, Any]]:
@@ -814,7 +910,8 @@ def parse_trade_routes(html: str, map_span: int = DEFAULT_MAP_SPAN) -> List[Dict
     view = _trade_route_view_data(html)
     if view is None:
         return []
-    return _routes_from_view(view, map_span)
+    rows, _problems = _routes_from_view(view, map_span)
+    return rows
 
 
 def read_trade_routes(
@@ -831,11 +928,42 @@ def read_trade_routes(
     One pass: locating and JSON-parsing the model is the expensive part, and
     this is why callers should not ask "recognised?" and "which routes?"
     separately.
+
+    Raises :class:`MarketplaceModelInvalid` when the model IS there but could
+    not be fully read. Before the 2026-09-08 review those cases -- an empty
+    model, a null marketplace, a null ``tradeRoutes``, a collection whose
+    destination has no id -- all returned an empty list, which a creating
+    caller cannot tell from a village with no routes. Three outcomes now, and
+    only one of them is safe to write against.
+    """
+    got = read_marketplace(html, map_span)
+    return None if got is None else got[1]
+
+
+def read_marketplace(
+    html: str, map_span: int = DEFAULT_MAP_SPAN
+) -> Optional[tuple[Optional[int], List[Dict[str, Any]]]]:
+    """``(village the model describes, rows)``, or None if the page had no model.
+
+    One pass for both, because locating and JSON-parsing the model is the
+    expensive part and a caller about to WRITE needs both answers together: the
+    rows are only this village's inventory if the model says it is this
+    village's marketplace. Asking separately would parse the page twice and,
+    worse, invite a caller to use one without the other -- which is exactly the
+    gap AE-04 describes.
+
+    Raises :class:`MarketplaceModelInvalid` on a model that is present but only
+    partly readable.
     """
     view = _trade_route_view_data(html)
     if view is None:
         return None
-    return _routes_from_view(view, map_span)
+    rows, problems = _routes_from_view(view, map_span)
+    if problems:
+        raise MarketplaceModelInvalid(
+            "the marketplace page's route model could not be read in full: " + "; ".join(problems)
+        )
+    return marketplace_village_id(view), rows
 
 
 def read_trade_routes_from_view(
@@ -863,7 +991,16 @@ def read_trade_routes_from_view(
         return None
     if not isinstance(collections, list):
         return None
-    return _routes_from_view(view, map_span)
+    # Structure present, so anything wrong from here down is a model we read
+    # only partly -- the same refusal the page reader makes, for the same
+    # reason. This one decides whether a write LANDED, so a half-read answer
+    # must not pass for "nothing was created".
+    rows, problems = _routes_from_view(view, map_span)
+    if problems:
+        raise MarketplaceModelInvalid(
+            "the marketplace query's route model could not be read in full: " + "; ".join(problems)
+        )
+    return rows
 
 
 def parse_troop_confirm_page(html: str) -> Dict[str, Any]:

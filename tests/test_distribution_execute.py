@@ -13,6 +13,7 @@ guard.
 import asyncio
 import contextlib
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -4501,9 +4502,16 @@ async def _noop(*a, **k):
 
 
 async def _empty_marketplace(path, **kw):
+    # Answers for the village the path asks for. Since the 2026-09-08 review the
+    # read refuses a model describing a different village, so a fixture that
+    # named none -- or always the same one -- would be failing that check rather
+    # than exercising the test's own subject.
+    asked = re.search(r"newdid=(\d+)", path)
+    village = int(asked.group(1)) if asked else 20003
     return (
         "<html><body><script>window.Travian.React.TradeRoutes.render("
-        '{viewData: {"ownPlayer":{"village":{"marketplace":{"tradeRoutes":[]}}}}}'
+        '{viewData: {"ownPlayer":{"currentVillageId":' + str(village) + ","
+        '"village":{"marketplace":{"tradeRoutes":[]}}}}}'
         ");</script></body></html>"
     )
 

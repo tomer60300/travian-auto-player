@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+### Fixed — the automatic reconciliation sweep
+
+Seven findings from the 2026-09-08 auto-executor safety review
+(`docs/resource-planner-auto-executor-resolution-2026-09-08.md`). Every one of
+them let an unattended sweep lose work, keep going after a stop, or write
+against an inventory it had no right to trust.
+
+- **A malformed marketplace model read as an empty village.** A recognised
+  wrapper whose contents were missing, null, or only partly parseable returned
+  an empty route list — and an empty village is what makes the reconciler create
+  the whole plan on top of what is already running. It now refuses. A genuinely
+  empty marketplace still reads as empty.
+- **The initial read believed whatever village came back.** The URL pinned the
+  village; the answer was never checked. A redirect or a concurrent `?newdid=`
+  could hand back another village's routes and have them classified as this
+  origin's schedule. Both `currentVillageId` and each row's `from.id` are now
+  checked before any write decision.
+- **A capped cargo update reported no unfinished work.** A route knowingly left
+  carrying the wrong cargo did not count toward `remaining`, so the sweep could
+  declare COMPLETE over a schedule still shipping the old amount.
+- **Terminal stops were invisible to the browser.** `stopped_early`,
+  `gold_club_blocked` and a stop reason are now response fields; they were
+  locals written only to the trace, so the sweep read `undefined` and asked for
+  another chunk through captchas, spent budgets and unreadable pages alike.
+- **A filtered chunk erased earlier deferred work.** The response now names the
+  villages a request left work on, and the sweep unions them across chunks. A
+  partly provisioned village can no longer drop out of the loop and be reported
+  as done.
+- **A dead execution trace no longer permits the next write.** Write failures
+  were logged and swallowed, so the executor kept mutating with no write-ahead
+  evidence. The loss is remembered and the next mutation refused — and the
+  refusal says plainly that rows already written are real and were not rolled
+  back.
+- **The execute lock is per account, not per service object.** Two services for
+  one account each held their own, so both could read the marketplace before
+  either wrote. Two *processes* still cannot share it; that needs a durable
+  lease, and until then one live executor per account.
+
 ### Added
 
 - **An enumeration of the coordinates you hold intel on.** `GET /api/reports/coords`

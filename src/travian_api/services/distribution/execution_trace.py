@@ -94,6 +94,11 @@ class ExecutionTrace:
         self._late = False
         self._path: Path | None = None
         self._handle = None
+        # The FIRST write failure, kept so a caller can refuse the next
+        # mutation. Not a raise: see `_write`. Not a count either -- once
+        # evidence stops being durable the second failure adds nothing, and the
+        # first is the one whose timing explains what is missing.
+        self._persistence_error: str | None = None
         if not enabled:
             return
         try:
@@ -110,6 +115,27 @@ class ExecutionTrace:
     def path(self) -> Path | None:
         """Where this run's JSONL trace is, or None if tracing is off."""
         return self._path
+
+    @property
+    def persistence_failed(self) -> bool:
+        """Has an event been LOST since this trace opened?
+
+        Distinct from ``not enabled``, which means tracing never started and is
+        a state the executor already refuses to begin a live run in. This is the
+        worse case the 2026-09-08 review found: a trace that opened, was
+        believed, and then quietly stopped recording -- so the run looks fully
+        evidenced and is not.
+
+        Callers about to MUTATE the game should check this and stop. Writing
+        without write-ahead evidence is what makes a partial run unrecoverable:
+        the undo path reads this file to learn what the run created.
+        """
+        return self._persistence_error is not None
+
+    @property
+    def persistence_error(self) -> str | None:
+        """Why the trace stopped being durable, or None while it is healthy."""
+        return self._persistence_error
 
     def event(self, kind: str, **fields: Any) -> None:
         """Record one event. Never raises."""
@@ -158,6 +184,13 @@ class ExecutionTrace:
             self._events += 1
         except (OSError, TypeError, ValueError) as exc:
             logger.warning("execution trace %s: could not write %s: %s", self.run_id, kind, exc)
+            # Remembered rather than raised. Raising here would break an
+            # operation that has ALREADY succeeded against the game -- a failed
+            # flush after a create must not be reported as a create that did not
+            # happen. The refusal belongs one level up, before the NEXT
+            # mutation, which is what `persistence_failed` is for.
+            if self._persistence_error is None:
+                self._persistence_error = f"{kind}: {exc}"
 
     # ── The events whose shape matters ──────────────────────────────────────
 

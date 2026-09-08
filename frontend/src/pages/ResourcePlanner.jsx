@@ -212,6 +212,12 @@ const routeCap = (typed) =>
 // chunk of five at roughly 40-70 seconds — comfortably inside one request, which
 // is the whole reason the sweep is chunked at all.
 const SWEEP_VILLAGES_PER_CHUNK = 5
+// `_CHUNK_GAP_FLOOR_S` in `distribution.py`. Used only when the server declines
+// to name a wait while this side still knows work is outstanding: pacing at the
+// server's own floor is the slowest thing it would ever have asked for, so the
+// fallback cannot turn a sweep into a burst. The stall guard below is what stops
+// it looping when the work never clears.
+const SWEEP_FALLBACK_GAP_SECONDS = 45
 /** The one `problems` line that means the RUN is over, not that one village
  *  went wrong.
  *
@@ -3407,6 +3413,16 @@ export default function ResourcePlanner() {
     const sweptAll = []
     const problems = []
     let outstanding = null // null = first chunk, visit everything
+    // Villages a PREVIOUS chunk left work on. AE-01: the server's `remaining`
+    // counts only the origins in the request it answered, so once the sweep
+    // narrows to the unvisited villages a partly-provisioned one reports
+    // nothing and drops out of the loop for good. Held here, across chunks,
+    // and only ever cleared by a chunk that actually visited the village and
+    // came back without deferring it again.
+    const pending = new Set()
+    // What the next request is narrowed to: the unvisited villages while any
+    // remain, then the ones still holding deferred work.
+    let targets = null
     let chunk = 0
     let lastCreatesLeft = -1
     let previousCreatesLeft = -1
@@ -3455,7 +3471,7 @@ export default function ResourcePlanner() {
             // deferred creates on already-swept villages get their turn --
             // without this, "swept" quietly meant "swept but only partly
             // provisioned" and the loop ended with routes never created.
-            ...(outstanding && outstanding.length ? { only_origins: outstanding } : {}),
+            ...(targets && targets.length ? { only_origins: targets } : {}),
           },
           // Generous but finite. A chunk of five villages is ~40-70s of paced
           // traffic; three minutes is headroom, not an invitation to hang.
@@ -3467,9 +3483,27 @@ export default function ResourcePlanner() {
         }
         problems.push(...(res.data.problems || []))
         outstanding = res.data.unswept_origins || []
+        // Visited-and-clean clears a village; visited-and-still-deferred puts it
+        // straight back. Order matters: a chunk reports both lists, and the
+        // second is the authoritative one for the origins it just handled.
+        for (const origin of res.data.swept_origins || []) pending.delete(origin)
+        for (const origin of res.data.deferred_origins || []) pending.add(origin)
+        // The DISPLAYED figure stays a count of creates, which is what the
+        // operator is reading ("N create(s) deferred"). `pending` counts
+        // villages and answers a different question -- whether to keep going --
+        // so the two are kept apart rather than one standing in for the other.
         lastCreatesLeft = wholeDay ? Number(res.data.remaining) || 0 : 0
-        if (res.data.stopped_early || res.data.gold_club_blocked || res.data.outstanding > 0) {
-          problems.push('The server reported stopped, blocked, or unresolved work; inspect the run before retrying')
+        // AE-02. These two are real response fields now. They used to be
+        // `undefined` -- the executor kept them as locals and wrote them to the
+        // trace -- so every terminal stop read as falsy here and the sweep asked
+        // for another chunk. A stop is the operator's to resume: a fresh
+        // operation does not inherit the old one's captcha or budget signal, so
+        // continuing automatically would quietly become the authorised restart.
+        if (res.data.stopped_early || res.data.gold_club_blocked) {
+          problems.push(
+            res.data.stop_reason ||
+              'The server stopped this run before it finished; inspect it before retrying'
+          )
           break
         }
         // The run is over. The server deferred every remaining origin WITHOUT
@@ -3481,8 +3515,20 @@ export default function ResourcePlanner() {
           unsettled = true
           break
         }
-        const wait = res.data.next_chunk_wait_seconds
-        const createsLeft = wholeDay ? Number(res.data.remaining) || 0 : 0
+        // Work still owed, counted so that NEITHER half can hide the other: a
+        // filtered chunk reports `remaining: 0` for villages it did not visit
+        // (AE-01), and a server that names no deferred origins still reports a
+        // number. The sweep continues while either says there is work.
+        const createsLeft = Math.max(pending.size, lastCreatesLeft)
+        // A null wait means "no next chunk", and the server decides it from the
+        // request it answered -- which, once the sweep narrows to one village,
+        // knows nothing about the work waiting at the others. So when THIS side
+        // still holds unfinished work, a missing wait is a gap to fill rather
+        // than an instruction to stop. The server's own floor, so the sweep can
+        // never pace faster than the server would have asked for.
+        const wait =
+          res.data.next_chunk_wait_seconds ??
+          (createsLeft || outstanding.length ? SWEEP_FALLBACK_GAP_SECONDS : null)
         // Stall guard: a blocked account (Gold Club refused, repeated failures)
         // can leave `remaining` frozen -- looping on it would hammer the game
         // with identical chunks forever.
@@ -3495,6 +3541,10 @@ export default function ResourcePlanner() {
         }
         previousCreatesLeft = createsLeft
         if ((!outstanding.length && !createsLeft) || !wait) break
+        // Unvisited villages first; when none are left, go back for the ones a
+        // capped chunk passed over. Without this second phase the sweep ends
+        // with "every village swept" over villages it only half provisioned.
+        targets = outstanding.length ? outstanding : [...pending]
         if (sweepCancel.current) break
         // Counted down visibly: a progress bar that sits still for four minutes
         // reads as a hang, and the operator would reload and lose the loop.
@@ -3512,7 +3562,12 @@ export default function ResourcePlanner() {
         }
         if (sweepCancel.current) break
       }
-      const done = sweepComplete(outstanding, lastCreatesLeft, problems, unsettled)
+      const done = sweepComplete(
+        outstanding,
+        Math.max(pending.size, lastCreatesLeft),
+        problems,
+        unsettled
+      )
       setSweepProgress({
         chunk,
         swept: sweptAll.length,

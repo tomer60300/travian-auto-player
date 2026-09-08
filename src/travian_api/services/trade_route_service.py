@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import weakref
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
@@ -145,6 +146,56 @@ class MarketplaceUnreadable(TravianError):
     behaviour for a failed read -- defer this origin and everything after it --
     so this rides that path rather than inventing a second one.
     """
+
+
+class ExecutionEvidenceLost(TravianError):
+    """The run's write-ahead trace stopped recording, so no further writes.
+
+    The trace is not a log: it is what the undo path reads to learn which rows
+    this run created, and what a person reads after a crash to find out where a
+    partial run stopped. Mutating the game with no durable record of the intent
+    is what makes a partial run unrecoverable.
+
+    The 2026-09-08 review injected a disk-full handle into a live trace and
+    watched the executor create a route, report no problems and leave a
+    zero-byte file. Recording the loss is not enough on its own -- the next
+    write has to be refused, and this is what refuses it.
+
+    Deliberately NOT raised from the trace's own write path. A flush that fails
+    AFTER the game accepted a create must not be reported as a create that did
+    not happen; the failure is remembered there and acted on here, before the
+    next mutation.
+    """
+
+
+# One execute lock per ACCOUNT, per event loop -- not per service instance.
+#
+# AE-07: the lock used to be built in `__init__`, so two `TradeRouteService`
+# objects for the same game account held two different locks and could
+# reconcile it concurrently, each reading the marketplace before the other
+# wrote to it. Two browser tabs, or the :80 and :8001 servers, are enough.
+#
+# Keyed by loop as well as account because `asyncio.Lock` binds itself to the
+# first loop that awaits it and refuses any other; the test suite runs many
+# `asyncio.run` calls, and a single module-level lock would fail the second one.
+# A weak key means a finished loop's locks are collected with it.
+_EXECUTE_LOCKS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _account_lock_key(http_client: Any) -> str:
+    """Which game account this service writes to.
+
+    Server plus login, which is what a Travian account IS -- the same pair the
+    execution trace binds a run to. Falls back to one shared key rather than a
+    per-instance one: if we cannot tell two services apart, serialising them is
+    the safe mistake and running them concurrently is the expensive one.
+    """
+    settings = getattr(http_client, "settings", None)
+    base = getattr(settings, "base_url", None)
+    user = getattr(settings, "username", None)
+    if isinstance(base, str) and base and isinstance(user, str) and user:
+        return f"{base.rstrip('/')}|{user}"
+    return "unidentified-account"
 
 
 # Whether the existing-route read has been confirmed against a real
@@ -324,10 +375,14 @@ class TradeRouteService:
         # leave the write referred from a page that has no trade-route form.
         self._marketplace_referer: dict[int, str] = {}
         self._origin_lock = KeyedLock()
-        # Serializes whole execute runs for this account so a double-click or a
-        # second tab can't fire two concurrent reconciliations (which would
-        # bypass the per-run request caps and burst writes).
-        self.execute_lock = asyncio.Lock()
+        # Serializes whole execute runs for this ACCOUNT -- see `execute_lock`
+        # below and `_EXECUTE_LOCKS`. Held here only as the key; the lock itself
+        # is shared, because a lock per service instance serialises nothing that
+        # matters (AE-07).
+        self._account_lock_key = _account_lock_key(http_client)
+        # The no-loop fallback, and only that. Every real use is inside a
+        # coroutine, so this is reached by code that cannot be concurrent.
+        self._detached_lock = asyncio.Lock()
 
     def origin_lock(self, village_id: int) -> AbstractAsyncContextManager[None]:
         """Serialize the disable+create sequence for one origin village, so a
@@ -453,9 +508,21 @@ class TradeRouteService:
         answers and must not collapse into one.
         """
         view = await self.refresh_marketplace(village_id)
-        from ..parsers.html_parser import read_trade_routes_from_view
+        from ..parsers.html_parser import MarketplaceModelInvalid, read_trade_routes_from_view
 
-        parsed = read_trade_routes_from_view(view, map_span)
+        try:
+            parsed = read_trade_routes_from_view(view, map_span)
+        except MarketplaceModelInvalid as exc:
+            # One vocabulary at this boundary. The reader raises a parser-level
+            # ValueError; every caller of this method handles `TravianError`, so
+            # letting it through would turn a half-read answer into an unhandled
+            # 500 -- and this read happens AFTER a write, which is the one moment
+            # a crash costs the most. "Readable but wrong" and "unreadable" have
+            # the same remedy here: do not believe it.
+            raise MarketplaceUnreadable(
+                f"village {village_id}: the marketplace re-read after writing could "
+                f"not be read in full ({exc}), so what was actually created is unknown"
+            ) from exc
         if parsed is None:
             raise MarketplaceUnreadable(
                 f"village {village_id}: could not re-read the marketplace after "
@@ -494,10 +561,17 @@ class TradeRouteService:
         the reconciler creates the whole plan again.
         """
         html = await self.open_marketplace(village_id)
-        from ..parsers.html_parser import read_trade_routes
+        from ..parsers.html_parser import MarketplaceModelInvalid, read_marketplace
 
-        parsed = read_trade_routes(html, map_span)
-        if parsed is None:
+        try:
+            got = read_marketplace(html, map_span)
+        except MarketplaceModelInvalid as exc:
+            # The page HAD a model and we could not read all of it. Before the
+            # 2026-09-08 review this was indistinguishable from an empty
+            # village, and an empty village is what makes the reconciler create
+            # the whole plan on top of what is already running.
+            raise MarketplaceUnreadable(f"village {village_id}: {exc}") from exc
+        if got is None:
             # A soft block page, a login redirect or a gpack that moved the
             # model all land here. Any of them would otherwise read as "this
             # village has no routes".
@@ -505,6 +579,39 @@ class TradeRouteService:
                 f"village {village_id}: the marketplace page carried no trade-route "
                 f"model, so what is already there is unknown; refusing to treat it "
                 f"as an empty village"
+            )
+        described, parsed = got
+        # AE-04. The URL pins the village; the ANSWER has to agree. A concurrent
+        # `?newdid=`, a redirect or a stale page is enough to return another
+        # village's marketplace, and every write decision below -- disable,
+        # replace, create -- would then be taken against the wrong inventory.
+        # The read-back query has always checked `currentVillageId`; this is the
+        # same check at the boundary that decides the FIRST write.
+        #
+        # A model that will not say is refused too. The real Europe 2 page
+        # states it, so silence here means something is wrong with the page
+        # rather than with the expectation.
+        if described != village_id:
+            raise MarketplaceUnreadable(
+                f"village {village_id}: the marketplace page describes village "
+                f"{described!r}, so these routes are not this village's; refusing "
+                f"to write against them"
+            )
+        # The per-row half. A model can name the right village at the top and
+        # still carry another one's collections underneath. Only rows that STATE
+        # a different source are refused: the read-back's own query does not
+        # select `from`, so an absent value means "not stated", not "wrong".
+        stray = sorted(
+            {
+                r["from_village_id"]
+                for r in parsed
+                if r.get("from_village_id") is not None and r["from_village_id"] != village_id
+            }
+        )
+        if stray:
+            raise MarketplaceUnreadable(
+                f"village {village_id}: the marketplace page carried routes sent from "
+                f"village(s) {stray}, so this village's schedule is unknown"
             )
 
         return [
@@ -593,6 +700,35 @@ class TradeRouteService:
             detail=detail,
         )
 
+    @property
+    def execute_lock(self) -> asyncio.Lock:
+        """The account's execute lock, shared by every service writing to it.
+
+        A property rather than an attribute so the lock is resolved against the
+        loop that is actually running: `asyncio.Lock` binds to the first loop
+        that awaits it, and this object can outlive one.
+
+        This closes the in-process half of AE-07 only. Two PROCESSES -- the
+        production server on :80 and a debug server on :8001 -- still hold
+        separate locks, because this one lives in memory. Making that safe needs
+        an account-scoped durable lease with ownership and fencing, which is a
+        design change rather than a fix; until then, run one live executor per
+        account and treat a second process as unsafe.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return self._detached_lock
+        per_loop = _EXECUTE_LOCKS.get(loop)
+        if per_loop is None:
+            per_loop = {}
+            _EXECUTE_LOCKS[loop] = per_loop
+        lock = per_loop.get(self._account_lock_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            per_loop[self._account_lock_key] = lock
+        return lock
+
     def _require_reconciler(self) -> None:
         """Refuse to create when we cannot read what already exists."""
         if not self.reconciler_verified:
@@ -607,6 +743,18 @@ class TradeRouteService:
             )
 
     def _require_live(self) -> None:
+        # Write-ahead evidence first. Every live write funnels through here, so
+        # this is the one place that can promise no mutation happens after the
+        # trace stopped being durable (AE-06). A trace that never opened is a
+        # different state and is refused before the run starts, not here.
+        trace = getattr(self, "trace", None)
+        if trace is not None and getattr(trace, "persistence_failed", False):
+            raise ExecutionEvidenceLost(
+                f"Refusing further live writes: this run's execution trace stopped "
+                f"recording ({trace.persistence_error}). Rows already written are "
+                f"real and are NOT rolled back -- read the marketplace to see what "
+                f"is there. Fix the trace directory before running again."
+            )
         if not self.live_enabled:
             raise TradeRoutePayloadUnverified(
                 "Live trade-route writes are disabled. The wire payload is verified "

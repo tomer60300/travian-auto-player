@@ -2625,6 +2625,56 @@ class RouteActionResponse(BaseModel):
 class ExecuteResponse(BaseModel):
     dry_run: bool
     live_enabled: bool
+    # ── Whether an automatic sweep may ask for another chunk ────────────────
+    #
+    # AE-02. The browser has always branched on `stopped_early`,
+    # `gold_club_blocked` and an `outstanding` count, and NONE of the three was
+    # ever a field on this model: the executor kept them as locals and wrote
+    # them to the trace. So every terminal stop -- a spent activity budget, a
+    # captcha, a Gold Club refusal, a failed read -- reached the browser as
+    # `undefined`, read as falsy, and the sweep asked for the next chunk anyway.
+    #
+    # Serialised on BOTH return paths, so "the field was absent" can never again
+    # be mistaken for "nothing stopped".
+    stopped_early: bool = Field(
+        default=False,
+        description=(
+            "The run stopped before it finished the work it was given -- captcha, "
+            "activity budget, an unreadable marketplace, or an operator stop. An "
+            "automatic sweep MUST NOT request another chunk on its own after this; "
+            "resuming is an operator decision, because a fresh operation does not "
+            "inherit the older one's stop signal and would silently become the "
+            "authorised restart."
+        ),
+    )
+    gold_club_blocked: bool = Field(
+        default=False,
+        description=(
+            "The account cannot create trade routes at all without Gold Club. "
+            "Terminal for the whole sweep, not for one origin: retrying costs "
+            "requests and cannot succeed."
+        ),
+    )
+    stop_reason: str | None = Field(
+        default=None,
+        description=(
+            "Why the run stopped, in the words the operator is shown. None when "
+            "the run ran to completion. Carried next to the booleans so a client "
+            "can explain the halt without re-deriving it from `problems`."
+        ),
+    )
+    deferred_origins: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Villages this request left with work still to do -- a create the cap "
+            "deferred, cargo it could not correct, an origin it declined to touch. "
+            "AE-01: `remaining` is a COUNT for the origins in THIS request, so a "
+            "sweep that narrows the next chunk to the unvisited villages gets a "
+            "zero that says nothing about the partly-provisioned ones it already "
+            "passed. A caller must union this across chunks and keep going until "
+            "it is empty; a single chunk's zero certifies only that chunk."
+        ),
+    )
     actions: list[RouteActionResponse]
     disables: list[str]
     # Kept apart from `disables` deliberately: re-enabling a route the plan
@@ -7213,6 +7263,13 @@ async def post_execute(
                 problems.append(f"Activity budget exhausted; no routes were created: {exc}")
                 deferred.extend(items)
                 origins = []
+                # A terminal stop, and it has to SAY so. This is the earliest
+                # exit there is -- the budget was already spent before the first
+                # request -- and it reported `stopped_early=false`, which is the
+                # one answer that tells an automatic sweep to carry on. Nothing
+                # was written here, but the contract is about whether the run
+                # finished its work, not about whether it managed to do damage.
+                stopped_early = True
 
             # A full reconciliation must not be cut short by the CREATE budget:
             # the whole point is that no village is left holding a route the plan
@@ -8200,6 +8257,17 @@ async def post_execute(
                                         "route active, cargo stale (update cap reached)",
                                     )
                                 )
+                                # AE-05. The trace decision and the action detail
+                                # both said "deferred", and the COUNT did not:
+                                # this route was left carrying the wrong cargo
+                                # and `remaining` still came back 0, so the
+                                # sweep's completion predicate reported success
+                                # over a schedule that is still shipping the old
+                                # amount. The route exists, which is why it is
+                                # not a create -- but existing is not the same as
+                                # correct, and the completion contract is about
+                                # the latter.
+                                deferred.append((row, route))
                                 continue
                             if drifted and body.update_drifted:
                                 reason = _stop_reason()
@@ -9929,6 +9997,22 @@ async def post_execute(
         updates=updates,
         trace_id=trace.run_id,
         trace_path=str(trace.path) if trace.path else None,
+        # AE-02. These three were locals written only to the trace, so the
+        # browser's automatic sweep -- which branches on all of them -- saw
+        # `undefined` and carried on through every terminal stop.
+        stopped_early=stopped_early,
+        gold_club_blocked=gold_club_blocked,
+        # Which villages the count above belongs to, so a later filtered chunk
+        # cannot erase what an earlier one deferred (AE-01).
+        deferred_origins=sorted({_row.origin for _row, _route in deferred}),
+        # The operator-facing sentence, not a re-derivation. `problems` holds
+        # everything that went wrong including the survivable; this names the
+        # thing that ENDED the run, and is None when nothing did.
+        stop_reason=(
+            (problems[-1] if problems else "the run stopped before finishing")
+            if (stopped_early or gold_club_blocked)
+            else None
+        ),
         # `remaining` = work still outstanding for a later run: routes deferred by
         # the cap PLUS any create that did not complete (failed / Gold Club), so
         # the summary never makes a partially-done run look complete.
@@ -9959,11 +10043,17 @@ async def post_execute(
         # ...and on PROGRESS, not merely on `deferred`: a route whose surviving
         # fan-out exceeds `max_game_rows_per_run` is deferred by every run
         # alike, so `deferred` is never empty and the contract had no
-        # termination guarantee at all. A pass that attempted no create is a
+        # termination guarantee at all. A pass that attempted no write is a
         # pass the next one would repeat exactly.
+        #
+        # Progress is a CREATE or an UPDATE. Counting creates alone meant a
+        # chunk that corrected one route's cargo and deferred another's reported
+        # no next chunk, so a cargo-only convergence could never finish: the
+        # work was remembered and never asked for again.
         next_chunk_wait_seconds=(
             _chunk_gap_seconds()
-            if unswept or (body.reconcile_all_origins and cap and deferred and attempts)
+            if unswept
+            or (body.reconcile_all_origins and cap and deferred and (attempts or updates_done))
             else None
         ),
         warnings=warnings,

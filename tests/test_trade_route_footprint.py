@@ -16,6 +16,7 @@ The count did not change when it moved -- the shape did.
 """
 
 import asyncio
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -30,13 +31,25 @@ from travian_api.services.trade_route_service import (
 
 from .activity_billing import billing
 
-# A page carrying an empty but VALID trade-route model, so the parser recognises
-# it (no routes) rather than reporting the page as unreadable.
-EMPTY_MARKETPLACE = (
-    "<html><body><script>window.Travian.React.TradeRoutes.render("
-    '{viewData: {"ownPlayer":{"village":{"marketplace":{"tradeRoutes":[]}}}}}'
-    ");</script></body></html>"
-)
+
+def empty_marketplace(village: int) -> str:
+    """A page carrying an empty but VALID trade-route model for *village*.
+
+    The parser recognises it (no routes) rather than reporting the page as
+    unreadable. It states `currentVillageId`, as the real Europe 2 page does:
+    since the 2026-09-08 review the read refuses a model that describes a
+    village other than the one asked for, and a fixture that omitted the field
+    was quietly exercising a page the game never serves.
+    """
+    return (
+        "<html><body><script>window.Travian.React.TradeRoutes.render("
+        '{viewData: {"ownPlayer":{"currentVillageId":' + str(village) + ","
+        '"village":{"marketplace":{"tradeRoutes":[]}}}}}'
+        ");</script></body></html>"
+    )
+
+
+EMPTY_MARKETPLACE = empty_marketplace(20003)
 
 
 GRAPHQL = "/api/v1/graphql"
@@ -124,7 +137,13 @@ class _CountingClient:
     async def _get_html(self, path, **kw):
         self.calls.append(("GET", path))
         self.referers.append((path, kw.get("referer")))
-        return self._served(self._pages.pop(0)) if self._pages else EMPTY_MARKETPLACE
+        if self._pages:
+            return self._served(self._pages.pop(0))
+        # Answer for the village actually asked for. A canned page for one
+        # village handed to a request for another is exactly what the read now
+        # refuses, and the fake must not be the thing that fails that check.
+        asked = re.search(r"newdid=(\d+)", path)
+        return empty_marketplace(int(asked.group(1)) if asked else 20003)
 
     async def _post_json(self, path, payload, **kw):
         self.calls.append(("POST", path))
