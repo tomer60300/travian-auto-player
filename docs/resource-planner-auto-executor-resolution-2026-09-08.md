@@ -105,6 +105,47 @@ gap at the server's own floor (45s) when it still holds unfinished work — neve
 faster than the server would have asked for, and the stall guard still stops it
 looping if the work never clears.
 
+## Third pass, after a second independent verification
+
+Three more gaps, all reproduced, all fixed.
+
+**The stall guard stopped valid unfinished work.** It compared aggregate counts
+across differently filtered chunks: village A holding one deferred route and the
+next chunk finishing village B both read as "1", so the sweep called it a stall
+and stopped before ever going back for A. Two different villages are not two
+failed attempts at the same work. It now measures progress on **the origins the
+request actually asked for** — no progress means every one of them is still
+owed. `plannerReviewSafety.pw.js` carries the reproduction; run against the old
+guard it stops after two chunks instead of three, which is how it was confirmed
+to catch the defect rather than merely pass.
+
+**Malformed cargo still became invented zeros.** `carriedResources` went through
+`... or {}`, so `null`, `[]` and an absent key all produced an all-zero cargo and
+handed it back as read inventory. Cargo decides whether a route has drifted, so a
+fabricated zero either rewrites a correct route or hides a wrong one. Those are
+refused now, along with `{}` — an object naming none of the four resources tells
+us nothing, and nothing must not read as nought.
+
+A partial object is deliberately **accepted**, with the unnamed resources read as
+zero. The real model states all four every time, but refusing a partial one bets
+the whole executor on that holding for every route in every state, and the cost
+of being wrong is that every read fails. Stating some amounts is information;
+stating none is not.
+
+**Cross-process locking is now enforced, not just documented.**
+`services/account_lease.py` holds an account-scoped lease as a file whose
+creation is atomic (`O_CREAT | O_EXCL`), so the exclusion survives the process
+boundary that `asyncio.Lock` cannot. `/execute` takes it before its in-process
+lock and releases it in the same `finally` that unregisters the operation; a
+second process is refused with a 409 naming the holder's pid, host and age.
+
+Staleness is by AGE (15 minutes), not by asking whether the holder is alive:
+that check would be `os.kill(pid, 0)`, and on Windows that calls
+`TerminateProcess` — it would kill the run it was asking about. A lease only
+outlives its holder after a hard kill, and then the wait is bounded rather than
+permanent. This assumes one filesystem, which is what "the operator's machine"
+means here; two machines against one account remain outside its reach.
+
 ## Not addressed here
 
 The review's "additional verification still needed" list is open coverage, not
@@ -119,15 +160,14 @@ failures fail closed; they do not by themselves certify unattended execution.
 ## Verification
 
 - `ruff check .` and `ruff format --check .` clean.
-- Full backend suite: **3,885 passed, 6 skipped** (`-n 8`), including 45 new
+- Full backend suite: **3,895 passed, 6 skipped** (`-n 8`), including 55 new
   cases in `tests/test_auto_executor_safety.py` — one class per finding, plus
-  the regression above and the four second-pass findings.
+  the regression above and the second- and third-pass findings.
 - Frontend: eslint 0 errors (16 pre-existing warnings), **678 vitest passed**.
 - Playwright, the specs that drive the sweep and the planner:
   `plannerReviewSafety`, `liveRunGuards`, `func-planner-run`, `wholeDayReview`,
   `prunePersistence`, `merchantMeasured`, `problemLines`, `setupStore` — all
-  passing. The **entire** Playwright suite, both projects, was also run green:
-  **540 passed** in 10.3 minutes.
+  passing. The **entire** Playwright suite, both projects: **541 passed**.
 
 Every new case was confirmed to fail before its fix. Callers of all three
 changed readers were audited by hand, which is how the regression above was

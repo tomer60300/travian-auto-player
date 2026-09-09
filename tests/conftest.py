@@ -310,6 +310,21 @@ def _isolate_the_execution_traces() -> None:
     atexit.register(shutil.rmtree, directory, True)
 
 
+def _isolate_the_account_leases() -> None:
+    """Send execute leases to a throwaway directory, never ~/.travian/locks.
+
+    Same reasoning as the database and the traces, with one extra edge: a lease
+    is a mutual-exclusion file, so a suite writing into the operator's real
+    directory could refuse a live run they were in the middle of -- or take over
+    its lease and let a second executor in.
+    """
+    from travian_api.services import account_lease
+
+    directory = tempfile.mkdtemp(prefix="travian-test-leases-")
+    account_lease.LEASE_DIR = Path(directory)
+    atexit.register(shutil.rmtree, directory, True)
+
+
 def _isolate_the_debug_dumps() -> None:
     """Send debug dumps to a throwaway directory, never ~/.travian/debug.
 
@@ -329,6 +344,7 @@ def _isolate_the_debug_dumps() -> None:
 def pytest_configure(config: pytest.Config) -> None:
     _isolate_the_database()
     _isolate_the_execution_traces()
+    _isolate_the_account_leases()
     _isolate_the_debug_dumps()
     _isolate_the_stealth_state()
     _scrub_travian_credentials()

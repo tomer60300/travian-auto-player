@@ -701,6 +701,17 @@ class TradeRouteService:
         )
 
     @property
+    def account_key(self) -> str:
+        """Which game account this service writes to, as the locks key it.
+
+        Public because the durable cross-process lease
+        (:func:`~travian_api.services.account_lease.account_execute_lease`) is
+        taken in the web layer, before this object's own in-process lock, and it
+        has to name the same account this service would.
+        """
+        return self._account_lock_key
+
+    @property
     def execute_lock(self) -> asyncio.Lock:
         """The account's execute lock, shared by every service writing to it.
 

@@ -3425,7 +3425,6 @@ export default function ResourcePlanner() {
     let targets = null
     let chunk = 0
     let lastCreatesLeft = -1
-    let previousCreatesLeft = -1
     let unsettled = false
     try {
       for (;;) {
@@ -3482,6 +3481,10 @@ export default function ResourcePlanner() {
           if (!sweptAll.includes(origin)) sweptAll.push(origin)
         }
         problems.push(...(res.data.problems || []))
+        // What this request was actually asked to do, captured before `pending`
+        // moves. A stall is no progress on THE WORK WE ASKED FOR -- see the
+        // guard below.
+        const askedFor = targets && targets.length ? [...targets] : [...pending]
         outstanding = res.data.unswept_origins || []
         // Visited-and-clean clears a village; visited-and-still-deferred puts it
         // straight back. Order matters: a chunk reports both lists, and the
@@ -3530,16 +3533,23 @@ export default function ResourcePlanner() {
           res.data.next_chunk_wait_seconds ??
           (createsLeft || outstanding.length ? SWEEP_FALLBACK_GAP_SECONDS : null)
         // Stall guard: a blocked account (Gold Club refused, repeated failures)
-        // can leave `remaining` frozen -- looping on it would hammer the game
-        // with identical chunks forever.
-        if (createsLeft && createsLeft === previousCreatesLeft && !outstanding.length) {
+        // can leave work frozen, and looping on it would hammer the game with
+        // identical chunks forever.
+        //
+        // Measured against THE ORIGINS THIS REQUEST ASKED FOR, not against the
+        // aggregate count. Comparing totals across differently filtered chunks
+        // reads real progress as a stall: village A holds one deferred route,
+        // the next chunk finishes village B, the total is 1 both times -- and
+        // the sweep stopped before ever going back for A. Two different
+        // villages are not two failed attempts at the same work.
+        const stalled = askedFor.length > 0 && askedFor.every((origin) => pending.has(origin))
+        if (stalled) {
           problems.push(
-            `${createsLeft} route(s) stayed uncreated across two passes — ` +
+            `${askedFor.length} village(s) made no progress when asked again — ` +
               `stopping rather than repeating identical requests; see the problems above`
           )
           break
         }
-        previousCreatesLeft = createsLeft
         if ((!outstanding.length && !createsLeft) || !wait) break
         // Unvisited villages first; when none are left, go back for the ones a
         // capped chunk passed over. Without this second phase the sweep ends

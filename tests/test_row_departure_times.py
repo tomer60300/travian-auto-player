@@ -54,7 +54,8 @@ class TestTheDepartureOfEachRowIsRead:
             """<script>window.Travian.React.TradeRoutes.render({viewData:
             {"ownPlayer":{"village":{"marketplace":{"tradeRoutes":[
             {"from":{"id":1},"to":{"id":2,"mapId":50000},
-             "routes":[{"id":9,"enabled":true,"carriedResources":{}}]}]}}}}})</script>""",
+             "routes":[{"id":9,"enabled":true,
+               "carriedResources":{"lumber":0,"clay":0,"iron":0,"crop":0}}]}]}}}}})</script>""",
             map_span=401,
         )
         assert rows and rows[0]["departure_at"] is None

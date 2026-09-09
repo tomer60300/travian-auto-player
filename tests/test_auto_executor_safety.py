@@ -12,7 +12,10 @@ One class per finding, named for it. Every case here failed before the fix.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import time
 
 import pytest
 
@@ -581,6 +584,21 @@ class TestNestedMalformedRowsAreRefusedToo:
         with pytest.raises(MarketplaceModelInvalid):
             read_trade_routes(self._one([{"id": 1, "carriedResources": 7}]))
 
+    def test_a_cargo_object_stating_nothing_is_refused(self):
+        """`{}` is not "carries nothing", it is "we were told nothing". The
+        difference decides whether a correct route gets rewritten."""
+        with pytest.raises(MarketplaceModelInvalid):
+            read_trade_routes(self._one([{"id": 1, "carriedResources": {}}]))
+
+    def test_a_partial_cargo_object_is_read_with_the_rest_as_zero(self):
+        """Deliberately NOT refused. The real model states all four every time,
+        but refusing a partial one bets the whole executor on that holding for
+        every route in every state, and the cost of being wrong is that every
+        read fails. Stating some amounts is information; stating none is not."""
+        rows = read_trade_routes(self._one([{"id": 1, "carriedResources": {"lumber": 5}}]))
+
+        assert rows[0]["cargo"] == {"lumber": 5, "clay": 0, "iron": 0, "crop": 0}
+
     def test_nothing_escapes_as_a_bare_python_error(self):
         """The property behind all of the above: whatever the game sends, this
         reader answers with rows, None, or `MarketplaceModelInvalid` -- never a
@@ -664,3 +682,119 @@ class TestUpdateOnlyProgressStillConverges:
 
         assert res.remaining == 0
         assert res.next_chunk_wait_seconds is None
+
+
+class TestAE07CrossProcessLease:
+    """The durable half of "one live executor per account".
+
+    `execute_lock` is an `asyncio.Lock`: it serialises one interpreter and
+    nothing else, so the server on :80 and a debug server on :8001 could both
+    read the marketplace before either wrote. A lease file's creation is atomic,
+    so the exclusion survives the process boundary.
+    """
+
+    def _isolated(self, tmp_path):
+        from travian_api.services import account_lease
+
+        account_lease.LEASE_DIR = tmp_path
+        return account_lease
+
+    def test_a_second_holder_is_refused(self, tmp_path):
+        al = self._isolated(tmp_path)
+
+        # One `with`, three contexts: hold the lease, arm the expectation, then
+        # try to take it again. The second acquisition raises on __enter__,
+        # which is exactly what `pytest.raises` is here to catch.
+        with (
+            al.account_execute_lease("acct"),
+            pytest.raises(al.AccountBusy),
+            al.account_execute_lease("acct"),
+        ):
+            pass
+
+    def test_the_refusal_names_the_holder_and_the_way_out(self, tmp_path):
+        """An operator who cannot tell WHICH process has it, or how to clear a
+        lease left by a crash, is stuck."""
+        al = self._isolated(tmp_path)
+
+        with (
+            al.account_execute_lease("acct"),
+            pytest.raises(al.AccountBusy) as caught,
+            al.account_execute_lease("acct"),
+        ):
+            pass
+
+        message = str(caught.value)
+        assert "pid" in message
+        assert "delete" in message
+
+    def test_a_different_account_is_not_blocked(self, tmp_path):
+        al = self._isolated(tmp_path)
+
+        with al.account_execute_lease("acct-a"), al.account_execute_lease("acct-b"):
+            pass  # two worlds are not one account
+
+    def test_it_is_released_when_the_run_raises(self, tmp_path):
+        """A run that failed still has to let the next one in, or one crash
+        locks the account until the TTL expires."""
+        al = self._isolated(tmp_path)
+
+        with contextlib.suppress(RuntimeError), al.account_execute_lease("acct"):
+            raise RuntimeError("the run blew up")
+
+        with al.account_execute_lease("acct"):
+            pass
+
+    def test_a_lease_left_by_a_dead_process_is_taken_over_once_it_is_stale(self, tmp_path):
+        """Staleness is by AGE. Asking whether the holder is alive would mean
+        `os.kill(pid, 0)`, and on Windows that TERMINATES the process rather
+        than probing it -- the check would kill the run it asked about."""
+        al = self._isolated(tmp_path)
+        stranded = al._lease_path("acct")
+        al.LEASE_DIR.mkdir(parents=True, exist_ok=True)
+        stranded.write_text('{"pid": 999999, "host": "gone", "started": 0}', encoding="utf-8")
+        os.utime(stranded, (0, time.time() - al.LEASE_TTL_SECONDS - 60))
+
+        with al.account_execute_lease("acct"):
+            pass  # taken over
+
+    def test_a_fresh_lease_is_not_treated_as_stale(self, tmp_path):
+        al = self._isolated(tmp_path)
+        held = al._lease_path("acct")
+        al.LEASE_DIR.mkdir(parents=True, exist_ok=True)
+        held.write_text('{"pid": 4242, "host": "other", "started": 0}', encoding="utf-8")
+
+        with pytest.raises(al.AccountBusy), al.account_execute_lease("acct"):
+            pass
+
+    def test_the_lease_file_does_not_name_the_account(self, tmp_path):
+        """It sits in a directory anyone on the machine can list, and the key is
+        a server URL plus a login."""
+        al = self._isolated(tmp_path)
+
+        assert (
+            "player@example.com"
+            not in al._lease_path("https://ts2.example|player@example.com").name
+        )
+
+
+class TestTheStallGuardMeasuresTheWorkItAskedFor:
+    """Server-side half of the browser fix, pinned where it can be.
+
+    The guard used to compare aggregate counts across differently filtered
+    chunks: village A holding one deferred route and the next chunk finishing
+    village B both read as "1", so the sweep declared a stall and stopped before
+    ever going back for A. Two different villages are not two failed attempts at
+    the same work. `deferred_origins` is what lets the client compare like with
+    like.
+    """
+
+    def test_the_response_names_the_villages_so_progress_is_comparable(self):
+        from .test_auto_executor_safety import TestAE05StaleCargoIsUnfinishedWork
+
+        _svc, res = TestAE05StaleCargoIsUnfinishedWork()._run(cap=1)
+
+        assert res.deferred_origins, (
+            "a count alone cannot distinguish 'the same village again' from "
+            "'a different village with the same amount of work left'"
+        )

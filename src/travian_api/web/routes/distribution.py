@@ -37,6 +37,7 @@ from travian_api.parsers.html_parser import (
     parse_village_stats_production,
     parse_village_stats_resources,
 )
+from travian_api.services.account_lease import AccountBusy, account_execute_lease
 from travian_api.services.distribution import execution_trace
 from travian_api.services.distribution.allocation import (
     Allocation,
@@ -7248,6 +7249,26 @@ async def post_execute(
             return f"activity budget exhausted: {exc}"
         return None
 
+    # One live executor per ACCOUNT, across processes. `svc.execute_lock` only
+    # serialises this interpreter, so :80 and :8001 -- the same code against the
+    # same game account -- could both read the marketplace before either wrote.
+    # The lease is a file, so the exclusion survives the process boundary.
+    #
+    # Entered by hand rather than with `async with`, to keep the run's body at
+    # the indentation it has: it is released in the same `finally` that
+    # unregisters the operation, which is the one path every exit takes.
+    #
+    # `getattr` with a shared fallback, not an optional lease: a service that
+    # cannot name its account is one we cannot tell apart from another, and
+    # serialising those is the safe mistake. Skipping the lease for them would
+    # quietly reopen exactly the hole this closes.
+    _lease = account_execute_lease(
+        getattr(svc, "account_key", None) or "unidentified-account", purpose="execute"
+    )
+    try:
+        _lease.__enter__()
+    except AccountBusy as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
     active_ops.register(user.id, _EXECUTE_OP_LABEL)
     try:
         async with svc.execute_lock:
@@ -9975,6 +9996,7 @@ async def post_execute(
         # The trace belongs to this run; hand it back when the run ends.
         svc.trace = None
         active_ops.unregister(user.id, _EXECUTE_OP_LABEL)
+        _lease.__exit__(None, None, None)
 
     actions += [_action(row, route, "deferred") for row, route in deferred]
     if gold_club_blocked:

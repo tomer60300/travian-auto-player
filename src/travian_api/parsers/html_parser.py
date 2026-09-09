@@ -749,6 +749,10 @@ def marketplace_village_id(view: Any) -> Optional[int]:
     return current if isinstance(current, int) and not isinstance(current, bool) else None
 
 
+_CARGO_RESOURCES = ("lumber", "clay", "iron", "crop")
+"""The four amounts a trade-route row states, in the game's own order."""
+
+
 def _routes_from_view(
     view: Dict[str, Any], map_span: int
 ) -> tuple[List[Dict[str, Any]], List[str]]:
@@ -818,9 +822,31 @@ def _routes_from_view(
             if route_id in seen:
                 continue
             seen.add(route_id)
-            cargo_raw = entry.get("carriedResources") or {}
+            # NOT `or {}`. That idiom turned a null, an empty list and an absent
+            # key alike into an empty dict, and the comprehension below then
+            # filled all four resources with zero -- inventing a cargo of
+            # nothing and handing it back as read inventory. Cargo decides
+            # whether a route has drifted, so a fabricated zero either provokes
+            # a rewrite of a correct route or hides a wrong one.
+            cargo_raw = entry.get("carriedResources")
             if not isinstance(cargo_raw, dict):
-                problems.append(f"route {route_id} carries cargo that is not an object")
+                problems.append(
+                    f"route {route_id} carries cargo as {type(cargo_raw).__name__}, not an object"
+                )
+                continue
+            if not any(resource in cargo_raw for resource in _CARGO_RESOURCES):
+                # A cargo object naming none of the four resources tells us
+                # NOTHING, and nothing must not read as nought: cargo is what
+                # decides whether a route has drifted, so a fabricated zero
+                # either rewrites a correct route or hides a wrong one.
+                #
+                # A PARTIAL object is accepted, with the unnamed resources read
+                # as zero. The real Europe 2 model states all four every time,
+                # zeroes included -- but refusing a partial one bets the whole
+                # executor on that being true of every route in every state, and
+                # the cost of being wrong is that every read fails. Stating some
+                # amounts is information; stating none is not.
+                problems.append(f"route {route_id} states no cargo amounts at all")
                 continue
             try:
                 # Every field that has to become a number is converted HERE, so a
@@ -829,8 +855,7 @@ def _routes_from_view(
                 # service's translation and surface as a 500 -- from a read whose
                 # whole job is to say what is on the marketplace.
                 cargo = {
-                    resource: int(cargo_raw.get(resource, 0) or 0)
-                    for resource in ("lumber", "clay", "iron", "crop")
+                    resource: int(cargo_raw.get(resource) or 0) for resource in _CARGO_RESOURCES
                 }
             except (TypeError, ValueError):
                 problems.append(f"route {route_id} carries cargo that is not numeric")

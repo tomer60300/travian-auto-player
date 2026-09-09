@@ -103,3 +103,43 @@ test('a sweep stops before its next chunk when the snapshot expires', async ({ p
   expect(writes).toBe(1)
   await expect(page.getByText(/COMPLETE — nothing stale left/)).toHaveCount(0)
 })
+
+test('a sweep goes back for a village an earlier chunk deferred', async ({ page }) => {
+  // The reproduction the stall guard used to fail on. Chunk 1 defers work at the
+  // capital and leaves the other village unvisited; chunk 2 is narrowed to that
+  // village and finishes it. The aggregate count reads 1 both times -- one
+  // deferred village before, one after -- so the old guard called it a stall and
+  // stopped without ever going back for the capital. They are two different
+  // villages, not two failed attempts at the same work.
+  const asked = []
+  await isolate(page, (path, route) => {
+    if (!path.endsWith('/distribution/execute')) return undefined
+    const body = JSON.parse(route.request().postData() || '{}')
+    asked.push(body.only_origins ?? null)
+    if (asked.length === 1) {
+      return { ...PREVIEW, dry_run: false, remaining: 1, swept_origins: [CAPITAL],
+        deferred_origins: [CAPITAL], unswept_origins: [DEF_A],
+        next_chunk_wait_seconds: 1, problems: [] }
+    }
+    if (asked.length === 2) {
+      // The unvisited village, finished. Nothing deferred here -- but the
+      // capital still owes work, and only this side knows it.
+      return { ...PREVIEW, dry_run: false, remaining: 0, swept_origins: [DEF_A],
+        deferred_origins: [], unswept_origins: [], next_chunk_wait_seconds: 1, problems: [] }
+    }
+    return { ...PREVIEW, dry_run: false, remaining: 0, swept_origins: [CAPITAL],
+      deferred_origins: [], unswept_origins: [], next_chunk_wait_seconds: null, problems: [] }
+  })
+  await seed(page, profiles)
+  await openPlan(page)
+  await page.getByRole('checkbox', { name: 'Whole day — execute all profiles at once' }).check()
+  await page.getByRole('button', { name: 'Reconcile all villages', exact: true }).click()
+  await page.getByRole('button', { name: 'Start live reconciliation', exact: true }).click()
+
+  // Three chunks: everything, then the unvisited village, then back for the
+  // capital. The old guard stopped after two.
+  await expect.poll(() => asked.length, { timeout: 30_000 }).toBe(3)
+  expect(asked[1]).toEqual([DEF_A])
+  expect(asked[2]).toEqual([CAPITAL])
+  await expect(page.getByText(/COMPLETE — nothing stale left/)).toBeVisible({ timeout: 30_000 })
+})

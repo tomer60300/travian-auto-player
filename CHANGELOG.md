@@ -35,10 +35,24 @@ against an inventory it had no right to trust.
   evidence. The loss is remembered and the next mutation refused — and the
   refusal says plainly that rows already written are real and were not rolled
   back.
-- **The execute lock is per account, not per service object.** Two services for
-  one account each held their own, so both could read the marketplace before
-  either wrote. Two *processes* still cannot share it; that needs a durable
-  lease, and until then one live executor per account.
+- **The execute lock is per account, and now survives the process boundary.**
+  Two services for one account each held their own `asyncio.Lock`, so both could
+  read the marketplace before either wrote — and :80 and :8001 shared nothing at
+  all. `services/account_lease.py` adds an account-scoped lease whose file
+  creation is atomic, taken before the in-process lock and released with it; a
+  second process gets a 409 naming the holder. Staleness is by age, because the
+  liveness check would be `os.kill(pid, 0)`, which on Windows terminates the
+  process it is asking about.
+- **Malformed cargo no longer becomes an invented zero.** `carriedResources`
+  read through `... or {}`, so a null, an empty list or an absent key produced
+  an all-zero cargo and handed it back as read inventory — and cargo is what
+  decides whether a route has drifted. A partial object is still accepted, with
+  the unnamed resources read as zero.
+- **A sweep goes back for a village an earlier chunk deferred.** The stall guard
+  compared aggregate counts across differently filtered chunks, so one village
+  holding work and a later chunk finishing a different one read the same and the
+  sweep stopped early. It now measures progress on the origins it actually asked
+  for.
 
 ### Added
 
