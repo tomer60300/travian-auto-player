@@ -692,7 +692,16 @@ def _trade_route_view_data(html: str) -> Optional[Dict[str, Any]]:
     match = re.compile(r"\{\s*viewData\s*:\s*").search(html, marker)
     if match is None:
         return None
-    blob = _balanced_object(html, html.index("{", match.end() - 1))
+    # `.find`, not `.index`. A page whose `viewData` is a scalar -- `null`, a
+    # number, a string -- has no `{` after the marker, and `.index` raised a
+    # bare ValueError out of a function documented to answer None. It escaped
+    # the service's translation and would have surfaced as a 500 from the read
+    # whose whole job is to say what is on the marketplace. Found by the
+    # property test below rather than by imagining the shape.
+    opening = html.find("{", match.end() - 1)
+    if opening < 0:
+        return None
+    blob = _balanced_object(html, opening)
     if blob is None:
         return None
     try:
@@ -791,10 +800,14 @@ def _routes_from_view(
         except (KeyError, TypeError, ValueError):
             # A destination we cannot address is not actionable -- but if it
             # holds rows, those rows are real routes we have just failed to see.
-            held = collection.get("routes") or []
+            # A count only when there is something countable: `routes` can be
+            # any shape at all here, and `len()` on a float is a TypeError
+            # escaping from the message that was meant to explain the refusal.
+            held = collection.get("routes")
+            carried = len(held) if isinstance(held, list) else 0
             problems.append(
                 f"collection {index} has no addressable destination"
-                + (f" and holds {len(held)} route row(s)" if held else "")
+                + (f" and holds {carried} route row(s)" if carried else "")
             )
             continue
         dest_name = destination.get("name") or ""
@@ -848,17 +861,36 @@ def _routes_from_view(
                 # amounts is information; stating none is not.
                 problems.append(f"route {route_id} states no cargo amounts at all")
                 continue
-            try:
-                # Every field that has to become a number is converted HERE, so a
-                # value the game did not send as one is a refusal rather than an
-                # exception escaping the parser. A raw ValueError would bypass the
-                # service's translation and surface as a 500 -- from a read whose
-                # whole job is to say what is on the marketplace.
-                cargo = {
-                    resource: int(cargo_raw.get(resource) or 0) for resource in _CARGO_RESOURCES
-                }
-            except (TypeError, ValueError):
-                problems.append(f"route {route_id} carries cargo that is not numeric")
+            # Every field that has to become a number is converted HERE, so a
+            # value the game did not send as one is a refusal rather than an
+            # exception escaping the parser. A raw ValueError would bypass the
+            # service's translation and surface as a 500 -- from a read whose
+            # whole job is to say what is on the marketplace.
+            #
+            # ABSENT is zero; PRESENT-BUT-EMPTY is unknown. `int(x or 0)` used to
+            # collapse the two, so a stated `null`, `""` or `[]` became a
+            # confident nought -- and `true` became one -- from a key the game
+            # had put there to say something we could not read.
+            cargo = {}
+            stated_but_unreadable = None
+            for resource in _CARGO_RESOURCES:
+                if resource not in cargo_raw:
+                    cargo[resource] = 0
+                    continue
+                value = cargo_raw[resource]
+                if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                    stated_but_unreadable = f"{resource}={value!r}"
+                    break
+                try:
+                    cargo[resource] = int(value)
+                except (TypeError, ValueError):
+                    stated_but_unreadable = f"{resource}={value!r}"
+                    break
+            if stated_but_unreadable is not None:
+                problems.append(
+                    f"route {route_id} states a cargo amount we cannot read "
+                    f"({stated_but_unreadable})"
+                )
                 continue
             coords = map_id_to_coords(dest_map_id, map_span) if dest_map_id is not None else None
             routes.append(

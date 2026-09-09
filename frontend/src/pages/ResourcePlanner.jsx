@@ -1120,6 +1120,19 @@ export default function ResourcePlanner() {
   const [sweeping, setSweeping] = useState(false)
   const [sweepProgress, setSweepProgress] = useState(null)
   const sweepCancel = useRef(false)
+  // A sweep that outlives the page is a sweep nobody can stop. The loop lives in
+  // a closure rather than in React, so unmounting the planner -- navigating to
+  // another page, closing the tab's route -- left it requesting chunk after
+  // chunk and WRITING to the game, with the Stop button gone from the screen.
+  // Cancelling here stops it at the next chunk boundary, which is the same
+  // granularity "Stop after this chunk" already promises; a request already in
+  // flight still finishes, and its writes are real.
+  useEffect(
+    () => () => {
+      sweepCancel.current = true
+    },
+    []
+  )
   const [disableExisting, setDisableExisting] = useState(true)
   // Off by default, and deliberately: correcting cargo overwrites a route that
   // may have been tuned in-game on purpose.

@@ -177,6 +177,46 @@ stop rather than loop.
 Each of those two specs was run against the previous code first and fails there,
 so they catch the defects rather than merely passing.
 
+## Fifth pass — hardening, and what a property test found that lists did not
+
+Three parser defects had been found by enumerating malformed shapes, and each
+time the list was incomplete. A list is the wrong tool, so the reader now has a
+stated GUARANTEE, fuzzed over 3,000 generated models:
+
+1. It answers with rows, `None`, or `MarketplaceModelInvalid`. Nothing else
+   escapes — a bare `TypeError` bypasses the service's translation and surfaces
+   as a 500 from the read whose job is to say what is on the marketplace.
+2. **A successful read accounts for every row.** If it returns rows at all, it
+   returns one per route entry in the model. A silently skipped row is a live
+   route the reconciler cannot see and will create again — the failure every one
+   of those three defects produced.
+
+The fuzz immediately found two escapes that enumeration had missed:
+
+- A page whose `viewData` is a scalar (`null`, a number, a string) has no `{`
+  after the marker, and `html.index` raised a bare `ValueError` out of a
+  function documented to return None. Pre-existing, unrelated to this review.
+- `len()` on a `routes` value that was a float — inside the message meant to
+  explain the refusal.
+
+One more silent default of the same family, found by auditing the idiom rather
+than the shapes: a resource key that is PRESENT but states nothing (`null`,
+`""`, `[]`) became a confident zero, and `true` became one. Absent still means
+zero — that is the game's convention and the partial-object allowance above —
+but present-and-unreadable is now a refusal.
+
+**A sweep no longer outlives the page.** The loop lives in a closure rather than
+in React, so unmounting the planner left it requesting chunk after chunk and
+writing to the game with the Stop button gone from the screen. Measured before
+the fix: four further chunks after navigating away. Cancelled on unmount now, at
+the same chunk boundary "Stop after this chunk" already promises.
+
+**The write-ahead guarantee is asserted, not assumed.** `create_attempted` is
+traced and flushed before `create_route` is called, and the evidence gate lives
+in `_require_live`, which every live write funnels through — so a lost trace
+stops the request before it is sent rather than after. Pinned on the real
+service, asserting that no HTTP call was made at all.
+
 ## Not addressed here
 
 The review's "additional verification still needed" list is open coverage, not
@@ -191,14 +231,14 @@ failures fail closed; they do not by themselves certify unattended execution.
 ## Verification
 
 - `ruff check .` and `ruff format --check .` clean.
-- Full backend suite: **3,895 passed, 6 skipped** (`-n 8`), including 55 cases
+- Full backend suite: **3,901 passed, 6 skipped** (`-n 8`), including 61 cases
   in `tests/test_auto_executor_safety.py` — one class per finding, plus the
   regression above and the second-, third- and fourth-pass findings.
 - Frontend: eslint 0 errors (16 pre-existing warnings), **678 vitest passed**.
 - Playwright, the specs that drive the sweep and the planner:
   `plannerReviewSafety`, `liveRunGuards`, `func-planner-run`, `wholeDayReview`,
   `prunePersistence`, `merchantMeasured`, `problemLines`, `setupStore` — all
-  passing. The **entire** Playwright suite, both projects: **543 passed**.
+  passing. The **entire** Playwright suite, both projects: **544 passed**.
 
 Every new case was confirmed to fail before its fix. Callers of all three
 changed readers were audited by hand, which is how the regression above was

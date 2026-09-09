@@ -195,3 +195,30 @@ test('a sweep that writes nothing twice stops instead of looping', async ({ page
   // Two: the unfiltered opener, then the one that asked again and got nowhere.
   expect(chunks).toBe(2)
 })
+
+test('leaving the planner stops the sweep instead of writing on unseen', async ({ page }) => {
+  // The loop lives in a closure, not in React, so unmounting the page used to
+  // leave it requesting chunk after chunk -- writing to the game with the Stop
+  // button no longer on screen.
+  let chunks = 0
+  await isolate(page, (path) => {
+    if (!path.endsWith('/distribution/execute')) return undefined
+    chunks += 1
+    return { ...PREVIEW, dry_run: false, created: 1, remaining: 5,
+      swept_origins: [CAPITAL], deferred_origins: [CAPITAL], unswept_origins: [],
+      next_chunk_wait_seconds: 2, problems: [] }
+  })
+  await seed(page, profiles)
+  await openPlan(page)
+  await page.getByRole('checkbox', { name: 'Whole day — execute all profiles at once' }).check()
+  await page.getByRole('button', { name: 'Reconcile all villages', exact: true }).click()
+  await page.getByRole('button', { name: 'Start live reconciliation', exact: true }).click()
+  await expect.poll(() => chunks, { timeout: 20_000 }).toBe(1)
+
+  // Navigate away while the sweep is holding between chunks.
+  await page.getByRole('link', { name: 'Dashboard' }).click()
+  const afterLeaving = chunks
+  await page.waitForTimeout(6000)
+
+  expect(chunks).toBe(afterLeaving)
+})

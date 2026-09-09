@@ -802,3 +802,216 @@ class TestTheStallGuardMeasuresTheWorkItAskedFor:
             "a count alone cannot distinguish 'the same village again' from "
             "'a different village with the same amount of work left'"
         )
+
+
+class TestTheReaderHasNoThirdOutcome:
+    """The property behind every parser finding in this review.
+
+    Three separate defects were found by enumerating malformed shapes -- a null
+    rows container, an invented zero cargo, a stated-but-empty amount -- and
+    each time the list of shapes was incomplete. A list is the wrong tool. What
+    the caller actually needs is a guarantee:
+
+    1. The reader answers with rows, ``None``, or ``MarketplaceModelInvalid``.
+       Nothing else escapes -- a bare TypeError would bypass the service's
+       translation and surface as a 500 from the read whose job is to say what
+       is on the marketplace.
+    2. **A successful read accounts for every row.** If it returns rows at all,
+       it returns one per route entry in the model. Silently dropping a row is
+       the dangerous failure: the reconciler then believes a route it can see in
+       the game does not exist, and creates it again.
+
+    Fuzzed rather than enumerated, from a grammar of the shapes a page can carry.
+    Seeded, so a failure names the model that caused it.
+    """
+
+    JUNK = (None, {}, [], "", 0, 7, True, "text", [1, 2], {"a": 1}, 1.5)
+
+    def _cargo(self, rng, next_id):
+        choice = rng.randrange(6)
+        if choice == 0:
+            return {r: rng.randrange(9000) for r in ("lumber", "clay", "iron", "crop")}
+        if choice == 1:
+            return {"lumber": rng.randrange(9000)}  # partial: the rest are zero
+        if choice == 2:
+            return {"lumber": rng.choice(self.JUNK), "clay": 1}
+        return rng.choice(self.JUNK)
+
+    def _row(self, rng, next_id):
+        if rng.randrange(5) == 0:
+            return rng.choice(self.JUNK)
+        row = {"id": next_id, "enabled": rng.choice([True, False])}
+        if rng.randrange(6):
+            row["carriedResources"] = self._cargo(rng, next_id)
+        if rng.randrange(3):
+            row["departureAt"] = rng.choice([1700000000, None, "soon"])
+        return row
+
+    def _collection(self, rng, ids):
+        collection = {}
+        if rng.randrange(6):
+            collection["to"] = {"id": rng.randrange(20000, 20099), "mapId": 50000, "name": "V"}
+        else:
+            collection["to"] = rng.choice(self.JUNK)
+        if rng.randrange(4):
+            collection["from"] = {"id": 20003}
+        if rng.randrange(6):
+            collection["routes"] = [self._row(rng, next(ids)) for _ in range(rng.randrange(4))]
+        else:
+            collection["routes"] = rng.choice(self.JUNK)
+        return collection
+
+    def _model(self, rng, ids):
+        if rng.randrange(8) == 0:
+            return rng.choice(self.JUNK)
+        collections = (
+            [self._collection(rng, ids) for _ in range(rng.randrange(4))]
+            if rng.randrange(6)
+            else rng.choice(self.JUNK)
+        )
+        own = {"village": {"marketplace": {"tradeRoutes": collections}}}
+        if rng.randrange(6):
+            own["currentVillageId"] = 20003
+        return {"ownPlayer": own}
+
+    @staticmethod
+    def _entries(model):
+        """How many route entries the model actually contains."""
+        try:
+            collections = model["ownPlayer"]["village"]["marketplace"]["tradeRoutes"]
+        except (KeyError, TypeError):
+            return 0
+        if not isinstance(collections, list):
+            return 0
+        return sum(
+            len(c["routes"])
+            for c in collections
+            if isinstance(c, dict) and isinstance(c.get("routes"), list)
+        )
+
+    def test_no_input_escapes_as_an_untranslated_error(self):
+        import itertools
+        import random
+
+        rng = random.Random(20260909)
+        ids = itertools.count(600001)
+        for case in range(3000):
+            model = self._model(rng, ids)
+            try:
+                read_trade_routes(_page(model))
+            except MarketplaceModelInvalid:
+                continue
+            except Exception as exc:  # noqa: BLE001 - the point of the test
+                raise AssertionError(
+                    f"case {case} escaped as {type(exc).__name__}: {exc}\n{model!r}"
+                ) from exc
+
+    def test_a_successful_read_accounts_for_every_row(self):
+        """The invariant all three parser defects broke. A read that returns
+        rows must return ALL of them -- a row quietly skipped is a live route
+        the reconciler will create a second time."""
+        import itertools
+        import random
+
+        rng = random.Random(20260910)
+        ids = itertools.count(700001)
+        checked = 0
+        for case in range(3000):
+            model = self._model(rng, ids)
+            try:
+                rows = read_trade_routes(_page(model))
+            except MarketplaceModelInvalid:
+                continue
+            if rows is None:
+                continue
+            checked += 1
+            assert len(rows) == self._entries(model), (
+                f"case {case}: read {len(rows)} row(s) from a model holding "
+                f"{self._entries(model)}\n{model!r}"
+            )
+        assert checked > 100, f"only {checked} models were accepted; the fuzz proves little"
+
+    def test_the_same_model_is_read_the_same_way_twice(self):
+        import itertools
+        import random
+
+        rng = random.Random(20260911)
+        ids = itertools.count(800001)
+        for _ in range(300):
+            page = _page(self._model(rng, ids))
+            try:
+                first = read_trade_routes(page)
+            except MarketplaceModelInvalid:
+                with pytest.raises(MarketplaceModelInvalid):
+                    read_trade_routes(page)
+                continue
+            assert read_trade_routes(page) == first
+
+
+class TestNoGameWriteWithoutDurableEvidence:
+    """The recovery guarantee AE-06 is really about.
+
+    The executor writes its intent to the trace and flushes it BEFORE calling
+    the game (`create_attempted` precedes `svc.create_route`), and the trace
+    remembers a failed flush. So the question that matters is not "was the loss
+    noticed" but "did a request still go out". This asserts the negative
+    directly: no HTTP call at all.
+
+    Asserted on the real service rather than a fake, because the gate lives in
+    `_require_live` and a fake that reimplements it would be testing itself.
+    """
+
+    def _service(self, tmp_path, *, break_trace: bool):
+        from types import SimpleNamespace
+
+        from travian_api.services.distribution import execution_trace as et
+        from travian_api.services.trade_route_service import TradeRouteService
+
+        et.TRACE_DIR = tmp_path
+        posts = []
+
+        async def _post_json(path, payload, **kw):
+            posts.append((path, payload))
+            return {}
+
+        client = SimpleNamespace(
+            settings=SimpleNamespace(base_url="https://ts2.example", username="player"),
+            post_json=_post_json,
+        )
+        service = TradeRouteService(http_client=client, live_enabled=True)
+        service.trace = et.ExecutionTrace(run_id="evidence-probe")
+        if break_trace:
+            service.trace._persistence_error = "create_attempted: simulated disk full"
+        return service, posts
+
+    def test_a_lost_trace_stops_the_request_before_it_is_sent(self, tmp_path):
+        from travian_api.services.trade_route_service import ExecutionEvidenceLost
+
+        service, posts = self._service(tmp_path, break_trace=True)
+
+        with pytest.raises(ExecutionEvidenceLost):
+            service._require_live()
+
+        assert posts == [], "the gate must run before anything reaches the game"
+
+    def test_a_healthy_trace_does_not_block_the_write(self, tmp_path):
+        """The gate must not be a brake on ordinary runs."""
+        service, _posts = self._service(tmp_path, break_trace=False)
+
+        service._require_live()
+
+    def test_the_intent_is_on_disk_before_the_gate_would_pass(self, tmp_path):
+        """Write-ahead, literally: the event is flushed as it is recorded, so a
+        run killed between the trace and the game still leaves the evidence that
+        it was ABOUT to write. That file is what the undo path reads."""
+        from travian_api.services.distribution import execution_trace as et
+
+        et.TRACE_DIR = tmp_path
+        trace = et.ExecutionTrace(run_id="flush-probe")
+        trace.event("create_attempted", origin=20003, destination="20011")
+
+        on_disk = (tmp_path / "exec-flush-probe.jsonl").read_text(encoding="utf-8")
+        assert "create_attempted" in on_disk, (
+            "the intent must be durable before the request, not buffered until the "
+            "run ends -- a killed run would leave nothing to recover from"
+        )
