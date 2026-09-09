@@ -689,8 +689,15 @@ class TestAE07CrossProcessLease:
 
     `execute_lock` is an `asyncio.Lock`: it serialises one interpreter and
     nothing else, so the server on :80 and a debug server on :8001 could both
-    read the marketplace before either wrote. A lease file's creation is atomic,
-    so the exclusion survives the process boundary.
+    read the marketplace before either wrote. The lock here is held by the
+    OPERATING SYSTEM, so the exclusion survives the process boundary.
+
+    It replaced a lease with a 15-minute timeout, which was wrong twice: another
+    process could take it while the holder was still writing (the browser's
+    180-second request timeout does not stop the backend), and release was an
+    unconditional unlink, so a late finisher deleted its REPLACEMENT'S lease and
+    admitted a third. Both were reproduced. An OS lock cannot be stolen from a
+    live holder and cannot be released by anyone else.
     """
 
     def _isolated(self, tmp_path):
@@ -702,9 +709,6 @@ class TestAE07CrossProcessLease:
     def test_a_second_holder_is_refused(self, tmp_path):
         al = self._isolated(tmp_path)
 
-        # One `with`, three contexts: hold the lease, arm the expectation, then
-        # try to take it again. The second acquisition raises on __enter__,
-        # which is exactly what `pytest.raises` is here to catch.
         with (
             al.account_execute_lease("acct"),
             pytest.raises(al.AccountBusy),
@@ -712,13 +716,12 @@ class TestAE07CrossProcessLease:
         ):
             pass
 
-    def test_the_refusal_names_the_holder_and_the_way_out(self, tmp_path):
-        """An operator who cannot tell WHICH process has it, or how to clear a
-        lease left by a crash, is stuck."""
+    def test_the_refusal_names_the_holder(self, tmp_path):
+        """An operator who cannot tell WHICH process has it is stuck."""
         al = self._isolated(tmp_path)
 
         with (
-            al.account_execute_lease("acct"),
+            al.account_execute_lease("acct", purpose="a whole-day sweep"),
             pytest.raises(al.AccountBusy) as caught,
             al.account_execute_lease("acct"),
         ):
@@ -726,7 +729,7 @@ class TestAE07CrossProcessLease:
 
         message = str(caught.value)
         assert "pid" in message
-        assert "delete" in message
+        assert "a whole-day sweep" in message
 
     def test_a_different_account_is_not_blocked(self, tmp_path):
         al = self._isolated(tmp_path)
@@ -735,8 +738,7 @@ class TestAE07CrossProcessLease:
             pass  # two worlds are not one account
 
     def test_it_is_released_when_the_run_raises(self, tmp_path):
-        """A run that failed still has to let the next one in, or one crash
-        locks the account until the TTL expires."""
+        """A run that failed still has to let the next one in."""
         al = self._isolated(tmp_path)
 
         with contextlib.suppress(RuntimeError), al.account_execute_lease("acct"):
@@ -745,36 +747,38 @@ class TestAE07CrossProcessLease:
         with al.account_execute_lease("acct"):
             pass
 
-    def test_a_lease_left_by_a_dead_process_is_taken_over_once_it_is_stale(self, tmp_path):
-        """Staleness is by AGE. Asking whether the holder is alive would mean
-        `os.kill(pid, 0)`, and on Windows that TERMINATES the process rather
-        than probing it -- the check would kill the run it asked about."""
+    def test_age_does_not_grant_a_takeover(self, tmp_path):
+        """The P1 this design replaced. A run legitimately longer than any
+        timeout we might pick must not have its lock taken while it writes --
+        and the browser's own 180s timeout does not stop the backend, so there
+        is no honest number to pick."""
         al = self._isolated(tmp_path)
-        stranded = al._lease_path("acct")
-        al.LEASE_DIR.mkdir(parents=True, exist_ok=True)
-        stranded.write_text('{"pid": 999999, "host": "gone", "started": 0}', encoding="utf-8")
-        os.utime(stranded, (0, time.time() - al.LEASE_TTL_SECONDS - 60))
 
         with al.account_execute_lease("acct"):
-            pass  # taken over
+            lock = al._lock_path("acct")
+            os.utime(lock, (0, time.time() - 10 * 60 * 60))  # ten hours old
+            with pytest.raises(al.AccountBusy), al.account_execute_lease("acct"):
+                pass
 
-    def test_a_fresh_lease_is_not_treated_as_stale(self, tmp_path):
+    def test_releasing_never_removes_the_lock_file(self, tmp_path):
+        """The other half of that P1: release used to `unlink`, so a holder
+        finishing late deleted whatever lock file was there -- including one a
+        DIFFERENT process had since taken -- and admitted a third. Nothing here
+        deletes; the kernel drops the lock when the handle closes."""
         al = self._isolated(tmp_path)
-        held = al._lease_path("acct")
-        al.LEASE_DIR.mkdir(parents=True, exist_ok=True)
-        held.write_text('{"pid": 4242, "host": "other", "started": 0}', encoding="utf-8")
 
-        with pytest.raises(al.AccountBusy), al.account_execute_lease("acct"):
+        with al.account_execute_lease("acct"):
             pass
 
-    def test_the_lease_file_does_not_name_the_account(self, tmp_path):
+        assert al._lock_path("acct").exists()
+
+    def test_the_lock_file_does_not_name_the_account(self, tmp_path):
         """It sits in a directory anyone on the machine can list, and the key is
         a server URL plus a login."""
         al = self._isolated(tmp_path)
 
         assert (
-            "player@example.com"
-            not in al._lease_path("https://ts2.example|player@example.com").name
+            "player@example.com" not in al._lock_path("https://ts2.example|player@example.com").name
         )
 
 

@@ -38,11 +38,11 @@ against an inventory it had no right to trust.
 - **The execute lock is per account, and now survives the process boundary.**
   Two services for one account each held their own `asyncio.Lock`, so both could
   read the marketplace before either wrote — and :80 and :8001 shared nothing at
-  all. `services/account_lease.py` adds an account-scoped lease whose file
-  creation is atomic, taken before the in-process lock and released with it; a
-  second process gets a 409 naming the holder. Staleness is by age, because the
-  liveness check would be `os.kill(pid, 0)`, which on Windows terminates the
-  process it is asking about.
+  all. `services/account_lease.py` adds an account-scoped lock held by the
+  OPERATING SYSTEM, taken before the in-process lock and released with it; a
+  second process gets a 409 naming the holder. It cannot be taken from a live
+  holder, cannot be released by anyone else, and the kernel drops it if the
+  process is killed — so there is no timeout to outlive and nothing to clean up.
 - **Malformed cargo no longer becomes an invented zero.** `carriedResources`
   read through `... or {}`, so a null, an empty list or an absent key produced
   an all-zero cargo and handed it back as read inventory — and cargo is what

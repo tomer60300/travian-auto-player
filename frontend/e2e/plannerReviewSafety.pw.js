@@ -143,3 +143,55 @@ test('a sweep goes back for a village an earlier chunk deferred', async ({ page 
   expect(asked[2]).toEqual([CAPITAL])
   await expect(page.getByText(/COMPLETE — nothing stale left/)).toBeVisible({ timeout: 30_000 })
 })
+
+test('a village capped at one route per chunk is provisioned over several chunks', async ({ page }) => {
+  // "Still owed" is not "getting nowhere". The capital needs three routes and
+  // the cap allows one per chunk, so it stays pending after chunk one and after
+  // chunk two -- with a route created each time. The guard used to read that as
+  // no progress and stop a chunk short.
+  const asked = []
+  await isolate(page, (path, route) => {
+    if (!path.endsWith('/distribution/execute')) return undefined
+    const body = JSON.parse(route.request().postData() || '{}')
+    asked.push(body.only_origins ?? null)
+    const left = 3 - asked.length // 2, then 1, then 0
+    return {
+      ...PREVIEW, dry_run: false, created: 1, remaining: Math.max(0, left),
+      swept_origins: [CAPITAL], deferred_origins: left > 0 ? [CAPITAL] : [],
+      unswept_origins: [], next_chunk_wait_seconds: left > 0 ? 1 : null, problems: [],
+    }
+  })
+  await seed(page, profiles)
+  await openPlan(page)
+  await page.getByRole('checkbox', { name: 'Whole day — execute all profiles at once' }).check()
+  await page.getByRole('button', { name: 'Reconcile all villages', exact: true }).click()
+  await page.getByRole('button', { name: 'Start live reconciliation', exact: true }).click()
+
+  await expect.poll(() => asked.length, { timeout: 30_000 }).toBe(3)
+  await expect(page.getByText(/COMPLETE — nothing stale left/)).toBeVisible({ timeout: 30_000 })
+})
+
+test('a sweep that writes nothing twice stops instead of looping', async ({ page }) => {
+  // The other side of the guard. A blocked account -- Gold Club refused,
+  // repeated failures -- defers the same work every pass and writes nothing.
+  // Requiring "no mutation" as well as "still owed" must not cost this: without
+  // it the sweep would ask for the same chunk for ever.
+  let chunks = 0
+  await isolate(page, (path) => {
+    if (!path.endsWith('/distribution/execute')) return undefined
+    chunks += 1
+    return { ...PREVIEW, dry_run: false, created: 0, remaining: 1,
+      swept_origins: [CAPITAL], deferred_origins: [CAPITAL], unswept_origins: [],
+      next_chunk_wait_seconds: 1, problems: [] }
+  })
+  await seed(page, profiles)
+  await openPlan(page)
+  await page.getByRole('checkbox', { name: 'Whole day — execute all profiles at once' }).check()
+  await page.getByRole('button', { name: 'Reconcile all villages', exact: true }).click()
+  await page.getByRole('button', { name: 'Start live reconciliation', exact: true }).click()
+
+  await expect(page.getByText(/made no progress when asked again/).first()).toBeVisible({ timeout: 30_000 })
+  await expect(page.getByText(/COMPLETE — nothing stale left/)).toHaveCount(0)
+  // Two: the unfiltered opener, then the one that asked again and got nowhere.
+  expect(chunks).toBe(2)
+})

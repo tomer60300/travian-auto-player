@@ -6,21 +6,29 @@ on :80 and a debug server on :8001 run the same code against the same account
 and share nothing, so both could read the marketplace before either wrote to it
 and each would then create what the other had just made.
 
-This is the durable half. A lease is a file whose creation is atomic --
-``O_CREAT | O_EXCL`` -- so exactly one process can hold one at a time, whatever
-interpreter it is in. The holder writes down who it is; a second process is
-refused with that information rather than left guessing.
+This is the durable half, and it is held **by the operating system**: an
+exclusive byte-range lock on a file, taken non-blocking. The kernel owns it, so
+it is released when the handle closes -- including when the process is killed,
+crashes, or is powered off. There is nothing to expire and nothing to clean up.
 
-**Staleness is by AGE, not by asking whether the holder is alive.** Checking
-liveness would mean `os.kill(pid, 0)`, and on Windows that is not a probe: it
-calls `TerminateProcess`, so the check would kill the very run it was asking
-about. A generous TTL is the honest trade. The lease is released in a `finally`,
-so it only outlives its holder after a hard kill or a power cut, and then the
-wait is bounded rather than forever.
+## Why not a lease with a timeout
 
-Not a distributed lock. It assumes one filesystem, which is what "the operator's
-machine" means here. Two machines against one account remain the operator's
-problem to avoid.
+The first version of this file was one, and it was wrong twice over. A lease
+that another process may take after N minutes assumes no legitimate run lasts
+longer than N; the browser's 180-second request timeout does not stop the
+backend operation, so that assumption does not hold, and a second executor could
+start while the first was still writing. Worse, release was an unconditional
+`unlink`: the original holder, finishing late, would delete the REPLACEMENT'S
+lease and let a third process in. Both were reproduced.
+
+An OS lock has neither failure mode. It cannot be stolen while the holder lives,
+and it cannot be released by anyone but the holder.
+
+## What it does not cover
+
+One filesystem. Two machines against one account is outside its reach, and so is
+a filesystem whose locking is advisory-only across hosts (NFS without a lock
+daemon). "The operator's machine" is the scope.
 """
 
 from __future__ import annotations
@@ -40,17 +48,8 @@ from travian_api.exceptions import TravianError
 logger = logging.getLogger(__name__)
 
 LEASE_DIR = Path.home() / ".travian" / "locks"
-"""Where leases live. Repointed by the test suite's conftest, like the trace
-directory, so a run never touches the operator's real one."""
-
-LEASE_TTL_SECONDS = 15 * 60
-"""How long a lease may sit untouched before another process may take it.
-
-Longer than any single execute request can legitimately run: the browser's own
-chunk timeout is 180s, and a chunk is a handful of villages of paced traffic. A
-lease older than this was left behind by a process that died, because a live one
-would have released it in its `finally`.
-"""
+"""Where the lock files live. Repointed by the test suite's conftest, like the
+trace directory, so a run never touches the operator's real one."""
 
 
 class AccountBusy(TravianError):
@@ -62,20 +61,59 @@ class AccountBusy(TravianError):
     """
 
 
-def _lease_path(account_key: str) -> Path:
-    # Hashed, because the key is a server URL plus a login and a lease file name
-    # is world-readable on a shared machine. The digest identifies the account
-    # without naming it.
+def _lock_path(account_key: str) -> Path:
+    # Hashed, because the key is a server URL plus a login and these files sit
+    # in a directory anyone on the machine can list. The digest identifies the
+    # account without naming it.
     digest = hashlib.sha256(account_key.encode("utf-8")).hexdigest()[:16]
-    return LEASE_DIR / f"execute-{digest}.lease"
+    return LEASE_DIR / f"execute-{digest}.lock"
 
 
-def _describe(path: Path) -> str:
-    """Who holds this lease, for the refusal message."""
+def _holder_path(lock_path: Path) -> Path:
+    """Diagnostics, kept OUT of the locked file.
+
+    On Windows a byte-range lock is mandatory: a second process reading the
+    locked byte gets an error rather than the bytes. Writing who-holds-it
+    alongside instead of inside keeps the refusal message readable.
+    """
+    return lock_path.with_suffix(".holder")
+
+
+def _acquire(fd: int) -> None:
+    """Take the exclusive lock, or raise OSError if another handle holds it."""
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _release(fd: int) -> None:
+    """Drop the lock. Closing the handle would do it too; this is explicit."""
     try:
-        held = json.loads(path.read_text(encoding="utf-8"))
+        if os.name == "nt":
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError as exc:  # pragma: no cover - the close below still releases it
+        logger.warning("could not explicitly release the execute lock: %s", exc)
+
+
+def _describe(lock_path: Path) -> str:
+    """Who holds this lock, for the refusal message."""
+    try:
+        held = json.loads(_holder_path(lock_path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return "another process (its lease file could not be read)"
+        return "another process (it left no readable record of itself)"
     age = max(0, int(time.time() - float(held.get("started", 0))))
     return (
         f"pid {held.get('pid', '?')} on {held.get('host', '?')} "
@@ -85,74 +123,48 @@ def _describe(path: Path) -> str:
 
 @contextlib.contextmanager
 def account_execute_lease(account_key: str, *, purpose: str = "execute") -> Iterator[Path]:
-    """Hold the account's write lease for the duration of the block.
+    """Hold the account's write lock for the duration of the block.
 
-    Raises :class:`AccountBusy` if another process holds it. Releases on the way
-    out, including on an exception -- a run that fails still has to let the next
-    one in.
+    Raises :class:`AccountBusy` if another process holds it. Released on the way
+    out, including on an exception, and by the kernel if this process never gets
+    that far.
     """
-    path = _lease_path(account_key)
     LEASE_DIR.mkdir(parents=True, exist_ok=True)
-    for attempt in (1, 2):
+    lock_path = _lock_path(account_key)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+    try:
         try:
-            handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            if attempt == 2:
-                raise AccountBusy(
-                    f"Another process is writing to this account: {_describe(path)}. "
-                    f"Run one live executor per account -- the server on :80 and a "
-                    f"debug server share the game, not this lock. If that process is "
-                    f"gone, the lease is taken over automatically after "
-                    f"{LEASE_TTL_SECONDS // 60} minutes, or delete {path}."
-                ) from None
-            try:
-                age = time.time() - path.stat().st_mtime
-            except OSError:
-                # It went away between the open and the stat: the holder
-                # finished. Go round again and take it.
-                continue
-            if age <= LEASE_TTL_SECONDS:
-                raise AccountBusy(
-                    f"Another process is writing to this account: {_describe(path)}. "
-                    f"Run one live executor per account -- the server on :80 and a "
-                    f"debug server share the game, not this lock. If that process is "
-                    f"gone, the lease is taken over automatically after "
-                    f"{LEASE_TTL_SECONDS // 60} minutes, or delete {path}."
-                ) from None
-            # Stale: the holder died without releasing. Say so loudly -- a run
-            # that ended this way may have left rows behind in the game.
-            logger.warning(
-                "taking over a stale execute lease at %s (%.0fs old, held by %s); "
-                "the run that left it may not have finished",
-                path,
-                age,
-                _describe(path),
+            _acquire(fd)
+        except OSError:
+            raise AccountBusy(
+                f"Another process is writing to this account: {_describe(lock_path)}. "
+                f"Run one live executor per account -- the server on :80 and a debug "
+                f"server share the game, not this lock. The lock is held by the "
+                f"operating system and is released the moment that process ends, so "
+                f"there is nothing to clean up by hand."
+            ) from None
+        # Written only once the lock is ours, so the record can never describe a
+        # process that failed to take it. Best effort: losing the diagnostics
+        # must not lose the lock.
+        with contextlib.suppress(OSError):
+            _holder_path(lock_path).write_text(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "host": socket.gethostname(),
+                        "purpose": purpose,
+                        "started": time.time(),
+                    }
+                ),
+                encoding="utf-8",
             )
-            with contextlib.suppress(OSError):
-                path.unlink()
-            continue
-        else:
-            try:
-                os.write(
-                    handle,
-                    json.dumps(
-                        {
-                            "pid": os.getpid(),
-                            "host": socket.gethostname(),
-                            "purpose": purpose,
-                            "started": time.time(),
-                        }
-                    ).encode("utf-8"),
-                )
-            finally:
-                os.close(handle)
-            try:
-                yield path
-            finally:
-                # Best effort: a lease we cannot delete becomes a stale one and
-                # is taken over on age. Failing the run over it would be worse
-                # than the wait.
-                with contextlib.suppress(OSError):
-                    path.unlink()
-            return
-    raise AssertionError("unreachable: the loop either yields or raises")
+        try:
+            yield lock_path
+        finally:
+            _release(fd)
+    finally:
+        # Closing releases the lock even if `_release` could not, which is why
+        # the file is never unlinked: deleting it is what let a late finisher
+        # remove somebody else's lock. An empty lock file per account is a
+        # cheaper thing to leave behind than that bug.
+        os.close(fd)

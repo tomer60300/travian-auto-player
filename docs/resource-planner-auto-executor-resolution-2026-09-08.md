@@ -146,6 +146,37 @@ outlives its holder after a hard kill, and then the wait is bounded rather than
 permanent. This assumes one filesystem, which is what "the operator's machine"
 means here; two machines against one account remain outside its reach.
 
+## Fourth pass — the lease was wrong twice, and the stall guard once more
+
+**The timed lease was the wrong mechanism.** Verification reproduced two defects
+in it, both mine. A lease another process may take after 15 minutes assumes no
+legitimate run lasts longer, and the browser's 180-second request timeout does
+not stop the backend, so a second executor could start while the first was still
+writing. And release was an unconditional `unlink`: a holder finishing late
+deleted the REPLACEMENT'S lease and admitted a third.
+
+Replaced with an exclusive byte-range lock held by the **operating system**
+(`fcntl.flock` / `msvcrt.locking`, non-blocking). It cannot be taken from a live
+holder, it cannot be released by anyone else, and the kernel drops it when the
+handle closes — including on a kill or a power cut. There is no TTL, no
+staleness rule and nothing to clean up; the lock file is never deleted, because
+deleting it is what caused the second defect.
+
+Verified beyond unit tests: a subprocess holding the lock refuses this one and
+the message names it, and killing that subprocess frees the lock immediately.
+
+**The stall guard was still too blunt.** A village needing three routes and
+capped at one per chunk stays pending after chunk one and after chunk two — with
+a route created each time — and the guard read that as no progress and stopped a
+chunk short. "Still owed" is not "getting nowhere". It now also requires that
+the chunk wrote **nothing**: no create, no unverified create, no update, disable
+or re-enable. Both directions are pinned in `plannerReviewSafety.pw.js` — the
+three-chunk case, and a blocked account that writes nothing twice and must still
+stop rather than loop.
+
+Each of those two specs was run against the previous code first and fails there,
+so they catch the defects rather than merely passing.
+
 ## Not addressed here
 
 The review's "additional verification still needed" list is open coverage, not
@@ -160,14 +191,14 @@ failures fail closed; they do not by themselves certify unattended execution.
 ## Verification
 
 - `ruff check .` and `ruff format --check .` clean.
-- Full backend suite: **3,895 passed, 6 skipped** (`-n 8`), including 55 new
-  cases in `tests/test_auto_executor_safety.py` — one class per finding, plus
-  the regression above and the second- and third-pass findings.
+- Full backend suite: **3,895 passed, 6 skipped** (`-n 8`), including 55 cases
+  in `tests/test_auto_executor_safety.py` — one class per finding, plus the
+  regression above and the second-, third- and fourth-pass findings.
 - Frontend: eslint 0 errors (16 pre-existing warnings), **678 vitest passed**.
 - Playwright, the specs that drive the sweep and the planner:
   `plannerReviewSafety`, `liveRunGuards`, `func-planner-run`, `wholeDayReview`,
   `prunePersistence`, `merchantMeasured`, `problemLines`, `setupStore` — all
-  passing. The **entire** Playwright suite, both projects: **541 passed**.
+  passing. The **entire** Playwright suite, both projects: **543 passed**.
 
 Every new case was confirmed to fail before its fix. Callers of all three
 changed readers were audited by hand, which is how the regression above was

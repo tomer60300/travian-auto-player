@@ -3542,7 +3542,19 @@ export default function ResourcePlanner() {
         // the next chunk finishes village B, the total is 1 both times -- and
         // the sweep stopped before ever going back for A. Two different
         // villages are not two failed attempts at the same work.
-        const stalled = askedFor.length > 0 && askedFor.every((origin) => pending.has(origin))
+        // Did this chunk actually change anything in the game? A village that
+        // needs three routes and is capped at one per chunk stays pending after
+        // chunk one AND after chunk two -- both times with a route created.
+        // "Still owed" is not "getting nowhere", and treating them alike stopped
+        // the sweep one chunk short of finishing.
+        const mutated =
+          (Number(res.data.created) || 0) > 0 ||
+          (Number(res.data.created_unverified) || 0) > 0 ||
+          (res.data.updates || []).length > 0 ||
+          (res.data.disables || []).length > 0 ||
+          (res.data.re_enables || []).length > 0
+        const stalled =
+          !mutated && askedFor.length > 0 && askedFor.every((origin) => pending.has(origin))
         if (stalled) {
           problems.push(
             `${askedFor.length} village(s) made no progress when asked again — ` +
