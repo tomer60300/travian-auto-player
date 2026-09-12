@@ -1095,3 +1095,60 @@ class TestTheBufferSeverityTurnsOnWhetherAnythingLeftFirst:
         )
 
         assert relay_buffer_findings(hubs, overflows, beat, {}, names={}) == []
+
+
+class TestADeclaredRelayDoesNotRelieveACappedHub:
+    """The tier fires on SHORTFALLS, so a cap it could fix is ignored (#74).
+
+    Drop the whitelist and 02 reaches every defensive village directly. Nothing
+    is short -- and nothing needs to be for the tier to be the right answer: 02
+    simply cannot staff five long hauls at once. The operator declares exactly
+    the structure that would fix it, and the planner does not look at it,
+    because `_relay_tier_flows` returns early on an empty `unmet`.
+
+    Measured here: 02 commits 19 merchants with no whitelist. Capping it at 6
+    and declaring the tier produces a BYTE-IDENTICAL plan -- same five direct
+    legs, same 19, same blocker. That is the defect, not the cap being
+    unreachable: relay is a real shape the operator asked for and the search is
+    forbidden to find on its own (`optimizer.py:84-86`).
+
+    Note what this fixture does NOT show, and why the real account is worse:
+    every village here is Trade Office 0, so a merchant carries 2,500 and cost
+    is dominated by merchants-per-send, which a relay barely improves. On the
+    operator's account the hub is Trade Office 20 (12,500 a merchant) and cost
+    is dominated by SETS IN FLIGHT over long hauls -- which is precisely what
+    pooling onto a short trunk removes.
+    """
+
+    CAP = 6
+
+    def test_the_hub_is_over_budget_before_any_cap_is_set(self):
+        res = _plan(whitelist=False)
+
+        assert _budget(res, CAPITAL).committed == 19
+        assert _budget(res, CAPITAL).over_budget is True
+
+    def test_nothing_is_short_so_the_tier_has_no_trigger(self):
+        res = _plan(whitelist=False, caps={CAPITAL: self.CAP}, relays=TIER)
+
+        assert res.shortfalls == [], "the cap binds, but every village is reachable"
+
+    def test_declaring_the_tier_changes_nothing_at_all(self):
+        without = _plan(whitelist=False, caps={CAPITAL: self.CAP})
+        with_tier = _plan(whitelist=False, caps={CAPITAL: self.CAP}, relays=TIER)
+
+        assert _lumber_legs(with_tier) == _lumber_legs(without)
+        assert _budget(with_tier, CAPITAL).committed == _budget(without, CAPITAL).committed == 19
+        assert with_tier.relays == []
+
+    @pytest.mark.xfail(
+        reason="#74: the declared tier only activates on a shortfall, so a cap it "
+        "could relieve is left breached. Widening the trigger to a budget breach "
+        "is the fix; this pins the behaviour that fix must produce.",
+        strict=True,
+    )
+    def test_a_declared_relay_should_bring_the_hub_within_its_cap(self):
+        res = _plan(whitelist=False, caps={CAPITAL: self.CAP}, relays=TIER)
+
+        assert _budget(res, CAPITAL).committed <= self.CAP
+        assert res.verdict.blockers == []

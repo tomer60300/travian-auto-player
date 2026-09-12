@@ -39,17 +39,23 @@ class _Row(Protocol):
     departure_at: int | None
 
 
-def minute_of_day(departure_at: int | None) -> int | None:
-    """Minutes past midnight for a row's departure, or None if it has none.
+def minute_of_day(departure_at: int | None, *, server_utc_offset_minutes: int = 0) -> int | None:
+    """Minutes past midnight for a row's departure, on the GAME's clock.
 
     None is a real answer and not a zero. A row whose departure the page did not
     state has an unknown position in the day, and treating unknown as midnight
     would put it inside a night window and outside a day one -- deleting or
     sparing it for a reason that was never established.
+
+    ``server_utc_offset_minutes`` is what the game server's clock reads ahead of
+    UTC. It defaults to zero, which is the reading this function had before it
+    took the argument at all, so a caller that has not been taught to pass one
+    behaves exactly as it did.
     """
     if departure_at is None:
         return None
-    return (int(departure_at) % SECONDS_PER_DAY) // 60
+    shifted = int(departure_at) + server_utc_offset_minutes * 60
+    return (shifted % SECONDS_PER_DAY) // 60
 
 
 def in_window(minute: int, window: tuple[int, int]) -> bool:
@@ -64,7 +70,12 @@ def in_window(minute: int, window: tuple[int, int]) -> bool:
     return minute >= start or minute < end
 
 
-def rows_outside_window(rows: Sequence[_Row], window: tuple[int, int] | None) -> list[_Row]:
+def rows_outside_window(
+    rows: Sequence[_Row],
+    window: tuple[int, int] | None,
+    *,
+    server_utc_offset_minutes: int = 0,
+) -> list[_Row]:
     """The rows to delete so a route only fires inside *window*.
 
     Returns them rather than deleting them: the caller owns the write, the
@@ -85,7 +96,13 @@ def rows_outside_window(rows: Sequence[_Row], window: tuple[int, int] | None) ->
     doomed = [
         row
         for row in rows
-        if (minute := minute_of_day(row.departure_at)) is not None and not in_window(minute, window)
+        if (
+            minute := minute_of_day(
+                row.departure_at, server_utc_offset_minutes=server_utc_offset_minutes
+            )
+        )
+        is not None
+        and not in_window(minute, window)
     ]
     if rows and len(doomed) == len(rows):
         raise ValueError(
