@@ -126,6 +126,8 @@ import {
 import {
   dispatchWindowFor,
   overnightField,
+  queuesRunningFor,
+  queuesRunningMapOnly,
   overnightMapOnly,
   windowDayShare,
 } from '../utils/plannerClock'
@@ -412,6 +414,13 @@ const LS_NPC_ATTENDED = 'planner_npc_attended'
 // with only the pre-midnight half recognised the 60% morning floor was
 // measured at 00:00 instead of 07:00.
 const LS_OVERNIGHT = 'planner_overnight'
+// Whether section 2's material spend actually runs in a profile's hours, per
+// profile. Absent means it does: a build or training queue set before bed keeps
+// burning while its owner sleeps, so only an explicit answer stops it. Kept
+// apart from LS_OVERNIGHT deliberately -- being asleep is not the same claim as
+// not queueing, and deriving one from the other charged a DAY spend to every
+// night hour and reported five figures an hour of demand nothing spends.
+const LS_QUEUES_RUNNING = 'planner_queues_running'
 // Minutes of the day to keep clear of ARRIVALS, so the operator's manual NPC
 // burst is not competing with merchants landing. Account-wide, because it is
 // one person at one marketplace -- unlike the attendance answer above, which
@@ -847,6 +856,10 @@ export default function ResourcePlanner() {
   // right answer for a night stated as one 23:00-07:00 pair. See LS_OVERNIGHT
   // for the two cases the derivation gets wrong and why the declaration wins.
   const [profileOvernight, setProfileOvernight] = useState({})
+  // Whether the declared material spend runs in each profile's hours. Absent
+  // means it does -- see LS_QUEUES_RUNNING for why that default is the game's
+  // behaviour and not this operator's habit.
+  const [profileQueues, setProfileQueues] = useState({})
   // The NPC burst window, as an `['HH:MM', 'HH:MM']` pair or null for none.
   // Arrivals avoid it where an alternative exists, and the plan warns when the
   // geometry forces one into it -- so it is a preference the planner weighs,
@@ -1260,6 +1273,10 @@ export default function ResourcePlanner() {
     // would read as a declared night through the backend's lax `bool`, and
     // section 6's rules would then govern a profile nobody named.
     setProfileOvernight(overnightMapOnly(loadJson(`${LS_OVERNIGHT}::${accountKey}`, {})))
+    // Same discipline again, and the default it falls back to is TRUE: a
+    // dropped value must read as queues running, never as a profile that
+    // silently stopped spending.
+    setProfileQueues(queuesRunningMapOnly(loadJson(`${LS_QUEUES_RUNNING}::${accountKey}`, {})))
     setReservedWindow(loadJson(`${LS_RESERVED_WINDOW}::${accountKey}`, null))
     // Defaults to ON, because OFF is the broken case: the window is a fiction
     // the game ignores unless the firings outside it are deleted. A stored
@@ -1376,6 +1393,10 @@ export default function ResourcePlanner() {
     if (hydratedKey && hydratedKey === accountKey)
       saveJson(storageKey(LS_OVERNIGHT), profileOvernight)
   }, [profileOvernight, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey)
+      saveJson(storageKey(LS_QUEUES_RUNNING), profileQueues)
+  }, [profileQueues, hydratedKey, accountKey, storageKey])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey)
       saveJson(storageKey(LS_RESERVED_WINDOW), reservedWindow)
@@ -1756,6 +1777,9 @@ export default function ResourcePlanner() {
       // half arrives undeclared has its 60% morning floor measured at 00:00
       // and its overruns unreported. That is what v8 is for.
       overnight: profileOvernight,
+      // v13, and the fourth map in that family. Nothing else can re-derive it,
+      // and a document that loses it charges a DAY spend to the night.
+      queuesRunning: profileQueues,
       // Section 7's reserved burst window, and v9. The last owned answer that
       // neither persistence path carried: it lived only in localStorage,
       // which is per browser origin, so it did not follow the operator
@@ -1844,6 +1868,7 @@ export default function ResourcePlanner() {
     }
     return { document, summary: listed(parts) }
   }, [
+    profileQueues,
     villages,
     tradeOffice,
     maxBusy,
@@ -1911,6 +1936,7 @@ export default function ResourcePlanner() {
         profileWindows,
         npcAttended: profileAttendance,
         overnight: profileOvernight,
+        queuesRunning: profileQueues,
         reservedWindow,
         pruneToWindow,
         merchantCapacityMeasured,
@@ -1932,6 +1958,7 @@ export default function ResourcePlanner() {
       setProfileWindows(merged.profileWindows)
       setProfileAttendance(merged.npcAttended)
       setProfileOvernight(merged.overnight)
+      setProfileQueues(merged.queuesRunning)
       // `mergeSetup` already decided this: the document wins where it has a
       // window and says nothing where it does not, so a v8 file cannot wipe the
       // one on screen.
@@ -1985,6 +2012,7 @@ export default function ResourcePlanner() {
       toast.success(`Loaded ${parts.join(' and ') || 'nothing'} from the ${where}`)
     },
     [
+      profileQueues,
       villages,
       tradeOffice,
       maxBusy,
@@ -2446,6 +2474,11 @@ export default function ResourcePlanner() {
       // backend's own refusal rather than a convenience: a declaration with no
       // window has no closing minute to be measured against, so
       // `_overnight_needs_hours_to_be_overnight` raises on it.
+      // Whether section 2's spend runs in these hours. Always sent, unlike the
+      // two declarations around it: this one has no third state to preserve --
+      // absent means true at both ends, and saying so costs nothing while
+      // making the request state the assumption the plan was built on.
+      queues_running: queuesRunningFor(profileQueues, activeProfile),
       ...overnightField({
         declared: profileOvernight[activeProfile],
         hasWindow: dispatchWindow != null,
@@ -2605,6 +2638,7 @@ export default function ResourcePlanner() {
       merchant_capacity_measured: merchantCapacityMeasured,
     }
   }, [
+    profileQueues,
     villages,
     tradeOffice,
     shipOnlyTo,
@@ -2839,10 +2873,21 @@ export default function ResourcePlanner() {
         // round trip inside a 420-minute night, and the 60% morning floor
         // measured at 00:00 rather than 07:00.
         ...overnightField({ declared: profileOvernight[name], hasWindow: true }),
+        // Per segment, because that is the whole question: the same village
+        // burns by day and only fills by night inside one replay, and a single
+        // account-wide spend can only describe one of those.
+        queues_running: queuesRunningFor(profileQueues, name),
       })
     }
     return { segments, skipped, unanswered }
-  }, [profiles, profileWindows, villageRoles, profileAttendance, profileOvernight])
+  }, [
+    profiles,
+    profileWindows,
+    villageRoles,
+    profileAttendance,
+    profileOvernight,
+    profileQueues,
+  ])
 
   // Reads the local trace files the app wrote on previous live runs. Costs
   // nothing against the game, so it is safe to call whenever the operator opens
@@ -6901,6 +6946,7 @@ export default function ResourcePlanner() {
             defaultWindows={DEFAULT_WINDOWS}
             profileAttendance={profileAttendance}
             profileOvernight={profileOvernight}
+            profileQueues={profileQueues}
             attendanceRequired={attendanceIsRequired}
             reservedWindow={reservedWindow}
             onReservedWindow={setReservedWindow}
@@ -6926,6 +6972,17 @@ export default function ResourcePlanner() {
                 const next = { ...prev }
                 if (value == null) delete next[name]
                 else next[name] = value
+                return next
+              })
+            }
+            // The resting state is TRUE here, so it is the TICKED box that is
+            // the absence: storing every profile's `true` would fill the map
+            // with the default and make an untouched account look answered.
+            onQueuesRunning={(name, running) =>
+              setProfileQueues((prev) => {
+                const next = { ...prev }
+                if (running) delete next[name]
+                else next[name] = false
                 return next
               })
             }

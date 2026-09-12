@@ -155,6 +155,16 @@
  * coerced all the same (`StrictBool` on the server): a value nobody typed as a
  * boolean must not silence a finding about the figure that sizes every cargo.
  *
+ * Version 13 adds `queues_running`, the fourth per-profile map and the only one
+ * of them whose resting state is TRUE: whether the material spend declared in
+ * section 2 actually runs during a profile's hours. Absent leaves the queues
+ * running, because a build or training queue set before bed keeps burning while
+ * its owner sleeps -- which is what makes it a different question from
+ * `overnight` beside it, and the reason it is not derived from it. Carried for
+ * the criterion the three before it met: nothing else can re-derive it, and a
+ * document that loses it silently charges a DAY spend to the night, which is
+ * demand of five figures an hour that nothing in those hours spends.
+ *
  * Everything here is pure, including the timestamp, which is passed in rather
  * than read. That keeps the round trip testable without a browser.
  */
@@ -171,7 +181,7 @@ import { NPC_FEEDSTOCK_RESOURCES, isFeedstockList } from './plannerNpc'
 import { excludedOriginIds, namesForVillageIds } from './villageRefs'
 
 export const SETUP_FORMAT = 'travian-planner-owned-state'
-export const SETUP_VERSION = 12
+export const SETUP_VERSION = 13
 /** Versions this build can read. A v1 file simply carries no profiles, a v2 one
  * no roles, a v3 one no per-village relay answer, a v4 one no merchant cap, a
  * v5 one no relay tier and a v6 one no per-profile NPC attendance, so refusing
@@ -190,7 +200,7 @@ export const SETUP_VERSION = 12
  * readable list AND two refusals that have to be asked for with a version
  * beyond this build. Bumping one side alone is the failure this note exists to
  * prevent. */
-export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
 
 /** Matches the Trade Office input's own bounds, and the backend's `le=20`. */
 export const MAX_TRADE_OFFICE_LEVEL = 20
@@ -1444,6 +1454,7 @@ export function buildSetup({
   profileWindows,
   npcAttended,
   overnight,
+  queuesRunning,
   reservedWindow,
   pruneToWindow,
   merchantCapacityMeasured,
@@ -1573,6 +1584,12 @@ export function buildSetup({
   // 00:00 again.
   if (overnight && Object.keys(overnight).length) {
     doc.overnight = overnight
+  }
+  // v13. Only the profiles that STOPPED are ever in this map -- the page deletes
+  // the key when the box goes back on -- so writing it whole writes exactly the
+  // answers somebody gave, and an untouched account writes nothing.
+  if (queuesRunning && Object.keys(queuesRunning).length) {
+    doc.queues_running = queuesRunning
   }
   // v9, and the only owned answer that used to be carried by NEITHER
   // persistence path: it lived in localStorage alone, which is per browser
@@ -2011,6 +2028,34 @@ function parseOvernight(raw, where) {
   return out
 }
 
+/** One boolean per profile saying whether its hours run the declared spend.
+ *
+ * Refused rather than coerced, on the same reasoning as the two above and with
+ * the sharper consequence: this one decides whether a five-figure hourly spend
+ * is charged to a profile at all, so a coerced `"no"` reading as TRUE would
+ * book an army village as needing shipped in what it never burns.
+ *
+ * Absent is not an answer and not a false: the resting state is that queues
+ * run, so a document that omits a profile leaves it spending.
+ */
+function parseQueuesRunning(raw, where) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new SetupFileError(`${where} is not a map of declarations.`)
+  }
+  const out = {}
+  for (const [name, value] of Object.entries(raw)) {
+    if (typeof value !== 'boolean') {
+      throw new SetupFileError(
+        `${where}["${name}"] is ${JSON.stringify(value)}, which is not a declaration. ` +
+          `It must be true (your queues run during these hours), false (they do not, ` +
+          `so the stores only fill), or absent to leave them running.`
+      )
+    }
+    out[name] = value
+  }
+  return out
+}
+
 /** Parse and validate a setup document. Throws rather than half-loading.
  *
  * Out-of-range levels are rejected, not clamped. Clamping down would be the
@@ -2266,6 +2311,11 @@ export function parseSetup(text) {
   const npcAttended =
     raw.npc_attended == null ? {} : parseAttendance(raw.npc_attended, 'npc_attended')
   const overnight = raw.overnight == null ? {} : parseOvernight(raw.overnight, 'overnight')
+  // v13, and absent is the resting state rather than a cleared answer: a v12
+  // document knows nothing about the field, and reading its silence as "nothing
+  // queues" would stop a real spend on every profile it names.
+  const queuesRunning =
+    raw.queues_running == null ? {} : parseQueuesRunning(raw.queues_running, 'queues_running')
   // null rather than an empty pair: absent means "reserve nothing", and a pair
   // is what the boxes hold. Refused rather than coerced on the same discipline
   // the window map follows -- the backend's `_ClockTime` refuses it too, so
@@ -2475,6 +2525,7 @@ export function parseSetup(text) {
     profileWindows,
     npcAttended,
     overnight,
+    queuesRunning,
     reservedWindow,
     pruneToWindow,
     merchantCapacityMeasured,
@@ -2511,6 +2562,7 @@ export function mergeSetup({
   profileWindows,
   npcAttended,
   overnight,
+  queuesRunning,
   reservedWindow,
   pruneToWindow,
   merchantCapacityMeasured,
@@ -2592,6 +2644,7 @@ export function mergeSetup({
   const nextWindows = { ...(profileWindows ?? {}) }
   const nextAttendance = { ...(npcAttended ?? {}) }
   const nextOvernight = { ...(overnight ?? {}) }
+  const nextQueues = { ...(queuesRunning ?? {}) }
   const profilesLoaded = []
   const droppedVillages = new Set()
   for (const [name, alloc] of Object.entries(setup.profiles ?? {})) {
@@ -2624,6 +2677,12 @@ export function mergeSetup({
   for (const [name, declared] of Object.entries(setup.overnight ?? {})) {
     nextOvernight[name] = declared
   }
+  // Same rule, and it has to carry `true` as well as `false`: the map on screen
+  // may already say a profile stopped, and a file that says it runs is the
+  // operator correcting exactly that.
+  for (const [name, running] of Object.entries(setup.queuesRunning ?? {})) {
+    nextQueues[name] = running
+  }
 
   // A role the file names replaces the template on screen wholesale, on the
   // same rule the profiles follow and for the same reason: half of an old
@@ -2652,6 +2711,7 @@ export function mergeSetup({
     profileWindows: nextWindows,
     npcAttended: nextAttendance,
     overnight: nextOvernight,
+    queuesRunning: nextQueues,
     merchantModel: setup.merchantModel ?? null,
     // The file wins where it HAS one and says nothing where it does not -- the
     // same rule the merchant model above follows. Absent is not a clear: a v8

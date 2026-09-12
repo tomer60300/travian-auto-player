@@ -250,7 +250,7 @@ describe('profiles in the setup file', () => {
     // whenever a field is added, so that an older build refuses a file it would
     // otherwise half-load, and a literal is what makes forgetting the bump a
     // failing test rather than a tautology.
-    expect(setup.version).toBe(12)
+    expect(setup.version).toBe(13)
     expect(setup.profiles.Night.crop[20030].value).toBe(-8694)
     expect(setup.profile_windows.Night).toEqual(['23:00', '07:00'])
     expect(setup.merchant_model.base_capacity).toBe(2500)
@@ -2747,7 +2747,7 @@ describe('the merchant cap in the setup file', () => {
     // out-of-window firing live in the game; a v10 build dropping the
     // acknowledgement asks the operator for a reading they have already taken,
     // on every plan.
-    expect(SETUP_VERSION).toBe(12)
+    expect(SETUP_VERSION).toBe(13)
 
     const older = {
       format: SETUP_FORMAT,
@@ -3269,7 +3269,7 @@ describe('the reserved NPC-burst window in the setup file', () => {
     // whenever a field is added, so that an older build refuses a file it would
     // otherwise half-load, and a literal is what makes forgetting the bump a
     // failing test rather than a tautology.
-    expect(setup.version).toBe(12)
+    expect(setup.version).toBe(13)
     expect(setup.reserved_window).toEqual(['20:00', '21:00'])
     expect(roundTrip(setup).reservedWindow).toEqual(['20:00', '21:00'])
   })

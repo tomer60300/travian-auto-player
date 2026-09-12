@@ -1094,6 +1094,22 @@ class ProfileSegment:
     this replay the answer came from the operator.
     """
 
+    queues_running: bool = True
+    """Whether the declared material spend actually happens in these hours.
+
+    The spend is the building and training queues, and an operator who only
+    queues while awake burns nothing overnight -- so charging a DAY figure to
+    the night reports every army village draining through hours in which
+    nothing spends. Per SEGMENT and not per account, because that is the whole
+    question: the same village burns by day and only fills by night, inside one
+    replay.
+
+    True by default, and deliberately NOT inferred from the hours. A queue set
+    before bed keeps consuming while its owner sleeps, which is exactly how it
+    differs from :attr:`npc_attended` -- conversion is a manual act, a queue is
+    not. Silence therefore means spending.
+    """
+
     def covers(self, minute: int) -> bool:
         if self.start_minute == self.end_minute:
             return False  # zero-width: validated away upstream, inert here
@@ -1216,7 +1232,13 @@ def simulate_profile_cycle(
     if step_minutes < 1:
         raise ValueError(f"step_minutes must be at least 1, got {step_minutes}")
 
-    own_rates = _net_of_consumption(own_rates, consumption)
+    # Both readings are kept, because a day that queues and a night that does
+    # not are one replay over one set of stores: the rate has to switch with the
+    # segment rather than being netted once for the whole day. Where every
+    # segment spends -- the default, and every caller before `queues_running`
+    # existed -- `spending_rates` is the only one ever read and this is the
+    # same replay it always was.
+    spending_rates = _net_of_consumption(own_rates, consumption)
     ceilings = ceilings or {}
 
     # Every per-store lookup :func:`apply` needs, flattened to a single
@@ -1315,10 +1337,25 @@ def simulate_profile_cycle(
     # reported as running dry.
     own_flat: list[tuple[tuple[int, Resource], float, bool]] = [
         ((vid, resource), own, own < 0)
-        for vid, per in own_rates.items()
+        for vid, per in spending_rates.items()
         for resource, own in per.items()
         if own
     ]
+    # The same list off the GROSS rate, for the segments that burn nothing. Both
+    # are built from the same nested iteration, so the order stores are moved in
+    # -- which decides which breach is recorded first -- is the one this replay
+    # has always used. Selected once per tick rather than per store, so the hot
+    # path pays a single branch and nothing per village.
+    idle_flat: list[tuple[tuple[int, Resource], float, bool]] = (
+        own_flat
+        if all(segment.queues_running for segment in segments)
+        else [
+            ((vid, resource), own, own < 0)
+            for vid, per in own_rates.items()
+            for resource, own in per.items()
+            if own
+        ]
+    )
 
     nominal: dict[tuple[int, Resource], float] = {}
     breaches: list[TrajectoryBreach] = []
@@ -1462,16 +1499,24 @@ def simulate_profile_cycle(
             end = ticks[position + 1] if position + 1 < len(ticks) else MINUTES_PER_DAY
             span_hours = (end - minute) / 60.0
             if span_hours > 0:
-                for key, own, draining in own_flat:
-                    apply(key, own * span_hours, minute, day, draining=draining)
-                # Hand-shipped obligations: rate-based, and only while the
-                # profile that owns them is the one running.
                 active = segment_at(minute)
+                # The spend belongs to the profile that owns this minute. An
+                # hour NO profile covers keeps spending: `queues_running` is a
+                # declaration, absent one the default is that queues run, and
+                # reading a gap as idle would quietly stop the spend in hours
+                # nobody described. That is the opposite of the conversion
+                # budget below, which needs somebody present to accrue at all.
+                for key, own, draining in (
+                    idle_flat if active is not None and not active.queues_running else own_flat
+                ):
+                    apply(key, own * span_hours, minute, day, draining=draining)
                 # Conversion capacity accrues only while somebody is awake to
                 # convert. An hour with no profile at all is nobody's hour, so
                 # it accrues nothing either.
                 if reserves and active is not None and active.npc_attended:
                     _accrue(reserves, budget, span_hours)
+                # Hand-shipped obligations: rate-based, and only while the
+                # profile that owns them is the one running.
                 if active is not None:
                     for vid, per in active.manual_rates.items():
                         for resource, rate in per.items():

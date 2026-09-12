@@ -476,3 +476,77 @@ class TestARoleTemplateReachesTheSameCrash:
 
         assert result.allocations[Resource.CLAY][ARMY].value == 0.0
         assert result.unmet[Resource.CLAY] == pytest.approx(1_668.0)
+
+
+class TestAProfileWhoseQueuesAreNotRunningSpendsNothing:
+    """`queues_running=false` says the declared material spend does not happen
+    during these hours, so the derivation must not net it off production.
+
+    The spend is a DAY figure on an account whose operator queues while awake:
+    building and training run from the marketplace chair, and stop when they
+    leave it. Overnight the stores only fill. Netting a day spend into the night
+    booked every army village as needing that spend DELIVERED -- on the
+    operator's own account 41,520 lumber/h of demand that nothing spends -- and
+    the profile came back reporting five figures an hour of shortfall it had
+    invented.
+
+    Not inferred from `overnight`, and that is the ruling. A build queue set
+    before bed keeps consuming while its owner sleeps, so "asleep" does not mean
+    "not spending" -- unlike `npc_attended`, where the conversion really is a
+    manual act. Silence therefore means SPENDING, and only an explicit
+    declaration turns it off: `TestConsumptionReachesTheFourthPlanningPath`
+    above pins that a night window alone changes nothing.
+    """
+
+    def _derive_with(self, consumption, *, queues_running=None, vid=ARMY):
+        extra = {
+            "config": [
+                {"village_id": HUB, "trade_office_level": 19},
+                {"village_id": vid, "consumption_per_hour": consumption},
+            ]
+        }
+        if queues_running is not None:
+            extra["queues_running"] = queues_running
+        return asyncio.run(post_night_profile(_body(**extra), USER))
+
+    SPEND = {"lumber": 1750, "clay": 1750, "iron": 1750}
+
+    def test_the_spend_is_not_netted_off_production(self):
+        """03 makes 1,750/h of clay and spends all of it by day. With the queues
+        off it keeps every unit, exactly as if nothing had been declared."""
+        stated = self._derive_with(self.SPEND, queues_running=False)
+        never_declared = _derive()
+
+        for resource in (Resource.CLAY, Resource.IRON):
+            assert stated.allocations[resource][ARMY].value == pytest.approx(
+                never_declared.allocations[resource][ARMY].value
+            ), f"{resource.value}: a spend that does not happen still moved the derivation"
+
+    def test_it_invents_no_demand_nobody_spends(self):
+        """The defect that prompted this. A spend past production makes the
+        village read as needing the difference shipped in, and that claim lands
+        in `unmet` -- five figures an hour of shortfall on hours in which the
+        village spends nothing at all."""
+        running = self._derive_with({"clay": 1750 + 3_418})
+        stopped = self._derive_with({"clay": 1750 + 3_418}, queues_running=False)
+
+        assert running.unmet.get(Resource.CLAY, 0.0) > 0.0
+        assert stopped.unmet.get(Resource.CLAY, 0.0) == pytest.approx(0.0)
+
+    def test_silence_still_spends(self):
+        """The default is the game's behaviour, not this operator's habit."""
+        silent = self._derive_with(self.SPEND)
+        stated = self._derive_with(self.SPEND, queues_running=True)
+
+        assert silent.allocations == stated.allocations
+        assert silent.allocations[Resource.CLAY][ARMY].value == pytest.approx(0)
+
+    def test_a_spend_for_a_village_not_in_the_snapshot_is_still_refused(self):
+        """The figure is still READ and still validated when it will not be
+        applied: a typo the operator cannot see is the defect R3-D2 filed, and
+        declaring the queues off must not become a door around it."""
+        with pytest.raises(HTTPException) as caught:
+            self._derive_with({"lumber": 10}, queues_running=False, vid=999)
+
+        assert caught.value.status_code == 422
+        assert "999" in str(caught.value.detail)

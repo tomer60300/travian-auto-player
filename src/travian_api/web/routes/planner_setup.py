@@ -105,7 +105,7 @@ router = APIRouter(prefix="/api/distribution", tags=["distribution"])
 # by any checker reading this module.
 SETUP_FORMAT: Final = "travian-planner-owned-state"
 
-READABLE_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+READABLE_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)
 """Versions this build can read. A v1 document simply carries no profiles, a v2
 one no roles, a v3 one no per-village relay answer, a v4 one no merchant cap, a
 v5 one no relay tier and a v6 one no per-profile NPC attendance, so refusing any
@@ -319,6 +319,14 @@ class SetupDocument(BaseModel):
     # reason; this is the server half of that rule.
     npc_attended: dict[str, StrictBool] = {}
     overnight: dict[str, StrictBool] = {}
+    # v13, declared here on exactly the same rule and for a loss of the same
+    # size: whether a profile's hours run the material spend section 2 declares.
+    # Dropped, a DAY spend is charged to the night, and every army village is
+    # booked as needing shipped in what nothing in those hours burns -- five
+    # figures an hour of demand on the account that prompted it. `StrictBool`
+    # because the resting state is TRUE: a coerced value here does not merely
+    # mis-answer, it turns "no answer" into a profile that stopped spending.
+    queues_running: dict[str, StrictBool] = {}
     # Minutes of the day to keep clear of ARRIVALS, so the operator's manual NPC
     # burst is not competing with merchants landing. A PAIR and not a fourth map
     # beside the three per-profile ones, because it is one person at one

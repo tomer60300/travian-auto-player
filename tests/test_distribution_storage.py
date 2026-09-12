@@ -913,6 +913,95 @@ class TestConsumptionAcrossTheProfileDay:
         assert now_breaches == was_breaches
 
 
+class TestASpendBelongsToTheProfileThatOwnsTheMinute:
+    """The same village burns by day and only fills by night, in ONE replay.
+
+    The spend used to be netted off production once for the whole day, which is
+    the only shape a single flat rate can have -- so an operator who queues only
+    while awake had a DAY figure charged to every night hour, and the composite
+    reported army villages draining through hours in which nothing spends.
+    `queues_running` is per segment because that is the whole question.
+
+    Not inferred from the hours: a queue set before bed keeps consuming, so the
+    default is that it runs and only a declaration stops it. An hour NO profile
+    covers keeps spending for the same reason -- there is no declaration there
+    to read, and quietly stopping the spend in undescribed hours would flatter
+    the account exactly where nobody is looking.
+    """
+
+    SPEND = 2_000.0
+    OWN = 1_000.0
+
+    def _run(self, *, day_queues: bool, night_queues: bool, covered: bool = True):
+        day = ProfileSegment(
+            name="Day",
+            start_minute=7 * 60,
+            end_minute=23 * 60,
+            queues_running=day_queues,
+        )
+        night = ProfileSegment(
+            name="Night",
+            start_minute=23 * 60,
+            end_minute=7 * 60 if covered else 6 * 60,
+            queues_running=night_queues,
+        )
+        return simulate_profile_cycle(
+            [day, night],
+            own_rates={1: {Resource.CROP: self.OWN}},
+            stocks={1: {Resource.CROP: 400_000}},
+            capacities={1: {Resource.CROP: 2_000_000}},
+            consumption={1: {Resource.CROP: self.SPEND}},
+            step_minutes=5,
+            max_days=4,
+        )
+
+    def _net(self, rows):
+        return next(t for t in rows if t.village_id == 1).daily_net
+
+    def test_a_night_that_does_not_queue_keeps_its_production(self):
+        """16 day hours net -1,000/h and 8 night hours net +1,000/h, against
+        -1,000/h for all 24 when the night is charged the day's spend."""
+        both, _ = self._run(day_queues=True, night_queues=True)
+        day_only, _ = self._run(day_queues=True, night_queues=False)
+
+        assert self._net(both) == pytest.approx(-1_000.0 * 24, abs=60.0)
+        assert self._net(day_only) == pytest.approx(-1_000.0 * 16 + 1_000.0 * 8, abs=60.0)
+
+    def test_stopping_every_segment_is_the_same_as_declaring_no_spend(self):
+        stopped, _ = self._run(day_queues=False, night_queues=False)
+
+        assert self._net(stopped) == pytest.approx(self.OWN * 24, abs=60.0)
+
+    def test_silence_is_unchanged(self):
+        """Every caller before the field existed passed no answer at all, and
+        the default has to leave that replay byte-for-byte what it was."""
+        rows, breaches = self._run(day_queues=True, night_queues=True)
+        default = simulate_profile_cycle(
+            [
+                ProfileSegment(name="Day", start_minute=7 * 60, end_minute=23 * 60),
+                ProfileSegment(name="Night", start_minute=23 * 60, end_minute=7 * 60),
+            ],
+            own_rates={1: {Resource.CROP: self.OWN}},
+            stocks={1: {Resource.CROP: 400_000}},
+            capacities={1: {Resource.CROP: 2_000_000}},
+            consumption={1: {Resource.CROP: self.SPEND}},
+            step_minutes=5,
+            max_days=4,
+        )
+
+        assert (rows, breaches) == default
+
+    def test_an_hour_no_profile_covers_still_spends(self):
+        """A gap carries no declaration, so it keeps the default rather than
+        reading as idle -- the opposite of the conversion budget, which needs
+        somebody present to accrue at all."""
+        gapped, _ = self._run(day_queues=True, night_queues=False, covered=False)
+
+        # 16 day hours spending, 7 night hours idle, and the uncovered 06:00-07:00
+        # spending like the day does.
+        assert self._net(gapped) == pytest.approx(-1_000.0 * 17 + 1_000.0 * 7, abs=60.0)
+
+
 class TestNpcAcrossTheProfileDay:
     """The composite replay needs section 7 too, and needs it per segment.
 

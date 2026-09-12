@@ -134,6 +134,35 @@ export function overnightMapOnly(stored) {
   return out
 }
 
+/** Only the real booleans in a stored queues-running map.
+ *
+ * Its own function for the reason above, and the rule it owns is the opposite
+ * one: the resting state here is TRUE, so a value this drops reads as queues
+ * RUNNING rather than as silence. A stored `"no"` coerced by the backend's lax
+ * `bool` would be true anyway; what it must never do is turn a missing answer
+ * into a profile that spends nothing, because that is the reading which quietly
+ * stops a real spend and flatters every store it touches.
+ */
+export function queuesRunningMapOnly(stored) {
+  const out = {}
+  for (const [name, value] of Object.entries(stored ?? {})) {
+    if (typeof value === 'boolean') out[name] = value
+  }
+  return out
+}
+
+/** Whether a profile's declared material spend runs in its hours.
+ *
+ * TRUE unless the operator said otherwise: a build or training queue set before
+ * bed keeps consuming while its owner sleeps, so only an explicit answer stops
+ * it. Never inferred from the window, which is what separates it from
+ * `overnight` -- and from `npc_attended`, where being asleep really does stop
+ * the manual act.
+ */
+export function queuesRunningFor(profileQueues, name) {
+  return profileQueues?.[name] !== false
+}
+
 /** `overnight` for a request body or a segment, or nothing at all.
  *
  * Omitted when nothing was declared, because absent is what asks the backend

@@ -8,6 +8,7 @@ import {
   coversSmallHours,
   describeOvernight,
   dispatchWindowFor,
+  queuesRunningFor,
   windowDayShare,
   MINUTES_IN_DAY,
 } from '../utils/plannerClock'
@@ -58,11 +59,13 @@ export default function DayNightPanel({
   defaultWindows,
   profileAttendance,
   profileOvernight,
+  profileQueues,
   attendanceRequired,
   reservedWindow,
   onWindow,
   onAttendance,
   onOvernight,
+  onQueuesRunning,
   onReservedWindow,
   onSelectProfile,
 }) {
@@ -198,6 +201,12 @@ export default function DayNightPanel({
               >
                 Overnight
               </th>
+              <th
+                className="text-left px-2"
+                title="Whether the material spend you declared in section 2 — the building and training queues — actually runs during this profile's hours. Queues run unattended, so this is NOT the same question as 'overnight': a queue set before bed keeps burning while you sleep. Turn it off only for a profile whose hours you do not queue in; left on, the spend is netted off production as it always was."
+              >
+                Queues
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -218,6 +227,7 @@ export default function DayNightPanel({
               const answer = attendanceFor(profileAttendance, name)
               const declaredNight =
                 typeof profileOvernight?.[name] === 'boolean' ? profileOvernight[name] : null
+              const queuesRunning = queuesRunningFor(profileQueues, name)
               const suggestion = suggestedAttendance(hours)
               const owed = attendanceRequired && pair != null && answer === null
               // The same question, unanswered, on a profile with no hours. It
@@ -422,6 +432,25 @@ export default function DayNightPanel({
                     <span className="block text-secondary mt-0.5">
                       {describeOvernight(declaredNight, hours)}
                     </span>
+                  </td>
+                  {/* A plain checkbox rather than the three-state select beside
+                      it: this field has no "derive it" state to offer. Absent
+                      means the queues run, because that is what they do unless
+                      somebody stops them -- so the box starts ticked and only
+                      an operator who clears it changes anything. Not disabled
+                      without hours: a round-the-clock profile still spends. */}
+                  <td className="px-2">
+                    <label className="inline-flex items-center gap-1.5 touch-target">
+                      <input
+                        type="checkbox"
+                        checked={queuesRunning}
+                        aria-label={`Do your build and training queues run during ${name}`}
+                        onChange={(e) => onQueuesRunning(name, e.target.checked)}
+                      />
+                      <span className="text-secondary">
+                        {queuesRunning ? 'Spends' : 'Only fills'}
+                      </span>
+                    </label>
                   </td>
                 </tr>
               )

@@ -1226,6 +1226,25 @@ class PlanRequest(BaseModel):
             "that is where the hours are."
         ),
     )
+    queues_running: bool = Field(
+        default=True,
+        description=(
+            "Whether the material spend in `consumption_per_hour` (and in the "
+            "role templates) actually happens during these hours -- the building "
+            "and training queues that burn it. False stops it being netted off "
+            "production for this profile, so the stores only fill. "
+            "TRUE by default, and NOT derived from `overnight`: a queue set "
+            "before bed keeps consuming while its owner sleeps, so silence has "
+            "to mean spending. That is the opposite of `npc_attended`, where "
+            "the conversion really is a manual act nobody performs asleep. "
+            "Declare it false for a profile whose hours the operator does not "
+            "queue in: a DAY spend netted into the night books every army "
+            "village as needing that spend delivered, which is demand no hour "
+            "of that profile ever creates. The figure is still read and still "
+            "validated either way -- an unknown village is the same 422 -- "
+            "because a spend silently dropped is the defect R3-D2 filed."
+        ),
+    )
     npc_attended: bool | None = Field(
         default=None,
         description=(
@@ -2166,6 +2185,15 @@ class DaySegmentInput(BaseModel):
             "not the night)."
         ),
     )
+    queues_running: bool = Field(
+        default=True,
+        description=(
+            "Whether the declared material spend actually happens during THIS "
+            "profile's hours. See `PlanRequest.queues_running`: true by default, "
+            "and never inferred from the window or from `overnight`, because a "
+            "queue runs unattended and sleeping does not stop it."
+        ),
+    )
     npc_attended: bool | None = Field(
         default=None,
         description=(
@@ -3077,6 +3105,27 @@ def _resolve_roles(body: PlanRequest) -> _ResolvedRoles:
     )
 
 
+def _spend_during(
+    consumption: Mapping[int, Mapping[Resource, float]],
+    *,
+    queues_running: bool,
+) -> Mapping[int, Mapping[Resource, float]]:
+    """What is actually spent in one profile's hours.
+
+    ONE place for the rule, exactly as `_resolve_roles` is the one place for
+    the merge: the derivation, the plan and both replays have to read the same
+    answer, and a profile that spends in one of them and not in another is how
+    two endpoints come to describe one account differently.
+
+    Resolving it here rather than at the four call sites also keeps the
+    declaration separate from the VALIDATION of the figure it governs. Every
+    caller still resolves the full map first and still refuses a spend naming a
+    village the snapshot does not contain -- `queues_running=False` says a
+    figure does not apply tonight, never that it stopped being read (R3-D2).
+    """
+    return consumption if queues_running else {}
+
+
 def _npc_store_deltas(plan: DistributionPlan) -> dict[int, dict[Resource, float]]:
     """What section 7's conversion does to a floored village's OWN stores, per hour.
 
@@ -3211,7 +3260,10 @@ def _storage_findings(
     # from the same resolver, because a replay netting a different spend from
     # the one the plan was built with reports overflows that plan never had.
     roles = _resolve_roles(body)
-    consumption = roles.consumption
+    # Only what this profile's hours actually burn: the replay reports what the
+    # stores do, and a day spend charged to a profile that does not queue shows
+    # every army village draining through hours in which nothing spends.
+    consumption = _spend_during(roles.consumption, queues_running=body.queues_running)
     # Section 7's conversion, from the same function the trigger table reads.
     # It is not route cargo -- NPC exchanges inside one village -- so it appears
     # in neither `shipped` below nor the snapshot's own rates, and the two
@@ -3841,6 +3893,10 @@ async def post_night_profile(
                 "fresh state if the village was settled after the snapshot."
             ),
         )
+    # Validated above whatever the answer, applied only where it happens: a
+    # profile the operator does not queue in spends nothing, so a DAY figure
+    # must not be netted off the night's production. See `_spend_during`.
+    spent = _spend_during(declared_consumption, queues_running=body.queues_running)
 
     villages = [
         NightVillage(
@@ -3866,11 +3922,11 @@ async def post_night_profile(
             # subtracting one would double-count the same upkeep.
             production={
                 Resource.LUMBER: (v.lumber_per_hour or 0.0)
-                - declared_consumption.get(v.village_id, {}).get(Resource.LUMBER, 0.0),
+                - spent.get(v.village_id, {}).get(Resource.LUMBER, 0.0),
                 Resource.CLAY: (v.clay_per_hour or 0.0)
-                - declared_consumption.get(v.village_id, {}).get(Resource.CLAY, 0.0),
+                - spent.get(v.village_id, {}).get(Resource.CLAY, 0.0),
                 Resource.IRON: (v.iron_per_hour or 0.0)
-                - declared_consumption.get(v.village_id, {}).get(Resource.IRON, 0.0),
+                - spent.get(v.village_id, {}).get(Resource.IRON, 0.0),
                 Resource.CROP: v.crop_per_hour or 0.0,
             },
         )
@@ -4212,8 +4268,15 @@ async def post_day_check(
         # funded by the trading that actually happens during it. Without this
         # the night profile would be sized from the day's conversion, which is
         # the exact mis-funding `npc_attended` exists to prevent.
+        # `queues_running` travels with the hours for the same reason attendance
+        # does: the spend is a property of the profile that owns the minute, and
+        # the composite replay below gates it per segment off the same answer.
         per_profile = body.model_copy(
-            update={"allocations": segment.allocations, "npc_attended": segment.npc_attended}
+            update={
+                "allocations": segment.allocations,
+                "npc_attended": segment.npc_attended,
+                "queues_running": segment.queues_running,
+            }
         )
         # Only the night's own halves carry a completion deadline, so only they
         # are given where it falls; `build_beat` ignores it on any other
@@ -4298,6 +4361,7 @@ async def post_day_check(
                 # None only where no village declared a floor, in which case no
                 # reserve exists and this decides nothing.
                 npc_attended=bool(segment.npc_attended),
+                queues_running=segment.queues_running,
             )
         )
         # Every segment sizes the same villages' reserves from its own hours, so
@@ -4883,7 +4947,12 @@ async def _plan_account(
             ),
         )
     consumption: dict[Resource, dict[int, float]] = {}
-    for vid, per_resource in declared_consumption.items():
+    # Validated above whatever the answer, applied only where it happens. The
+    # allocation layer sizes every target off the net rate, so a spend charged
+    # to hours that do not queue asks the account to ship what nothing burns.
+    for vid, per_resource in _spend_during(
+        declared_consumption, queues_running=body.queues_running
+    ).items():
         for resource, amount in per_resource.items():
             # Same gate the NPC policy uses: a village whose rate for this
             # resource could not be read is dropped from the resource plan
@@ -6587,6 +6656,12 @@ async def post_execute(
                     # that WRITES, so a night profile must be funded by the
                     # trading that happens overnight -- none of it.
                     "npc_attended": segment.npc_attended,
+                    # And the spend, for the same reason and from the same
+                    # declaration /day-check reads: the routes this endpoint
+                    # CREATES are sized off the net rate, so a profile planned
+                    # here against a spend its hours do not make would ship what
+                    # nothing burns.
+                    "queues_running": segment.queues_running,
                     # Latency is NOT overridden here. It used to be replaced by
                     # the segment's own window length, which /day-check does not
                     # do -- so one body was planned against a 2h target by the
