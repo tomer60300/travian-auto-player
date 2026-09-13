@@ -6261,12 +6261,19 @@ def _row_minute(e: ExistingRoute) -> int:
     -1 can never equal a planned minute, so a row whose departure could not be
     read reconciles by recreation rather than by trust.
 
-    Delegates the arithmetic to :func:`minute_of_day` rather than repeating it.
-    They were two spellings of one conversion in two modules, and #76 turns on
-    whether that conversion needs a server/UTC shift -- a question that must get
-    one answer applied in one place, not an answer applied here and forgotten
-    there.
+    Prefers ``departure_minute``, which the trade-route service derived from the
+    row's epoch and the server's OWN stated clock at the moment it read the
+    page. That conversion is #76's answer: the page publishes UTC epochs and the
+    operator's "send at HH:MM" is an hour ahead of them, so a raw
+    ``departure_at % 86400`` names a different minute -- and, for a row near
+    midnight, a different day.
+
+    Falls back to the unshifted reading only for a route with no clock context
+    at all, which in practice means one built in a test rather than read from a
+    page.
     """
+    if e.departure_minute is not None:
+        return e.departure_minute
     minute = minute_of_day(e.departure_at)
     return -1 if minute is None else minute
 

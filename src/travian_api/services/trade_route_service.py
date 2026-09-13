@@ -55,6 +55,7 @@ from ..parsers.html_parser import DEFAULT_MAP_SPAN
 from ..services.distribution.allocation import Resource
 from ..stealth.human_delay import ActionType
 from .distribution.execution_trace import ExecutionTrace
+from .distribution.window_pruning import minute_of_day
 
 logger = logging.getLogger(__name__)
 
@@ -303,6 +304,19 @@ class ExistingRoute:
     # are the only thing that tells them apart, and therefore the only way to say
     # which of them fall inside a profile's hours. None when the page did not say.
     departure_at: int | None = None
+    # The same instant as `departure_at`, converted to MINUTES PAST MIDNIGHT ON
+    # THE GAME'S CLOCK, or None when the server's offset was not known at the
+    # time of the read.
+    #
+    # Both are kept because they answer different questions. `departure_at` is a
+    # true UTC epoch and stays one, so anything echoing it stays honest. Every
+    # SCHEDULE decision -- which rows match the plan, which rows fall outside a
+    # profile's window and get deleted -- is a minute-of-day question, and the
+    # operator's minutes are on the server's clock, which on this account runs an
+    # hour ahead of the epochs the page publishes (#76). Deriving the minute at
+    # the point of use would mean carrying the offset to a dozen call sites and
+    # getting it right at every one.
+    departure_minute: int | None = None
 
 
 # How far a live route's cargo may drift from the plan before it is rewritten.
@@ -351,6 +365,12 @@ class TradeRouteService:
         trace: ExecutionTrace | None = None,
     ) -> None:
         self.http_client = http_client
+        # The server's clock, learned from any page that states it and reused
+        # for reads that cannot state it (the GraphQL read-back carries no
+        # `Travian.Game.timestamp`). A server property, not a per-read one --
+        # though it does move with daylight saving, which is why it is re-read
+        # from every page rather than resolved once at connect.
+        self.server_utc_offset_minutes: int | None = None
         # Records every write with its payload and the game's latency. Optional
         # so nothing here depends on being traced, but a live run should always
         # pass one: without it a route that appears in-game with the wrong cargo
@@ -390,6 +410,19 @@ class TradeRouteService:
         return self._origin_lock(village_id)
 
     # ── Read ──────────────────────────────────────────────────────────
+
+    def _departure_minute(self, departure_at: int | None) -> int | None:
+        """A row's departure as minutes past midnight ON THE GAME'S CLOCK.
+
+        None when the epoch is missing, and None when the server's offset has
+        not been learned yet -- which is a different answer from zero. A caller
+        that treats "unknown" as "midnight" would delete or spare a row for a
+        reason nobody established, which is the same distinction
+        :func:`minute_of_day` refuses to blur.
+        """
+        if departure_at is None or self.server_utc_offset_minutes is None:
+            return None
+        return minute_of_day(departure_at, server_utc_offset_minutes=self.server_utc_offset_minutes)
 
     async def open_marketplace(self, village_id: int) -> str:
         """Open the marketplace (gid=17) for a village and return its HTML.
@@ -538,6 +571,7 @@ class TradeRouteService:
                 active=r.get("active", True),
                 cargo=_cargo_of(r),
                 departure_at=r.get("departure_at"),
+                departure_minute=self._departure_minute(r.get("departure_at")),
             )
             for r in parsed
         ]
@@ -561,7 +595,19 @@ class TradeRouteService:
         the reconciler creates the whole plan again.
         """
         html = await self.open_marketplace(village_id)
-        from ..parsers.html_parser import MarketplaceModelInvalid, read_marketplace
+        from ..parsers.html_parser import (
+            MarketplaceModelInvalid,
+            parse_server_utc_offset_minutes,
+            read_marketplace,
+        )
+
+        # Every page states it; remember the latest rather than resolving it
+        # once, so a daylight-saving change is picked up on the next read. A
+        # page that does not state it leaves the previous answer alone: silence
+        # is not evidence the server moved to UTC.
+        stated = parse_server_utc_offset_minutes(html)
+        if stated is not None:
+            self.server_utc_offset_minutes = stated
 
         try:
             got = read_marketplace(html, map_span)
@@ -624,6 +670,7 @@ class TradeRouteService:
                 active=r.get("active", True),
                 cargo=_cargo_of(r),
                 departure_at=r.get("departure_at"),
+                departure_minute=self._departure_minute(r.get("departure_at")),
             )
             for r in parsed
         ]
