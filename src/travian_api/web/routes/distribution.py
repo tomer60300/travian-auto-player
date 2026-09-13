@@ -131,6 +131,7 @@ from travian_api.services.distribution.storage import (
     storage_findings,
     store_status,
 )
+from travian_api.services.distribution.window_pruning import minute_of_day
 from travian_api.services.trade_route_service import (
     ExistingRoute,
     MarketplaceUnreadable,
@@ -6246,10 +6247,15 @@ def _row_minute(e: ExistingRoute) -> int:
 
     -1 can never equal a planned minute, so a row whose departure could not be
     read reconciles by recreation rather than by trust.
+
+    Delegates the arithmetic to :func:`minute_of_day` rather than repeating it.
+    They were two spellings of one conversion in two modules, and #76 turns on
+    whether that conversion needs a server/UTC shift -- a question that must get
+    one answer applied in one place, not an answer applied here and forgotten
+    there.
     """
-    if e.departure_at is None:
-        return -1
-    return int(e.departure_at % 86400) // 60
+    minute = minute_of_day(e.departure_at)
+    return -1 if minute is None else minute
 
 
 def _stable_rows(rows: Sequence[ExistingRoute]) -> Counter:
