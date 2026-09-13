@@ -229,8 +229,12 @@ def _cached_on_disk(key: tuple[int, int]):
         try:
             with path.open("rb") as handle:
                 return pickle.load(handle)
-        except (EOFError, pickle.UnpicklingError):
-            # A torn file from a killed run. Rebuild rather than fail.
+        except (EOFError, pickle.UnpicklingError, OSError):
+            # A torn file from a killed run, or -- on Windows -- a file another
+            # worker is replacing at this instant, which surfaces as an OSError
+            # on open rather than as a short read. Both mean "no usable entry":
+            # rebuild rather than fail, because this is a memo and the only cost
+            # of missing it is time.
             return None
     return None
 
@@ -243,7 +247,25 @@ def _store_on_disk(key: tuple[int, int], value) -> None:
     staging = path.with_suffix(f".{os.getpid()}.tmp")
     with staging.open("wb") as handle:
         pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    os.replace(staging, path)
+    try:
+        os.replace(staging, path)
+    except OSError:
+        # `os.replace` is atomic on POSIX and NOT on Windows, which refuses it
+        # with `PermissionError: [WinError 5]` while any other process holds the
+        # DESTINATION open -- precisely what eight xdist workers solving the
+        # same account do to each other. The original comment had the hazard
+        # backwards: the reader does not see a half-written file, it kills the
+        # writer.
+        #
+        # Measured on this machine, cold cache, `-n 8` over this module alone:
+        # 5 failures, and 19 across the full suite on the first run after any
+        # planner edit. Every one of them a test that had found nothing wrong.
+        # Worse than the lost time, a suite that goes red for reasons unrelated
+        # to the change teaches you to re-run it rather than read it.
+        #
+        # Losing the write costs a re-solve and nothing else: this is a pure
+        # memo, and whoever held the file open has the same value in it.
+        staging.unlink(missing_ok=True)
 
 
 def planned(village_count: int, seed: int):
