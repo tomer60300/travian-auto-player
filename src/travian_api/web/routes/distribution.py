@@ -2847,10 +2847,23 @@ async def get_snapshot(
         ) from exc
 
     if not production:
+        # Do NOT blame Travian Plus here. This warning used to ask "is Travian
+        # Plus active?", and it sent the same investigation down the wrong road
+        # twice: the real cause both times was a dead session whose login page
+        # the HTTP client handed back as if it were the statistics page, while
+        # the account's own pages stated `travianPlus.isActive: true` outright.
+        # A guess dressed as a diagnosis is worse than no diagnosis, because it
+        # is the first thing anyone checks and it is checkable -- so it burns a
+        # round trip through the operator before the real cause is considered.
+        #
+        # The client now fails closed on a re-auth that did not work, so a dead
+        # session arrives as a 502 and never reaches this branch. What is left
+        # is genuinely "the table was there and had no rows in it", which is
+        # what this says.
         warnings.append(
-            "no production rates could be read from the statistics page (is Travian "
-            "Plus active?); lumber/clay/iron default to 0/h, so a plan built from "
-            "this snapshot would move nothing"
+            "the statistics page was read but carried no production rows; "
+            "lumber/clay/iron default to 0/h, so a plan built from this snapshot "
+            "would move nothing. Check the page in a browser before trusting this"
         )
     else:
         unread = [v.id for v in session.auth_state.villages if v.id not in production]

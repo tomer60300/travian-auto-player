@@ -1662,6 +1662,44 @@ class HttpClient:
                         url, headers=headers, follow_redirects=follow_redirects
                     )
 
+                # The retry landed on login as well, so the re-auth did not
+                # work. `_handle_session_expired` swallows its own failure and
+                # returns normally either way, so this is the only place that
+                # can still tell -- and without it the login page is handed back
+                # to the caller as if it were the page that was asked for.
+                #
+                # Measured on the live account 2026-09-13: the snapshot returned
+                # 200 with all 27 villages at zero merchants and zero
+                # production, and blamed Travian Plus -- which the page itself
+                # disproves. Every layer above reads a missing value as 0, so
+                # "could not read the account" arrived as "the account is
+                # empty", and the planner planned it.
+                #
+                # Same failure and same message as the `skip_reauth` branch
+                # below, which has always failed closed. The difference between
+                # the two paths was an oversight, not a policy.
+                retry_url = str(response.url) if hasattr(response, "url") else url
+                if "login" in retry_url.lower() or (
+                    "auth" in retry_url.lower() and "code" not in retry_url
+                ):
+                    logger.warning(
+                        "Re-auth did not restore the session: url=%s -> %s", url, retry_url
+                    )
+                    debug_dumper.dump(
+                        "session_expired",
+                        response.text,
+                        key="reauth_failed_login_redirect",
+                        context={
+                            "requested_url": url,
+                            "landed_url": retry_url,
+                            "status_code": response.status_code,
+                        },
+                    )
+                    raise SessionExpiredError(
+                        f"Session expired and re-authentication failed (redirected to "
+                        f"login): {retry_url}"
+                    )
+
             await self._check_suspicious_response(
                 response.text, url=url, status_code=response.status_code
             )
