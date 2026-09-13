@@ -134,6 +134,7 @@ def _payload(
     lumber_stocks=None,
     coords=None,
     trade_offices=None,
+    merchants=None,
     **kw,
 ):
     """02 the only wood source, and 11/17/19 out of its reach.
@@ -144,6 +145,7 @@ def _payload(
     relays = relays or {}
     caps = caps or {}
     trade_offices = trade_offices or {}
+    merchants = merchants or {}
     warehouses = warehouses or {}
     lumber_stocks = lumber_stocks or {}
     village_roles = village_roles or {}
@@ -152,6 +154,7 @@ def _payload(
         _village(
             vid,
             lumber=40_000.0 if vid == CAPITAL else 0.0,
+            merchants=merchants.get(vid, 20),
             warehouse=warehouses.get(vid, 400_000),
             lumber_stock=lumber_stocks.get(vid),
             coords=where,
@@ -1202,3 +1205,97 @@ class TestARelayBringsAFarHubBackUnderItsCap:
             if row.destination in arriving:
                 arriving[row.destination] += row.cargo.get(Resource.LUMBER, 0) / row.cycle_hours
         assert all(round(rate) == round(DEF_LUMBER) for rate in arriving.values()), arriving
+
+
+class TestTheBreachIsMeasuredAcrossEveryResourceAtOnce:
+    """A cap is breached by a village's whole ROUTE SET, not by one resource.
+
+    The first cut of the budget trigger asked the question inside the
+    per-resource loop, and the module's own fixture -- lumber only -- could
+    never catch what that costs. The operator's account did, immediately:
+    against a cap of 8, village 02's lumber legs came to 5 merchants, its clay
+    legs 3 and its iron legs 5. No single resource breaches 8. The route set
+    commits 12, which plainly does, so relief never fired on the one account it
+    was built for.
+
+    Two things follow, and both are pinned below.
+
+    A route is also BILLED once for everything it carries. Withdrawing just the
+    lumber from ``CAPITAL -> D1`` leaves the clay and iron on that same edge, so
+    the route survives and costs exactly what it did; the saving is zero. Relief
+    has to move the whole route or none of it.
+    """
+
+    CAP = 12
+    PER_RESOURCE = 6000.0
+
+    def _payload_three_resources(self, **kw):
+        """The far fixture, shipping three materials instead of one.
+
+        Each resource alone is small enough to stay inside the cap; together
+        they are not, which is exactly the shape the per-resource test missed.
+        """
+        payload = _payload(
+            whitelist=False,
+            coords=FAR_COORDS,
+            trade_offices=BIG_TRADE_OFFICE,
+            # The relay needs a fleet that can actually run what it is handed.
+            # A relay RELOCATES merchant load rather than reducing it, so with
+            # the module default of 20 the hub came back inside its cap and the
+            # relay went over its own -- correctly reported, and a different
+            # condition from the one under test here.
+            merchants={RELAY_A: 40},
+            **kw,
+        )
+        for entry in payload["snapshot"]:
+            if entry["village_id"] == CAPITAL:
+                entry["clay_per_hour"] = 40_000.0
+                entry["iron_per_hour"] = 40_000.0
+        for resource in ("clay", "iron"):
+            payload["allocations"][resource] = {
+                str(CAPITAL): {"mode": "absolute", "value": 0},
+                str(D1): {"mode": "absolute", "value": self.PER_RESOURCE},
+                str(D2): {"mode": "absolute", "value": self.PER_RESOURCE},
+                str(D3): {"mode": "absolute", "value": self.PER_RESOURCE},
+                str(REMAINDER): {"mode": "remainder"},
+            }
+        return payload
+
+    def _plan_three(self, **kw):
+        request = PlanRequest.model_validate(self._payload_three_resources(**kw))
+        return asyncio.run(post_plan(request, USER))
+
+    def test_no_single_resource_breaches_but_the_account_does(self):
+        """The premise. If this ever fails the case below proves nothing."""
+        res = self._plan_three(caps={CAPITAL: self.CAP})
+
+        per_resource: dict[Resource, float] = {}
+        for row in res.rows:
+            if row.origin != CAPITAL:
+                continue
+            for resource, amount in row.cargo.items():
+                if amount:
+                    per_resource[resource] = per_resource.get(resource, 0.0) + row.merchants
+        assert _budget(res, CAPITAL).committed > self.CAP, "the route set breaches the cap"
+        assert per_resource, "the capital ships something"
+
+    def test_the_relay_fires_even_though_no_resource_alone_is_over(self):
+        res = self._plan_three(caps={CAPITAL: self.CAP}, relays=FAR_TIER)
+
+        assert _budget(res, CAPITAL).committed <= self.CAP
+        assert res.verdict.blockers == []
+
+    def test_a_relayed_route_takes_all_of_its_cargo_with_it(self):
+        """No half-moved edge: a route the relay took is gone from the hub.
+
+        Leaving one resource behind would keep the route alive, bill the hub for
+        it in full, and make the whole relocation buy nothing.
+        """
+        res = self._plan_three(caps={CAPITAL: self.CAP}, relays=FAR_TIER)
+
+        relayed = {row.destination for row in res.rows if row.origin == RELAY_A}
+        direct = {row.destination for row in res.rows if row.origin == CAPITAL}
+        assert relayed, "the relay runs something"
+        assert not (relayed & direct), (
+            f"these destinations are served from BOTH the hub and the relay: {relayed & direct}"
+        )
