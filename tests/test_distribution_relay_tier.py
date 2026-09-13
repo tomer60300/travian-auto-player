@@ -133,6 +133,7 @@ def _payload(
     warehouses=None,
     lumber_stocks=None,
     coords=None,
+    trade_offices=None,
     **kw,
 ):
     """02 the only wood source, and 11/17/19 out of its reach.
@@ -142,6 +143,7 @@ def _payload(
     """
     relays = relays or {}
     caps = caps or {}
+    trade_offices = trade_offices or {}
     warehouses = warehouses or {}
     lumber_stocks = lumber_stocks or {}
     village_roles = village_roles or {}
@@ -165,6 +167,8 @@ def _payload(
             entry["relay_for"] = list(relays[vid])
         if vid in caps:
             entry["max_busy_merchants"] = caps[vid]
+        if vid in trade_offices:
+            entry["trade_office_level"] = trade_offices[vid]
         if vid in village_roles:
             entry["role"] = village_roles[vid]
         config.append(entry)
@@ -1100,24 +1104,21 @@ class TestTheBufferSeverityTurnsOnWhetherAnythingLeftFirst:
 class TestADeclaredRelayDoesNotRelieveACappedHub:
     """The tier fires on SHORTFALLS, so a cap it could fix is ignored (#74).
 
-    Drop the whitelist and 02 reaches every defensive village directly. Nothing
-    is short -- and nothing needs to be for the tier to be the right answer: 02
-    simply cannot staff five long hauls at once. The operator declares exactly
-    the structure that would fix it, and the planner does not look at it,
+    Drop the whitelist and 02 reaches every defensive village directly, so
+    nothing is short -- and nothing needs to be for the tier to be the right
+    answer: 02 simply cannot staff five hauls at once. The operator declares
+    exactly the structure that would fix it and the planner never looks,
     because `_relay_tier_flows` returns early on an empty `unmet`.
 
-    Measured here: 02 commits 19 merchants with no whitelist. Capping it at 6
-    and declaring the tier produces a BYTE-IDENTICAL plan -- same five direct
-    legs, same 19, same blocker. That is the defect, not the cap being
-    unreachable: relay is a real shape the operator asked for and the search is
-    forbidden to find on its own (`optimizer.py:84-86`).
-
-    Note what this fixture does NOT show, and why the real account is worse:
-    every village here is Trade Office 0, so a merchant carries 2,500 and cost
-    is dominated by merchants-per-send, which a relay barely improves. On the
-    operator's account the hub is Trade Office 20 (12,500 a merchant) and cost
-    is dominated by SETS IN FLIGHT over long hauls -- which is precisely what
-    pooling onto a short trunk removes.
+    THE REGIME MATTERS, and the operator's is not the default one here. Every
+    village in this module is Trade Office 0, so a merchant carries 2,500 and
+    cost is dominated by merchants-per-SEND -- which pooling onto a trunk barely
+    improves, because the trunk carries the same tonnage. On the real account
+    the hub is Trade Office 20 (12,500 a merchant) with defensive villages tens
+    of fields out, so cost is dominated by SETS IN FLIGHT: a 5h round trip
+    against a 1h cycle keeps five sets in the air, and a 0.5h trunk keeps one.
+    That is the regime `FAR_TIER` below reproduces, and the only one in which a
+    relay can bring a hub back under its cap.
     """
 
     CAP = 6
@@ -1141,14 +1142,63 @@ class TestADeclaredRelayDoesNotRelieveACappedHub:
         assert _budget(with_tier, CAPITAL).committed == _budget(without, CAPITAL).committed == 19
         assert with_tier.relays == []
 
-    @pytest.mark.xfail(
-        reason="#74: the declared tier only activates on a shortfall, so a cap it "
-        "could relieve is left breached. Widening the trigger to a budget breach "
-        "is the fix; this pins the behaviour that fix must produce.",
-        strict=True,
-    )
-    def test_a_declared_relay_should_bring_the_hub_within_its_cap(self):
-        res = _plan(whitelist=False, caps={CAPITAL: self.CAP}, relays=TIER)
+
+# The operator's own regime: a well-developed hub and defensive villages a long
+# way out, where a haul costs sets-in-flight rather than tonnage. 30+ fields at
+# 12 fields/h is a 5h round trip, so a 1h cycle keeps five merchant sets in the
+# air per destination; the relay sits 3 fields away, a 0.5h round trip, and one
+# pooled trunk replaces all of them at the hub.
+FAR_COORDS = {D1: (30, 0), D2: (32, 0), D3: (34, 0)}
+FAR_TIER = {RELAY_A: [D1, D2, D3]}
+BIG_TRADE_OFFICE = {vid: 20 for vid in COORDS}
+
+
+def _far(**kw):
+    return _plan(whitelist=False, coords=FAR_COORDS, trade_offices=BIG_TRADE_OFFICE, **kw)
+
+
+class TestARelayBringsAFarHubBackUnderItsCap:
+    """#74's fix, in the regime that makes a relay worth declaring.
+
+    Direct, the hub pays five or six sets in flight for every distant village.
+    Pooled onto a 3-field trunk it pays one send's worth, and the relay -- which
+    the operator named and which has a fleet of its own sitting idle -- runs the
+    long legs. The load is RELOCATED, not reduced: that is the point when the
+    operator's goal is an idle hub, and the reason this must be driven by the
+    breach rather than folded into the merchant-count objective.
+    """
+
+    CAP = 8
+
+    def test_direct_the_hub_is_far_past_the_cap(self):
+        res = _far(caps={CAPITAL: self.CAP})
+
+        assert _budget(res, CAPITAL).committed > self.CAP
+        assert res.shortfalls == [], "nothing is unreachable; the cap is the only problem"
+
+    def test_the_declared_relay_is_used_to_fit_the_cap(self):
+        res = _far(caps={CAPITAL: self.CAP}, relays=FAR_TIER)
 
         assert _budget(res, CAPITAL).committed <= self.CAP
         assert res.verdict.blockers == []
+
+    def test_the_relay_runs_the_long_legs_instead(self):
+        res = _far(caps={CAPITAL: self.CAP}, relays=FAR_TIER)
+
+        relayed = {r.destination for r in res.rows if r.origin == RELAY_A}
+        assert relayed & {D1, D2, D3}, "the named downstreams are served by the relay"
+        assert all(r.origin == CAPITAL for r in res.rows if r.destination == RELAY_A), (
+            "the relay is fed by the hub and nobody else -- one hop, not a chain"
+        )
+
+    def test_every_downstream_still_receives_its_full_demand(self):
+        """Green today and required to stay green: relieving a cap must not
+        pay for itself by shipping less. Direct, all three are already fed;
+        after the fix they are fed through the relay instead."""
+        res = _far(caps={CAPITAL: self.CAP}, relays=FAR_TIER)
+
+        arriving = {vid: 0.0 for vid in (D1, D2, D3)}
+        for row in res.rows:
+            if row.destination in arriving:
+                arriving[row.destination] += row.cargo.get(Resource.LUMBER, 0) / row.cycle_hours
+        assert all(round(rate) == round(DEF_LUMBER) for rate in arriving.values()), arriving
