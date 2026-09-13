@@ -882,6 +882,7 @@ def _budget_relief_withdrawals(
     budgets: Mapping[int, int],
     villages: Mapping[int, VillageState],
     pair_merchants: Callable[[int, int, Mapping[Resource, float]], int],
+    movable: Collection[Resource],
 ) -> set[tuple[int, int]]:
     """Whole ROUTES to lift off an over-budget origin and onto a declared relay.
 
@@ -954,7 +955,10 @@ def _budget_relief_withdrawals(
             (
                 (destination, cargo)
                 for (sender, destination), cargo in merged.items()
-                if sender == origin and destination in serves and serves[destination] != origin
+                if sender == origin
+                and destination in serves
+                and serves[destination] != origin
+                and any(resource in movable for resource in cargo)
             ),
             key=lambda item: (
                 -pair_merchants(origin, item[0], item[1]),
@@ -968,12 +972,23 @@ def _budget_relief_withdrawals(
             if projected <= budget:
                 break
             relay = serves[destination]
+            moving = {r: a for r, a in cargo.items() if r in movable}
+            # What the route still carries once the tier has taken its share.
+            # The declared tier is MATERIALS ONLY, so a route that also carries
+            # crop does not disappear when its materials leave -- it keeps
+            # running, and it keeps costing. Measured on the operator's account:
+            # four of village 02's five routes carry crop alongside the
+            # materials, and three of them carry both. Pricing those as if the
+            # whole route went away claims a saving the plan never gets, and
+            # would relocate a neighbour's fleet to buy nothing.
+            staying = {r: a for r, a in cargo.items() if r not in movable}
             pooled = dict(trunk.get(relay, {}))
-            for resource, amount in cargo.items():
+            for resource, amount in moving.items():
                 pooled[resource] = pooled.get(resource, 0.0) + amount
             after = (
                 projected
                 - pair_merchants(origin, destination, cargo)
+                + (pair_merchants(origin, destination, staying) if staying else 0)
                 - (pair_merchants(origin, relay, trunk[relay]) if relay in trunk else 0)
                 + pair_merchants(origin, relay, pooled)
             )
@@ -2524,10 +2539,79 @@ def build_plan(
     # account, village 02 against a cap of 8 spends 5 merchants on lumber, 3 on
     # clay and 5 on iron, so no resource breaches while the account plainly
     # does.
+    # The HELD-BACK count is rounded half-up, not the cap truncated. Truncating
+    # the cap quietly did the opposite of what this comment used to claim: a
+    # budget-1 village got a soft cap of 0 (its every merchant billed as
+    # crowding) and a budget-2 village had 50% held back. Rounding what is held
+    # keeps the fraction honest at every size -- 10% of 18 holds 2, of 10 holds
+    # 1, of 4 or fewer holds nothing, so a budget too small to spare anything
+    # simply has no soft cap.
+    soft_budgets = {
+        vid: budget - int(budget * merchant_headroom + 0.5) for vid, budget in budgets.items()
+    }
+    # Relay may only conscript a village the operator put in the crop plan; see
+    # the candidate-set comment in `_relay_scan` for why, and for what KEEP
+    # means here.
+    #
+    # The gate was chosen for correctness, and it costs nothing. Measured
+    # 2026-09-03 on this machine by overriding `relay_hub_candidates` below to
+    # the whole account and timing THIS pass alone (median of five runs, warmed):
+    #
+    #   random_account(5), 40 villages: 4.5s over 33 candidates (crop plan)
+    #                                   5.8s over 40 candidates (whole account)
+    #   random_account(7), 21 villages: 0.09s over 19, 0.09s over 21
+    #
+    # So narrowing is ~20% FASTER at 40 villages and a wash at 21 -- not the
+    # direction candidate-count arithmetic predicts, because runtime here is
+    # dominated by which relays the search FINDS and how far it then chases them,
+    # not by how many candidates it scanned.
+    crop_plan = resource_plans.get(Resource.CROP)
+    relay_hub_candidates = frozenset(
+        allocation.village_id
+        for allocation in (crop_plan.villages if crop_plan is not None else ())
+        if allocation.mode is not AllocationMode.KEEP
+    )
     withdrawn: set[tuple[int, int]] = set()
     if relay_for:
+        # A PROBE, not the plan: the greedy seed priced against the search's own
+        # result. Relief must answer "can this village's cap be met at all",
+        # and the seed answers a different and much more pessimistic question.
+        #
+        # Measured on the operator's account: at the seed, village 02 commits 18
+        # against a cap of 12; `_improve_flows` reassigns its way down to 12 on
+        # its own, with no relay involved. Deciding from the seed fired relief
+        # on a breach that was not going to survive, moved two routes into the
+        # tier -- which the search is then forbidden to touch, deliberately --
+        # and finished at 14. Worse than doing nothing, from a declaration the
+        # operator made in good faith.
+        #
+        # So the breach is measured after the search has had its turn. The probe
+        # runs with NO fixed assignment, because the tier is exactly what is
+        # being decided, and its result is thrown away.
+        probe, _converged = _improve_flows(
+            {
+                resource: {key: amount for key, amount in flows.items() if amount > EPSILON}
+                for resource, flows in direct_flows.items()
+            },
+            villages,
+            geometry,
+            merchant_model,
+            cycles,
+            budgets,
+            max_improve_passes,
+            max_relay_hops,
+            soft_budgets=soft_budgets,
+            max_cycle=max_cycle_by_destination,
+            excluded_origins=excluded_origins_by_destination,
+            relay_hub_candidates=relay_hub_candidates,
+            fixed_assignment={},
+        )
         withdrawn = _budget_relief_withdrawals(
-            {r: f for r, f in direct_flows.items() if r in MATERIALS},
+            # EVERY resource, not just the movable ones. A village's cap is
+            # breached by what its routes actually cost, and its routes carry
+            # crop too -- so a materials-only view both understates the breach
+            # and overstates what lifting the materials off would save.
+            probe,
             relay_for,
             budgets,
             villages,
@@ -2543,6 +2627,7 @@ def build_plan(
                     max_cycle_by_destination,
                 ).merchants_committed
             ),
+            MATERIALS,
         )
 
     for resource in sorted(resource_plans, key=lambda r: r.value):
@@ -2582,38 +2667,6 @@ def build_plan(
     # per-phase: excess never rises anywhere; the cost is locally improved here
     # and may rise later, strictly within per-village budgets (§8.3, §14).
     #
-    # The HELD-BACK count is rounded half-up, not the cap truncated. Truncating
-    # the cap quietly did the opposite of what this comment used to claim: a
-    # budget-1 village got a soft cap of 0 (its every merchant billed as
-    # crowding) and a budget-2 village had 50% held back. Rounding what is held
-    # keeps the fraction honest at every size -- 10% of 18 holds 2, of 10 holds
-    # 1, of 4 or fewer holds nothing, so a budget too small to spare anything
-    # simply has no soft cap.
-    soft_budgets = {
-        vid: budget - int(budget * merchant_headroom + 0.5) for vid, budget in budgets.items()
-    }
-    # Relay may only conscript a village the operator put in the crop plan; see
-    # the candidate-set comment in `_relay_scan` for why, and for what KEEP
-    # means here.
-    #
-    # The gate was chosen for correctness, and it costs nothing. Measured
-    # 2026-09-03 on this machine by overriding `relay_hub_candidates` below to
-    # the whole account and timing THIS pass alone (median of five runs, warmed):
-    #
-    #   random_account(5), 40 villages: 4.5s over 33 candidates (crop plan)
-    #                                   5.8s over 40 candidates (whole account)
-    #   random_account(7), 21 villages: 0.09s over 19, 0.09s over 21
-    #
-    # So narrowing is ~20% FASTER at 40 villages and a wash at 21 -- not the
-    # direction candidate-count arithmetic predicts, because runtime here is
-    # dominated by which relays the search FINDS and how far it then chases them,
-    # not by how many candidates it scanned.
-    crop_plan = resource_plans.get(Resource.CROP)
-    relay_hub_candidates = frozenset(
-        allocation.village_id
-        for allocation in (crop_plan.villages if crop_plan is not None else ())
-        if allocation.mode is not AllocationMode.KEEP
-    )
     assignment, converged = _improve_flows(
         assignment,
         villages,

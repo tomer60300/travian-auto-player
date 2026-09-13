@@ -39,7 +39,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from travian_api.services.distribution.allocation import Resource
+from travian_api.services.distribution.allocation import MATERIALS, Resource
 from travian_api.services.distribution.findings import Category, Severity
 from travian_api.services.distribution.schedule import MINUTES_PER_DAY
 from travian_api.web.routes.distribution import (
@@ -1298,4 +1298,157 @@ class TestTheBreachIsMeasuredAcrossEveryResourceAtOnce:
         assert relayed, "the relay runs something"
         assert not (relayed & direct), (
             f"these destinations are served from BOTH the hub and the relay: {relayed & direct}"
+        )
+
+
+class TestARouteThatAlsoCarriesCropDoesNotVanishWhenItsMaterialsLeave:
+    """The declared tier is MATERIALS ONLY, and a route is billed for all of it.
+
+    Found on the operator's account, where it is the normal case rather than an
+    edge one. Village 02's five routes: two carry clay + iron + lumber + crop,
+    one carries crop alone, two carry materials alone. So four of its twelve
+    merchants sit on routes the tier can only ever half-move.
+
+    Lifting the materials off such a route does NOT remove it. The crop stays,
+    the route keeps running, and it keeps costing -- so the saving is a
+    fraction of the route's price, and sometimes nothing at all. Pricing it as
+    though the whole route went away claims a saving the plan never gets, and
+    spends a neighbour's fleet to buy it.
+
+    This is the same half-moved-route failure
+    ``test_a_relayed_route_takes_all_of_its_cargo_with_it`` pins, crossing the
+    material/crop boundary instead of the resource-by-resource one -- and the
+    lumber-only fixture above could not see it.
+    """
+
+    CAP = 12
+    CROP_TO_D1 = 30_000.0
+
+    def _plan_with_crop_riding_along(self, **kw):
+        payload = _payload(
+            whitelist=False,
+            coords=FAR_COORDS,
+            trade_offices=BIG_TRADE_OFFICE,
+            merchants={RELAY_A: 40},
+            **kw,
+        )
+        # Put a big crop demand on D1 so CAPITAL -> D1 carries crop as well as
+        # lumber, and give the capital the crop to serve it with.
+        for entry in payload["snapshot"]:
+            if entry["village_id"] == CAPITAL:
+                entry["crop_per_hour"] = 60_000.0
+        payload["allocations"]["crop"] = {
+            str(CAPITAL): {"mode": "absolute", "value": 0},
+            str(D1): {"mode": "absolute", "value": self.CROP_TO_D1},
+            str(REMAINDER): {"mode": "remainder"},
+        }
+        return asyncio.run(post_plan(PlanRequest.model_validate(payload), USER))
+
+    def test_the_crop_still_reaches_the_downstream(self):
+        """Whatever the tier does with the materials, the crop is not dropped.
+
+        Crop has no declared tier -- it relays only where the route search finds
+        it worth doing -- so it either goes direct or through a hub the search
+        chose. Either way the village is fed.
+        """
+        res = self._plan_with_crop_riding_along(caps={CAPITAL: self.CAP}, relays=FAR_TIER)
+
+        arriving = sum(
+            row.cargo.get(Resource.CROP, 0) / row.cycle_hours
+            for row in res.rows
+            if row.destination == D1
+        )
+        # Not exact equality: a route ships whole batches, so the delivered rate
+        # quantises to the cycle. Measured here at 29,500/h against a 30,000/h
+        # target -- 98%, and the plan reports no crop shortfall for D1, which is
+        # the authority on whether the demand was actually served.
+        assert arriving >= 0.95 * self.CROP_TO_D1, arriving
+        assert not [
+            s for s in res.shortfalls if s.village_id == D1 and s.resource is Resource.CROP
+        ], "the crop demand is served, not quietly dropped"
+
+    def test_relief_is_not_claimed_for_a_route_that_stays(self):
+        """The cap is met honestly, or reported broken -- never met on paper.
+
+        `committed` is measured from the routes the plan actually emits, so if
+        relief had priced a half-moved route as a whole one, the budget would
+        come back over the cap while the search believed it had fixed it.
+        """
+        res = self._plan_with_crop_riding_along(caps={CAPITAL: self.CAP}, relays=FAR_TIER)
+        budget = _budget(res, CAPITAL)
+
+        assert budget.over_budget == (budget.committed > self.CAP), (
+            "over_budget must agree with the committed count it was computed from"
+        )
+        assert budget.committed == sum(leg.merchants for leg in budget.legs), (
+            "the committed count must be the sum of the legs it is made of"
+        )
+        assert {leg.destination for leg in budget.legs} == {
+            row.destination_name for row in res.rows if row.origin == CAPITAL
+        }, "every leg billed to the hub is a route the plan actually emits"
+
+
+class TestDeclaringARelayNeverMakesThePlanWorse:
+    """Relief answers "can this cap be met", and the greedy seed cannot tell it.
+
+    The seed is systematically more expensive than the plan that ships:
+    `_improve_flows` exists precisely to reassign it down, and relieving
+    over-budget villages is the FIRST key of its objective. So a village can be
+    far over its cap at the seed and comfortably inside it by the time the
+    search is done.
+
+    Deciding relief from the seed therefore fires on breaches that were never
+    going to survive -- and it is not a harmless false positive. The tier is
+    merged in as `fixed_assignment`, which the search is deliberately forbidden
+    to touch, so a route relief moves is a route the search can no longer
+    improve. Measured on the operator's account: at the seed village 02 commits
+    18 against a cap of 12, the search brings it to 12 unaided, and relief
+    decided from the seed finished at **14** -- worse than doing nothing, from a
+    declaration made in good faith.
+
+    Hence the probe: the breach is measured after the search has had its turn.
+    """
+
+    def _committed(self, cap, *, relays=None):
+        res = _plan(
+            whitelist=False,
+            coords=FAR_COORDS,
+            trade_offices=BIG_TRADE_OFFICE,
+            merchants={RELAY_A: 40},
+            caps={CAPITAL: cap},
+            **({"relays": relays} if relays else {}),
+        )
+        return _budget(res, CAPITAL).committed
+
+    @pytest.mark.parametrize("cap", [20, 17, 12, 8])
+    def test_the_hub_is_never_worse_off_for_the_declaration(self, cap):
+        """The invariant, across a cap that fits and caps that do not."""
+        without = self._committed(cap)
+        with_tier = self._committed(cap, relays=FAR_TIER)
+
+        assert with_tier <= without, (
+            f"cap {cap}: declaring a relay took the hub from {without} to {with_tier}"
+        )
+
+    def test_a_cap_the_search_already_meets_is_left_completely_alone(self):
+        """Nothing to relieve, so nothing is relocated and nothing is declared.
+
+        A generous cap the direct plan already fits inside: the declaration must
+        be inert, not merely harmless.
+        """
+        # 20, not more: a cap above the village's own fleet is refused at the
+        # schema, and the fixture gives every village 20 merchants.
+        generous = 20
+        assert self._committed(generous) <= generous, "the premise: the cap already fits"
+
+        res = _plan(
+            whitelist=False,
+            coords=FAR_COORDS,
+            trade_offices=BIG_TRADE_OFFICE,
+            merchants={RELAY_A: 40},
+            caps={CAPITAL: generous},
+            relays=FAR_TIER,
+        )
+        assert [r for r in res.relays if r.resource in MATERIALS] == [], (
+            "no material relay is built when the cap is already met"
         )
