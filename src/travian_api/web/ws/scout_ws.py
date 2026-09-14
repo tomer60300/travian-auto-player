@@ -32,6 +32,7 @@ from travian_api.parsers.html_parser import parse_troop_confirm_page
 from travian_api.services.auto_scout_service import _format_bonus_breakdown
 from travian_api.services.military_service import MilitaryService
 from travian_api.stealth.human_delay import ActionType
+from travian_api.stealth.navigator import map_viewport_referer
 from travian_api.stealth.timing import HumanTiming
 from travian_api.web.operation_gate import active_ops
 from travian_api.web.routes.military import _resolve_scout_unit
@@ -1142,6 +1143,7 @@ def _build_scout_scan_coro(config: dict):
                 "/api/v1/map/position",
                 {"data": {"x": scx, "y": scy, "zoomLevel": 3, "ignorePositions": []}},
                 request_type="xhr",
+                referer=map_viewport_referer(scan_client, scx, scy),
             )
             for t in resp.get("tiles", []):
                 pos = t.get("position", {})

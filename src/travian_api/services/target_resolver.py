@@ -7,6 +7,7 @@ from typing import Optional
 from ..clients.http_client import HttpClient
 from ..exceptions import InvalidTargetError, TravianAPIError
 from ..models.military import TargetInfo
+from ..stealth.navigator import map_viewport_referer
 from .recon_account import acquire_recon_client
 
 
@@ -40,6 +41,7 @@ class TargetResolver:
             response = await client.post_json(
                 "/api/v1/map/position",
                 {"data": {"x": x, "y": y, "zoomLevel": 1, "ignorePositions": []}},
+                referer=map_viewport_referer(client, x, y),
             )
 
             # Look for our target tile in the response

@@ -17,6 +17,7 @@ from ..clients.http_client import HttpClient
 from ..exceptions import ReconStrictViolation
 from ..models.farm_list import MapTileInfo
 from ..parsers.html_parser import clean_unicode
+from ..stealth.navigator import map_viewport_referer
 
 logger = logging.getLogger(__name__)
 
@@ -675,6 +676,11 @@ class AutoScoutService:
                     }
                 },
                 request_type="xhr",
+                # The map's address bar follows the viewport, so a pan is
+                # referred from where the map was looking before it. A whole
+                # scan referred from one bare /karte.php is the tell this
+                # closes -- see `map_viewport_referer`.
+                referer=map_viewport_referer(read_client, sx, sy),
             )
             for t in resp.get("tiles", []):
                 pos = t.get("position", {})
@@ -732,8 +738,16 @@ class AutoScoutService:
         HttpClient when configured (concentrates bot-detection on the
         disposable account).
         """
-        resp = await self._read_client().post_json(
-            "/api/v1/map/tile-details", {"x": x, "y": y}, request_type="xhr"
+        # Named `read_client`, matching the scan-batch call above: the recon
+        # routing guard reads these receivers by name, and the referer pin needs
+        # a handle on the SAME client that sends the request -- the recon
+        # account's navigator has its own viewport.
+        read_client = self._read_client()
+        resp = await read_client.post_json(
+            "/api/v1/map/tile-details",
+            {"x": x, "y": y},
+            request_type="xhr",
+            referer=map_viewport_referer(read_client, x, y),
         )
         html = resp.get("html", "")
         return self._parse_tile_details(x, y, html)

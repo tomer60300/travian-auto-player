@@ -141,6 +141,54 @@ class PageNavigator:
         # account has a stable browsing "personality" rather than one shared
         # deterministic (or shared-distribution) route.
         self._init_route_prefs(random)
+        # Where the map is currently looking. None = the map page was just
+        # opened and the address bar still says a bare /karte.php, which is
+        # what the capture's first map XHR is referred from.
+        self._map_viewport: Optional[tuple[int, int]] = None
+        # Which of the two observed viewport URL forms this account writes.
+        # Both appear in the capture -- `?x=19&y=88` and `?zoom=1&x=15&y=90` --
+        # because the browser rebuilds the address from the map's state, and
+        # whether a zoom level is in that state depends on what the player did.
+        # Picking one for the whole fleet would put an identical string on every
+        # map request every account ever makes; this at least splits it in two,
+        # stably per persona.
+        self._map_referer_zoomed = random.random() < 0.5
+
+    def map_viewport_referer(self, x: int, y: int) -> str:
+        """The Referer for a map XHR about ``(x, y)``, then move the map there.
+
+        A tile popup and a pan are fired by the map page's own JS, so their
+        Referer is whatever the address bar says -- and the address bar tracks
+        the VIEWPORT, which moves as the player scrolls::
+
+            148  POST /api/v1/map/position      <- /karte.php
+            150  POST /api/v1/map/position      <- /karte.php?zoom=1&x=20&y=89
+            151  POST /api/v1/map/tile-details  <- /karte.php?zoom=1&x=15&y=90
+            535  POST /api/v1/map/tile-details  <- /karte.php?zoom=1&x=11&y=82
+            550  POST /api/v1/map/tile-details  <- /karte.php?x=10&y=81
+
+        Ours said ``/karte.php`` -- bare, and the same bare string -- for every
+        request in a sweep. An oasis sweep or a scout scan is HUNDREDS of tile
+        requests, so the account emitted hundreds of map XHRs whose Referer
+        never once named a coordinate, on a page whose entire purpose is to be
+        at a coordinate. No player produces that, and it takes no timing
+        analysis to see: it is one string comparison.
+
+        The returned Referer names where the map was BEFORE this request, which
+        is the lag the capture shows and is also just true -- the viewport moves
+        because of the request, not before it. So the first XHR after opening
+        the map is referred from the bare page, and every one after that names
+        the previous tile, walking as the sweep walks.
+        """
+        previous = self._map_viewport
+        self._map_viewport = (x, y)
+        base = self._http.base_url.rstrip("/")
+        if previous is None:
+            return f"{base}/karte.php"
+        px, py = previous
+        if self._map_referer_zoomed:
+            return f"{base}/karte.php?zoom=1&x={px}&y={py}"
+        return f"{base}/karte.php?x={px}&y={py}"
 
     def _init_route_prefs(self, rng: "random.Random") -> None:
         """Build the per-persona warm-up transition matrix from ``rng``.
@@ -188,6 +236,10 @@ class PageNavigator:
     def seed_routes(self, identity: str) -> None:
         """Bind the warm-up transition matrix to a stable persona identity."""
         self._init_route_prefs(random.Random(identity))
+        # Same identity, separate stream: which viewport URL form this account
+        # writes must be stable across restarts (it is a per-account habit, not
+        # a per-session coin toss) without being derivable from the matrix.
+        self._map_referer_zoomed = random.Random(f"{identity}|map").random() < 0.5
 
     def _next_route_step(self, current: str) -> Optional[str]:
         """Sample the next warm-up page (or None=stop) from the global RNG."""
@@ -394,6 +446,10 @@ class PageNavigator:
 
         if self._current_page != f"/karte.php{newdid}":
             await self._visit(f"/karte.php{newdid}", "opening world map")
+            # A fresh page load is a fresh address bar: the map has not been
+            # moved yet, so the next XHR is referred from the bare page, as the
+            # capture's first one is.
+            self._map_viewport = None
 
     async def navigate_to_farm_list(self, village_id: Optional[int] = None) -> None:
         """Navigate to the farm-list edit page on the rally point.
@@ -500,3 +556,22 @@ class PageNavigator:
 
         await self.navigate_to_rally_point(village_id)
         await self._delay.wait(ActionType.FORM_FILL, "filling troop form")
+
+
+def map_viewport_referer(http_client, x: int, y: int) -> Optional[str]:
+    """``PageNavigator.map_viewport_referer`` for a client that may not have one.
+
+    Every map XHR in this codebase is fired by a service holding an
+    ``HttpClient`` rather than a navigator, and several of them fire through the
+    RECON client instead of the primary -- whose navigator is a different object
+    with its own viewport. Asking the client that will actually send the request
+    is the only way the Referer describes the session the request belongs to.
+
+    Returns None when there is no navigator or it is disabled, which the
+    ``post_json`` callers pass straight through: no pin, same behaviour as
+    before this existed.
+    """
+    navigator = getattr(http_client, "navigator", None)
+    if navigator is None or not navigator.enabled:
+        return None
+    return navigator.map_viewport_referer(x, y)

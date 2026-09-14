@@ -364,6 +364,7 @@ class ReportsService:
             ``detail`` key with the full parsed report data.
         """
         from ..stealth.human_delay import ActionType
+        from ..stealth.navigator import map_viewport_referer
 
         try:
             # Stealth: navigate to the map first (like clicking "Map" in the menu)
@@ -374,7 +375,11 @@ class ReportsService:
                 await self.client.human_delay.wait(ActionType.CLICK, "clicking map tile")
 
             # The tile popup is loaded via the tile-details API (not karte.php HTML)
-            resp = await self.client.post_json("/api/v1/map/tile-details", {"x": x, "y": y})
+            resp = await self.client.post_json(
+                "/api/v1/map/tile-details",
+                {"x": x, "y": y},
+                referer=map_viewport_referer(self.client, x, y),
+            )
             html = resp.get("html", "")
             if not html:
                 raise ReportError(f"Empty tile-details response for ({x}, {y})")

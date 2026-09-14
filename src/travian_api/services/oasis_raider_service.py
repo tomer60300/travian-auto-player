@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List
 
 from ..constants import TROOP_MAPPINGS, TribeType
-from ..stealth.navigator import PAGE_PATHS
+from ..stealth.navigator import PAGE_PATHS, map_viewport_referer
 from .recon_account import acquire_recon_client
 
 logger = logging.getLogger(__name__)
@@ -863,6 +863,7 @@ class OasisRaiderService:
             "/api/v1/map/tile-details",
             {"x": x, "y": y},
             request_type="xhr",
+            referer=map_viewport_referer(client, x, y),
         )
         html = resp.get("html", "")
 
