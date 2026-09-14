@@ -403,9 +403,10 @@ def blockers(
         reasons.append(
             f"{village_label(over.village_id, names)} commits {over.committed} merchants but {said}"
         )
-    # `blocking_shortfalls`, not `shortfalls`: the two must agree, because
-    # `/execute` gates on `is_feasible` and then explains itself with this list.
-    # When they disagreed, a plan could be refused with no reason given, or
+    # Filtered by `_blocks`, which is the same threshold `RoutingResult`
+    # applies when it answers `is_feasible`. The two must agree, because
+    # `/execute` gates on the predicate and then explains itself with this list:
+    # when they disagreed, a plan could be refused with no reason given, or
     # listed with a reason it was not refused for.
     for short in plan.shortfalls:
         if not _blocks(short):

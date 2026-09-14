@@ -21,29 +21,10 @@ requests, no clock -- because deciding to delete something is not a place for a
 value read from the machine this happens to run on.
 """
 
-import pytest
-
-from travian_api.services.distribution.window_pruning import (
-    minute_of_day,
-    rows_outside_window,
-)
+from travian_api.services.distribution.window_pruning import in_window, minute_of_day
 
 NIGHT = (23 * 60, 7 * 60)  # 23:00 -> 07:00, wraps midnight
 DAY = (7 * 60, 23 * 60)  # 07:00 -> 23:00, does not wrap
-
-
-class _Row:
-    """The fields of an ExistingRoute this decision actually reads."""
-
-    def __init__(self, route_id, departure_at, dest_village_id=99):
-        self.route_id = route_id
-        self.departure_at = departure_at
-        self.dest_village_id = dest_village_id
-
-
-def _at(hour, minute=30):
-    """A departure timestamp whose minute-of-day is `hour:minute`."""
-    return 1787616000 + hour * 3600 + minute * 60
 
 
 class TestMinuteOfDay:
@@ -57,58 +38,6 @@ class TestMinuteOfDay:
 
     def test_a_row_with_no_stated_departure_has_no_minute(self):
         assert minute_of_day(None) is None
-
-
-class TestChoosingRowsToRemove:
-    def test_rows_inside_a_wrapping_window_are_kept(self):
-        rows = [_Row(1, _at(23)), _Row(2, _at(2)), _Row(3, _at(6))]
-        assert rows_outside_window(rows, NIGHT) == []
-
-    def test_rows_outside_it_are_named(self):
-        keep, drop = _Row(1, _at(23)), _Row(2, _at(12))
-        assert [r.route_id for r in rows_outside_window([keep, drop], NIGHT)] == [2]
-
-    def test_the_full_hourly_fan_out_keeps_exactly_the_window(self):
-        # The real case: 24 rows, an 8-hour window, 8 survivors.
-        rows = [_Row(600 + h, _at(h)) for h in range(24)]
-        doomed = rows_outside_window(rows, NIGHT)
-        assert len(doomed) == 16
-        assert len(rows) - len(doomed) == 8
-
-    def test_a_non_wrapping_window_works_the_same_way(self):
-        rows = [_Row(600 + h, _at(h)) for h in range(24)]
-        assert len(rows) - len(rows_outside_window(rows, DAY)) == 16
-
-    def test_the_window_boundary_is_inclusive_at_the_start_exclusive_at_the_end(self):
-        # Matches how the beat already reads a window, so the rows kept are the
-        # firings the plan counted -- not one more or one fewer.
-        rows = [_Row(1, _at(23, 0)), _Row(2, _at(7, 0))]
-        assert [r.route_id for r in rows_outside_window(rows, NIGHT)] == [2]
-
-
-class TestItRefusesToGuess:
-    def test_no_window_means_nothing_is_removed(self):
-        # A round-the-clock profile wants every firing. Pruning here would delete
-        # the route set the operator asked for.
-        rows = [_Row(600 + h, _at(h)) for h in range(24)]
-        assert rows_outside_window(rows, None) == []
-
-    def test_a_row_with_an_unknown_departure_is_never_deleted(self):
-        # Absent must not read as midnight. Erring toward keeping leaves a route
-        # shipping outside its hours, which the plan reports; erring the other way
-        # destroys a row for a reason that was never established.
-        rows = [_Row(1, None), _Row(2, _at(12))]
-        assert [r.route_id for r in rows_outside_window(rows, NIGHT)] == [2]
-
-    def test_it_never_proposes_removing_every_row(self):
-        # A window that somehow matched nothing would delete the whole route the
-        # run just created. That is a bug in the caller, not an instruction.
-        rows = [_Row(1, _at(12)), _Row(2, _at(13))]
-        with pytest.raises(ValueError, match="every row"):
-            rows_outside_window(rows, NIGHT)
-
-    def test_an_empty_row_list_is_simply_empty(self):
-        assert rows_outside_window([], NIGHT) == []
 
 
 class TestTheServerClockIsNotUTC:
@@ -157,39 +86,50 @@ class TestTheServerClockIsNotUTC:
 
 
 class TestTheNightRowsSurviveOnAUTCPlusOneServer:
-    """The defect end to end, as the operator's account produced it.
+    """The defect end to end, as the operator's account produced it (#76).
 
-    The six rows of a 4h route created for 23:00, against the 23:00-07:00 night
-    window. Read as UTC they land 22:00/02:00/06:00/... -- so the two the plan
-    means to keep are not the two that look kept, and `rows_outside_window`
-    either prunes the wrong four or, as it did live, refuses outright.
+    Six rows of a 4h route the GAME shows at 23:00, 03:00, 07:00, 11:00, 15:00,
+    19:00 on a UTC+01:00 server, against the 23:00-07:00 night window. Read as
+    UTC they are an hour earlier, so the firings that look like the night's are
+    not the ones the plan asked for -- and the executor, which matches a live row
+    to a planned minute, matches none of them.
+
+    Asserted against `minute_of_day` and `in_window` directly. The rows-to-delete
+    decision itself lives in the executor, which does more than a window test:
+    see this module's docstring.
     """
 
     NIGHT = (23 * 60, 7 * 60)
-    # Departure timestamps for a route the GAME shows at 23:00, 03:00, 07:00,
-    # 11:00, 15:00, 19:00 on a UTC+01:00 server -- i.e. one hour earlier in UTC.
     ROWS = [1787695200 + offset * 3600 for offset in range(0, 24, 4)]
 
-    def _rows(self):
-        return [_Row(route_id=700 + i, departure_at=at) for i, at in enumerate(self.ROWS)]
+    def _inside(self, offset):
+        return sorted(
+            minute
+            for at in self.ROWS
+            if in_window(
+                (minute := minute_of_day(at, server_utc_offset_minutes=offset)), self.NIGHT
+            )
+        )
 
     def test_read_as_utc_the_window_keeps_the_wrong_rows(self):
-        rows = self._rows()
-        doomed = {r.route_id for r in rows_outside_window(rows, self.NIGHT)}
-        kept = sorted(minute_of_day(r.departure_at) for r in rows if r.route_id not in doomed)
-        # Read in UTC the survivors are 02:00 and 06:00 -- neither is a minute
-        # the plan asked for, and the 23:00 firing it did ask for is deleted.
+        """02:00 and 06:00 survive -- neither is a minute the plan asked for,
+        and the 23:00 firing it did ask for is not among them."""
+        kept = self._inside(0)
+
         assert kept == [2 * 60, 6 * 60]
         assert 23 * 60 not in kept
 
     def test_read_on_the_server_clock_the_right_two_survive(self):
-        rows = self._rows()
-        doomed = rows_outside_window(rows, self.NIGHT, server_utc_offset_minutes=60)
-        doomed_ids = {r.route_id for r in doomed}
-        kept = sorted(
-            minute_of_day(r.departure_at, server_utc_offset_minutes=60)
-            for r in rows
-            if r.route_id not in doomed_ids
-        )
+        kept = self._inside(60)
+
         assert kept == [3 * 60, 23 * 60], "the 23:00 and 03:00 firings are the night's"
-        assert len(doomed) == 4
+
+    def test_the_two_readings_disagree_about_four_of_the_six_rows(self):
+        """The size of the error, stated: it is not a near miss."""
+        utc = {minute_of_day(at) for at in self.ROWS if in_window(minute_of_day(at), self.NIGHT)}
+        game = {
+            minute_of_day(at, server_utc_offset_minutes=60)
+            for at in self.ROWS
+            if in_window(minute_of_day(at, server_utc_offset_minutes=60), self.NIGHT)
+        }
+        assert utc.isdisjoint(game), "not one row is kept by both readings"
