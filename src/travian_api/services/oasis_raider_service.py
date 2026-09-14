@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
 import re
 import time
@@ -795,7 +796,15 @@ class OasisRaiderService:
 
         Returns actual seconds elapsed.
         """
-        duration = random.uniform(BREAK_DURATION_MIN, BREAK_DURATION_MAX)
+        # Log-normal, not uniform: a flat 30-90s histogram is the shape
+        # `stealth/timing.py` opens by calling trivially detectable, and a
+        # micro-break is one of the few pauses long enough to be worth
+        # measuring. Clamped back into the configured band so the bounds still
+        # mean what they say.
+        duration = min(
+            max(random.lognormvariate(math.log(48.0), 0.45), BREAK_DURATION_MIN),
+            BREAK_DURATION_MAX,
+        )
         await send_log(
             "BREAK",
             "☕",

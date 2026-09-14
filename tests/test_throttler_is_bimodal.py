@@ -100,10 +100,24 @@ class TestTheAccountIsSometimesDistracted:
     """
 
     def test_a_long_pause_is_possible_at_all(self):
+        """Shape checked against the recording's own tail, not against a guess.
+
+        The 364 deliberate requests had fifteen gaps over eight seconds::
+
+            380.7  59.2  19.8  18.0  16.5  15.7  14.6  12.5  12.2  12.2  10.1
+              9.9   9.5   9.3   8.1
+
+        A cluster in the teens, one pause of a minute, one of six. So the BODY
+        of a distraction belongs in the teens and the TAIL has to reach minutes
+        -- which is the correction: this used to assert a median above twenty,
+        written when the sampler used a 45-second median, and a 45-second median
+        puts the body of our distractions where the real distribution keeps its
+        tail.
+        """
         t = _throttler(distraction_chance=1.0)
         draws = _draws(t, "page", n=400)
 
-        assert statistics.median(draws) > 20.0
+        assert 10.0 < statistics.median(draws) < 30.0
         assert max(draws) > 60.0, "the tail has to reach minutes, not just tens"
 
     def test_it_is_rare_enough_not_to_dominate_a_short_run(self):
@@ -162,6 +176,11 @@ class TestALongPauseTellsTheOperator:
         import time
 
         t = _throttler(min_gap_s=0.0, max_gap_s=0.01, distraction_chance=1.0)
+        # Pin the distraction's own shape. It is drawn per account now, and its
+        # body starts in the teens -- close enough to the 8s "worth announcing"
+        # threshold that an unpinned draw makes this test a coin flip.
+        t._distraction_median_s = 120.0
+        t._distraction_sigma = 0.1
         # Must be NOW, not 1.0: elapsed is measured against time.monotonic(), so
         # an ancient timestamp means the gap has already passed and nothing waits.
         t._last_request_time = time.monotonic()
@@ -214,3 +233,48 @@ class TestTheDurationReadsLikeAPerson:
         from travian_api.stealth.throttler import _human_duration
 
         assert _human_duration(120.0) == "2m00s"
+
+
+class TestTheDistractionTailIsPerAccountToo:
+    """The gap BODY was already account-distinct. Its TAIL was not.
+
+    Every account we ran distracted at exactly 1.5% of gaps, drawn from exactly
+    log-normal(log 45s, 1.0). Two numbers -- what fraction of an account's gaps
+    exceed twenty seconds, and how long those run -- came out identical across
+    the whole fleet, which is the same cross-account clustering the median
+    fraction and sigma exist to defeat. Defeating it in the body while leaving
+    it in the tail defeats it nowhere: the long gaps are the conspicuous ones,
+    so the tail is the cheaper statistic to measure.
+    """
+
+    @staticmethod
+    def _shape(identity: str) -> tuple[float, float, float]:
+        t = RequestThrottler()
+        t.seed_gap_shape(identity)
+        return (t.distraction_chance, t._distraction_median_s, t._distraction_sigma)
+
+    def test_it_is_stable_across_restarts(self):
+        assert self._shape("account-a") == self._shape("account-a")
+
+    def test_two_accounts_do_not_share_it(self):
+        assert self._shape("account-a") != self._shape("account-b")
+
+    def test_the_population_spreads_rather_than_clustering(self):
+        rates = {self._shape(f"account-{i}")[0] for i in range(40)}
+
+        assert len(rates) == 40, "a shared rate is the whole finding"
+        assert max(rates) > min(rates) * 2, "the spread has to be worth having"
+
+    def test_an_explicit_chance_is_left_exactly_alone(self):
+        """A caller that names a number means it -- otherwise every test that
+        pins this value would be quietly re-rolled underneath."""
+        t = _throttler(distraction_chance=0.5)
+        t.seed_gap_shape("account-a")
+
+        assert t.distraction_chance == 0.5
+
+    def test_the_rate_brackets_what_the_recording_showed(self):
+        """8 of 364 deliberate gaps sat past what the body can reach: ~2.2%."""
+        rates = [self._shape(f"account-{i}")[0] for i in range(200)]
+
+        assert min(rates) < 0.022 < max(rates)

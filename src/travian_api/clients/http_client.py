@@ -344,6 +344,9 @@ class HttpClient:
             noise_rate=settings.stealth_noise_rate,
             enabled=settings.stealth,
         )
+        # Same identity as the gap shape and the route preferences: how long
+        # this account's breaks run is a habit, not a per-session coin toss.
+        self._noise_injector.seed_breaks(behavioral_identity)
         self._activity_scheduler = ActivityScheduler(
             max_daily_hours=settings.stealth_max_daily_hours,
             max_continuous_hours=settings.stealth_max_continuous_hours,

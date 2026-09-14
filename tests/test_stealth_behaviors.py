@@ -167,9 +167,15 @@ def test_throttler_gap_is_right_skewed_not_uniform():
     # activity from the first request to the last. See
     # test_throttler_is_bimodal.py.
     assert max(samples) <= 1.0 + 600.0
-    # The BODY of the distribution is still inside the configured band: the long
-    # draws are rare, not the norm.
-    assert ordered[int(n * 0.97)] <= 2.5 * 3.0
+    # The BODY of the distribution is still inside the configured band, and the
+    # only draws that escape it are distractions -- at this account's own rate,
+    # not more. Asserting a fixed percentile instead made this test depend on
+    # where that per-account rate happened to land.
+    escaped = sum(1 for s in samples if s > 2.5 * 3.0) / n
+    assert escaped <= throttler.distraction_chance * 1.4, (
+        f"{escaped:.4f} of draws left the band, against a distraction rate of "
+        f"{throttler.distraction_chance:.4f}"
+    )
     # Right-skewed: a uniform distribution has mean == median; ours does not.
     assert mean > median + 0.02
     # Body stays in the lower half of the configured band (median fraction is

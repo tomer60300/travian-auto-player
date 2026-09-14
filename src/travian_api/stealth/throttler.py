@@ -41,6 +41,20 @@ _CONSEQUENTIAL = frozenset({"fetch", "xhr", "json"})
 # "this loop has hung".
 _MAX_DISTRACTION_S = 600.0
 
+# Base rate at which a deliberate gap becomes a real pause, measured rather
+# than estimated. Of the 364 DELIBERATE requests in the 2026-09-15 recording --
+# documents and API calls, excluding the page's own subresource chatter -- the
+# gaps above eight seconds were::
+#
+#     380.7  59.2  19.8  18.0  16.5  15.7  14.6  12.5  12.2  12.2  10.1
+#       9.9   9.5   9.3   8.1
+#
+# Fifteen of 364, 4.1%, and the gap body already reaches nine seconds on its own
+# tail, so the pauses this layer has to supply are the ones past that: eight of
+# 364, about 2.2%. Each account scales the base by a persona-stable factor --
+# see `RequestThrottler._draw_distraction_shape`.
+_DISTRACTION_CHANCE = 0.025
+
 # Above this, a pause is reported to the operator rather than only to the debug
 # log. Chosen so ordinary pacing stays quiet -- the body of the deliberate
 # distribution is a few seconds -- while a distraction always announces itself.
@@ -82,11 +96,11 @@ class RequestThrottler:
         # cooldown it imposes is itself the unnatural shape.
         burst_max_requests: int = 60,
         burst_cooldown_s: float = 15.0,
-        # How often a deliberate gap becomes a real pause instead. 1.5% puts
-        # roughly one distraction in a seventy-request session, which is the
-        # order the recording showed (one 380s gap in 1,631 requests, plus
-        # several tens-of-seconds ones).
-        distraction_chance: float = 0.015,
+        # How often a deliberate gap becomes a real pause instead. None means
+        # "draw one for this account" -- see `_DISTRACTION_CHANCE` and
+        # `_draw_distraction_shape`. An explicit value is honoured exactly, so a
+        # test can pin it.
+        distraction_chance: float | None = None,
         enabled: bool = True,
     ):
         """
@@ -106,8 +120,9 @@ class RequestThrottler:
         self.burst_window_s = burst_window_s
         self.burst_max_requests = burst_max_requests
         self.burst_cooldown_s = burst_cooldown_s
-        self.distraction_chance = distraction_chance
+        self._distraction_chance_override = distraction_chance
         self.enabled = enabled
+        self._draw_distraction_shape(random)
 
         self._last_request_time: float = 0
         self._request_times: deque = deque()
@@ -158,6 +173,38 @@ class RequestThrottler:
         rng = random.Random(identity)
         self._gap_median_frac = rng.uniform(0.30, 0.48)
         self._gap_sigma = rng.uniform(0.45, 0.85)
+        self._draw_distraction_shape(rng)
+
+    def _draw_distraction_shape(self, rng) -> None:
+        """Per-account distraction rate and length.
+
+        The BODY of the gap distribution was already persona-stable and
+        account-distinct; its TAIL was not. Every account we run distracted at
+        exactly 1.5% of gaps, drawn from exactly log-normal(log 45s, 1.0). Two
+        numbers -- "what fraction of this account's gaps exceed twenty seconds"
+        and "how long are those" -- came out identical for every account on the
+        fleet, which is the same cross-account clustering the median-fraction
+        and sigma above exist to defeat. Defeating it in the body while leaving
+        it in the tail defeats it nowhere: the tail is the cheaper statistic to
+        measure, because the long gaps are the conspicuous ones.
+
+        The rate spans roughly 0.7%-3%, so one account pauses four times as
+        often as another, and both are plausible; the length is a log-normal
+        whose own median and spread are drawn too. An explicitly configured
+        chance is left exactly alone -- a caller that names a number means it.
+        """
+        self.distraction_chance = (
+            _DISTRACTION_CHANCE * rng.uniform(0.5, 1.8)
+            if self._distraction_chance_override is None
+            else self._distraction_chance_override
+        )
+        # Median in the teens with a wide sigma, which is the shape the listing
+        # above actually has: a cluster from eight to twenty seconds, one pause
+        # of a minute, one of six. A median of 45s -- the previous constant --
+        # put the BODY of our distractions where the real distribution keeps its
+        # tail, so we were pausing too long, too often, and too uniformly.
+        self._distraction_median_s = rng.uniform(12.0, 22.0)
+        self._distraction_sigma = rng.uniform(1.0, 1.4)
 
     async def wait(self, context: str = "", request_type: str = "page") -> float:
         """Wait until it's safe to make the next request.
@@ -314,7 +361,10 @@ class RequestThrottler:
             # above the longest gap the recording contains (380.7s) and bounds
             # the worst case at ten minutes rather than at nothing.
             return self.min_gap_s + min(
-                random.lognormvariate(math.log(45.0), 1.0), _MAX_DISTRACTION_S
+                random.lognormvariate(
+                    math.log(self._distraction_median_s), self._distraction_sigma
+                ),
+                _MAX_DISTRACTION_S,
             )
         span = self.max_gap_s - self.min_gap_s
         if span <= 0:
