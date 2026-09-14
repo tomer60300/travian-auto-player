@@ -19,30 +19,70 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # ── Warm-up navigation model ───────────────────────────────────────────
+#
+# The pages, their URLs and their weights all come from a recorded human
+# session: 1,631 requests, 2026-09-15, Europe 2, one player raiding, reading
+# reports and setting up trade routes. Every top-level page it touched is here
+# and nothing else is, which is the point -- see below.
+#
+# Two of these URLs used to be wrong, and wrong in the way that matters most.
+# We browsed ``/statistiken.php`` and ``/spieler.php``: the GERMAN route names,
+# on an English server, from a gpack whose own links are ``/statistics`` and
+# ``/report``. The capture contains one statistics visit and it goes to
+# ``/statistics``; ``/statistiken.php`` and ``/spieler.php`` appear nowhere in
+# 1,631 requests. Whether the old routes still answer is beside the point --
+# a session that reaches for a URL the client cannot generate has said
+# something about itself that no amount of timing jitter takes back, and it is
+# precisely the signal a deprecated-path trap is built to collect. So the table
+# is evidence, not recollection: a page goes in when the capture shows a player
+# loading it, at the URL the capture shows.
+#
+# The profile page left the set entirely. It is surely reachable somehow, but
+# the player never opened it, so there is no observed URL to use -- and
+# guessing is the mistake this table exists to stop.
+PAGE_PATHS = {
+    "dorf1": "/dorf1.php",
+    "dorf2": "/dorf2.php",
+    "karte": "/karte.php",
+    "report": "/report",
+    "statistics": "/statistics",
+    # The troop overview. Bare ``gid``, no slot: unlike the marketplace, all
+    # four of the capture's visits address it this way.
+    "troops": "/build.php?gid=19",
+}
+_PAGE_BY_PATH = {path: page for page, path in PAGE_PATHS.items()}
 # Top-level pages a real player browses right after login. All are coherent
 # navigation targets from one another, so any transition keeps the Referer
 # chain truthful (no impossible jumps).
-_WARMUP_PAGES = ("dorf1", "dorf2", "statistiken", "spieler", "karte")
+_WARMUP_PAGES = tuple(PAGE_PATHS)
 # Pages that take a ?newdid= village selector (the global pages don't).
 _WARMUP_PAGE_TAKES_NEWDID = frozenset({"dorf1", "dorf2", "karte"})
 _WARMUP_PAGE_DESC = {
     "dorf1": "checking resource overview",
     "dorf2": "looking at village buildings",
-    "statistiken": "checking statistics",
-    "spieler": "checking own profile",
     "karte": "glancing at the map",
+    "report": "reading through reports",
+    "statistics": "checking statistics",
+    "troops": "checking troop numbers",
 }
 # Pre-persona destination affinity: how commonly a page is visited at all.
-# Overviews are common landing/return targets; stats/profile are rarer. This
-# is intentionally kept realistic — a *human population* also visits overviews
-# more than profile/stats, so it is not a bot discriminator. Per-account spread
-# (the wide page-bias below) is what defeats clustering, not flattening this.
+# Ordered as the capture's own document counts order them -- dorf1 30, karte
+# 20, report 13, dorf2 4, statistics 1 -- rather than by what felt plausible,
+# which had dorf2 at 0.9 and second place. It is second-to-last: a player opens
+# the village view to go SOMEWHERE (its four loads there all precede a
+# building), and almost never to look at it.
+#
+# This stays realistic rather than flat on purpose. A *human population* also
+# returns to the overview more than it opens statistics, so the skew is not a
+# bot discriminator. Per-account spread (the wide page-bias below) is what
+# defeats clustering, not flattening this.
 _WARMUP_PAGE_AFFINITY = {
     "dorf1": 1.0,
-    "dorf2": 0.9,
-    "karte": 0.5,
-    "statistiken": 0.35,
-    "spieler": 0.25,
+    "karte": 0.7,
+    "report": 0.45,
+    "dorf2": 0.3,
+    "troops": 0.25,
+    "statistics": 0.1,
 }
 # Base stop weight, scaled per-account by a stop bias.
 _WARMUP_STOP_BASE = 0.9
@@ -141,17 +181,28 @@ class PageNavigator:
 
     @staticmethod
     def _warmup_page_path(page: str, newdid: str) -> str:
-        suffix = newdid if page in _WARMUP_PAGE_TAKES_NEWDID else ""
-        return f"/{page}.php{suffix}"
+        """The URL for a warm-up page, from the table rather than from its name.
+
+        It used to be ``f"/{page}.php"``, which is why two of these pages were
+        addressed at URLs the client does not use: the rule quietly asserted
+        that every page is ``<name>.php``, and this gpack's statistics and
+        report pages are extensionless.
+        """
+        path = PAGE_PATHS[page]
+        return path + newdid if page in _WARMUP_PAGE_TAKES_NEWDID else path
 
     @staticmethod
     def _page_key(path: Optional[str]) -> Optional[str]:
         """Map a visited path back to a warm-up page key, or None if it isn't one."""
         if not path:
             return None
-        base = path.split("?", 1)[0].lstrip("/")
-        name = base[:-4] if base.endswith(".php") else base
-        return name if name in _WARMUP_PAGES else None
+        # Exact first: the troop overview IS its query string, and /build.php
+        # carrying anything else is a different page entirely -- a marketplace,
+        # a rally point, a building. Stripping the query would call all of them
+        # the troop overview.
+        if path in _PAGE_BY_PATH:
+            return _PAGE_BY_PATH[path]
+        return _PAGE_BY_PATH.get(path.split("?", 1)[0])
 
     def _next_idle_page(self, current: str) -> str:
         """First-order Markov transition to the next idle page (excludes stop).

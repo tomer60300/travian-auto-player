@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from pathlib import Path
 
@@ -384,9 +385,9 @@ def test_warmup_route_is_varied_bounded_and_coherent():
     import random
 
     from travian_api.stealth.human_delay import HumanDelay
-    from travian_api.stealth.navigator import _WARMUP_MAX_STEPS, PageNavigator
+    from travian_api.stealth.navigator import _WARMUP_MAX_STEPS, PAGE_PATHS, PageNavigator
 
-    allowed = {"/dorf1.php", "/dorf2.php", "/statistiken.php", "/spieler.php", "/karte.php"}
+    allowed = set(PAGE_PATHS.values())
 
     random.seed(2024)
     sequences = []
@@ -406,7 +407,10 @@ def test_warmup_route_is_varied_bounded_and_coherent():
         assert 1 <= len(seq) <= 1 + _WARMUP_MAX_STEPS
         # Every visited page is a coherent top-level page (no impossible jump).
         for url in seq:
-            assert url.split("?")[0] in allowed
+            # Only the village selector is stripped. The troop overview IS its
+            # query string, so splitting on "?" would accept any /build.php at
+            # all -- a marketplace, a rally point, someone's building page.
+            assert re.sub(r"[?&]newdid=\d+", "", url) in allowed
         if any(u.startswith("/dorf2.php") for u in seq):
             dorf2_present += 1
 
@@ -684,9 +688,9 @@ def test_idle_browse_is_persona_weighted_not_uniform():
     from collections import Counter
 
     from travian_api.stealth.human_delay import HumanDelay
-    from travian_api.stealth.navigator import PageNavigator
+    from travian_api.stealth.navigator import PAGE_PATHS, PageNavigator
 
-    allowed = {"/dorf1.php", "/dorf2.php", "/statistiken.php", "/spieler.php", "/karte.php"}
+    allowed = set(PAGE_PATHS.values())
 
     def freqs(identity: str) -> Counter:
         http = _RecordingHttp()
@@ -704,7 +708,7 @@ def test_idle_browse_is_persona_weighted_not_uniform():
 
         asyncio.run(draw())
         for url in http.urls:
-            assert url.split("?")[0] in allowed  # no impossible page
+            assert re.sub(r"[?&]newdid=\d+", "", url) in allowed  # no impossible page
         return Counter(u.split("?")[0] for u in http.urls)
 
     a = "Chrome/133|en-US|https://ts2.x1.europe.travian.com|saltAAAA"
@@ -788,8 +792,12 @@ def test_idle_browse_uses_markov_transition_from_current_page():
 
     # _page_key maps paths back to page names (or None for non-top-level pages).
     assert nav._page_key("/dorf1.php?newdid=5") == "dorf1"
-    assert nav._page_key("/statistiken.php") == "statistiken"
+    assert nav._page_key("/statistics") == "statistics"
+    assert nav._page_key("/build.php?gid=19") == "troops"
     assert nav._page_key("/build.php?id=12") is None
+    # The troop overview is the one page whose query string is its identity, so
+    # every OTHER /build.php must stay unrecognised rather than inheriting it.
+    assert nav._page_key("/build.php?id=30&gid=17&t=3") is None
     assert nav._page_key(None) is None
 
     # _next_idle_page is a pure transition over pages (never returns stop/None),
@@ -798,13 +806,13 @@ def test_idle_browse_uses_markov_transition_from_current_page():
     from collections import Counter
 
     after_dorf1 = Counter(nav._next_idle_page("dorf1") for _ in range(4000))
-    after_spieler = Counter(nav._next_idle_page("spieler") for _ in range(4000))
+    after_report = Counter(nav._next_idle_page("report") for _ in range(4000))
     assert None not in after_dorf1
     assert set(after_dorf1) <= set(_WARMUP_PAGES)
     # dorf1 never self-loops to a *guaranteed* page; just assert the two
     # source pages induce different next-page distributions (Markov structure).
     da = {p: after_dorf1[p] / 4000 for p in _WARMUP_PAGES}
-    ds = {p: after_spieler[p] / 4000 for p in _WARMUP_PAGES}
+    ds = {p: after_report[p] / 4000 for p in _WARMUP_PAGES}
     l1 = sum(abs(da[p] - ds[p]) for p in _WARMUP_PAGES)
     assert l1 > 0.05
 

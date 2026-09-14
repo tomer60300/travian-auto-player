@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List
 
 from ..constants import TROOP_MAPPINGS, TribeType
+from ..stealth.navigator import PAGE_PATHS
 from .recon_account import acquire_recon_client
 
 logger = logging.getLogger(__name__)
@@ -68,14 +69,15 @@ BREAK_DURATION_MAX = 90.0
 NOISY_SLEEP_SEGMENT_MIN = 15.0  # Seconds per sleep chunk
 NOISY_SLEEP_SEGMENT_MAX = 25.0
 
-# Pages a human might visit while idle / waiting for troops
-_NOISE_PAGES = [
-    "/dorf1.php",
-    "/dorf2.php",
-    "/report/all",
-    "/statistiken.php",
-    "/spieler.php",
-]
+# Pages a human might visit while idle / waiting for troops.
+#
+# Taken from the navigator's table rather than kept as a second list. It was a
+# second list, and it had drifted: `/report/all`, `/statistiken.php` and
+# `/spieler.php` are none of them URLs this gpack's client produces (see
+# `PAGE_PATHS`), so an idle sweep spent a third of its noise requests
+# announcing itself. One source of truth means the next correction reaches both
+# callers.
+_NOISE_PAGES = sorted(PAGE_PATHS.values())
 
 
 def _sample_burst_size() -> int:
