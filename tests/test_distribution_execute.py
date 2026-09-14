@@ -203,7 +203,12 @@ class TestLiveGate:
                 routing=Plan(over_budget=(OverBudget(village_id=20003, committed=9, available=4),))
             )
             return SimpleNamespace(
-                plan=plan, names={20003: "Capital"}, coords={}, warnings=[], dropped_allocations=[]
+                plan=plan,
+                names={20003: "Capital"},
+                coords={},
+                warnings=[],
+                dropped_allocations=[],
+                dropped_allocation_villages=frozenset(),
             )
 
         with (
@@ -604,6 +609,7 @@ class TestLiveExecution:
             coords={20003: (0, 0), -1: (40, 40)},
             warnings=[],
             dropped_allocations=[],
+            dropped_allocation_villages=frozenset(),
         )
 
         async def _fake_plan(_body):
@@ -836,6 +842,7 @@ def _two_origin_account():
         coords={20003: (0, 0), 20011: (10, 0), -1: (40, 40), -2: (50, 50)},
         warnings=[],
         dropped_allocations=[],
+        dropped_allocation_villages=frozenset(),
     )
 
 
@@ -881,6 +888,7 @@ def _four_route_two_origin_account():
         },
         warnings=[],
         dropped_allocations=[],
+        dropped_allocation_villages=frozenset(),
     )
 
 
@@ -941,7 +949,12 @@ def _account(rows, coords, names):
         rows=tuple(rows),
     )
     return SimpleNamespace(
-        plan=plan, names=names, coords=coords, warnings=[], dropped_allocations=[]
+        plan=plan,
+        names=names,
+        coords=coords,
+        warnings=[],
+        dropped_allocations=[],
+        dropped_allocation_villages=frozenset(),
     )
 
 
@@ -1006,6 +1019,7 @@ def _own_village_account():
         coords={20003: (0, 0), 20011: (10, 0)},
         warnings=[],
         dropped_allocations=[],
+        dropped_allocation_villages=frozenset(),
     )
 
 
@@ -4481,6 +4495,7 @@ class TestTheUpdateBurstIsBounded:
             coords={20003: (0, 0), 20011: (10, 0), 20012: (0, 10)},
             warnings=[],
             dropped_allocations=[],
+            dropped_allocation_villages=frozenset(),
         )
 
     def test_updates_stop_at_the_cap(self):

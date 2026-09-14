@@ -4609,6 +4609,11 @@ class _PlannedAccount:
     prose -- and so both come from one evaluation."""
 
     dropped_allocations: list[str] = field(default_factory=list)
+    # Which villages those dropped allocations belonged to, so a narrowed run
+    # can tell whether any of them is somewhere it actually writes. `None` means
+    # the drop was account-wide (no rate for ANY village) and no choice of
+    # origins escapes it.
+    dropped_allocation_villages: frozenset[int] | None = frozenset()
     """Human-readable descriptions of explicit allocations that were IGNORED
     because the village's rate could not be read. A dry run or /plan shows them
     as CRITICAL findings; a live run refuses on them outright, because executing
@@ -5095,8 +5100,12 @@ async def _plan_account(
                 owed = target.crop_per_hour * (1.0 + target.safety_margin_pct / 100.0)
                 crop_allocations[target_id] = Allocation(mode=AllocationMode.ABSOLUTE, value=owed)
         dropped_allocations: list[str] = []
+        dropped_villages: frozenset[int] | None = frozenset()
         for resource in sorted(set(allocations) - set(productions), key=lambda r: r.value):
             if allocations.pop(resource):
+                # Account-wide: nothing this run could be narrowed to would make
+                # a rate readable, so it vetoes every run.
+                dropped_villages = None
                 dropped_allocations.append(
                     f"every {resource.value} allocation (no rate is known for any village)"
                 )
@@ -5120,6 +5129,8 @@ async def _plan_account(
             for vid in unreadable:
                 del per_village[vid]
             if unreadable:
+                if dropped_villages is not None:
+                    dropped_villages = dropped_villages | frozenset(unreadable)
                 labels = [village_label(vid, names) for vid in unreadable]
                 dropped_allocations.append(
                     f"the {resource.value} allocation(s) of " + ", ".join(labels)
@@ -5405,6 +5416,7 @@ async def _plan_account(
         extra_findings=extra_findings,
         role_deviations=roles.deviations,
         dropped_allocations=dropped_allocations,
+        dropped_allocation_villages=dropped_villages,
         npc_triggers=npc_triggers,
     )
 
@@ -7129,12 +7141,24 @@ async def post_execute(
     # different plan than the one they approved. A dry run previews it -- the
     # CRITICAL finding names it -- but going live on it silently would ship a
     # plan nobody wrote. Refused with the exact fix.
+    # Narrowed the same way the feasibility gate is: an allocation dropped at a
+    # village this run never writes to cannot make this run ship a plan nobody
+    # approved. On the operator's account a full granary at village 25 left its
+    # crop rate underivable (#77) and that alone refused a run confined to
+    # village 27, which is 70 fields away and shares nothing with it.
+    #
+    # An account-wide drop -- no rate known for ANY village -- carries `None`
+    # and still refuses everything, because no narrowing escapes it.
+    _dropped_global = any(_acc.dropped_allocation_villages is None for _, _acc in planned_segments)
+    _dropped_villages: set[int] = set()
+    for _, _acc in planned_segments:
+        _dropped_villages |= set(_acc.dropped_allocation_villages or ())
     _dropped = [
         d if _segment is None else f"{_segment.name}: {d}"
         for _segment, _acc in planned_segments
         for d in _acc.dropped_allocations
     ]
-    if _dropped:
+    if _dropped and (_scope is None or _dropped_global or bool(_dropped_villages & _scope)):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(

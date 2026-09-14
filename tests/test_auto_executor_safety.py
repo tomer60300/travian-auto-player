@@ -396,6 +396,7 @@ class TestAE05StaleCargoIsUnfinishedWork:
             coords={20003: (0, 0), 20011: (10, 0), 20012: (20, 0)},
             warnings=[],
             dropped_allocations=[],
+            dropped_allocation_villages=frozenset(),
         )
 
     def _run(self, cap: int):

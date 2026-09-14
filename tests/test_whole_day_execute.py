@@ -92,6 +92,7 @@ def _account(rows):
         coords={20003: (0, 0), 20011: (10, 0), 20012: (0, 10)},
         warnings=[],
         dropped_allocations=[],
+        dropped_allocation_villages=frozenset(),
     )
 
 

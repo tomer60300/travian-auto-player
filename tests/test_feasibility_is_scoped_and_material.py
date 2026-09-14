@@ -149,3 +149,44 @@ class TestARunIsOnlyRefusedForWhereItGoes:
             refused = not is_feasible_for(plan, scope)
             named = bool(blockers(plan, NAMES, only_villages=scope))
             assert refused == named, f"scope={scope}: refused={refused} named={named}"
+
+
+class TestADroppedAllocationOnlyRefusesARunThatGoesThere:
+    """The third whole-plan veto applied to a narrowed run (#77).
+
+    An allocation the planner had to IGNORE makes the executable plan a
+    different plan from the one the operator approved, and going live on it
+    silently would ship a plan nobody wrote. That reasoning is sound, and it is
+    about a VILLAGE: if the run never writes there, its dropped allocation
+    cannot change what the run ships.
+
+    Measured: a full granary at village 25 left its crop rate underivable, and
+    that alone refused a run confined to village 27 -- seventy fields away,
+    sharing no route with it.
+
+    The rule this pins is the one `_execution_scope` and `is_feasible_for`
+    already follow, applied to the same decision: narrow the veto with the run,
+    except where the cause is account-wide and no narrowing escapes it.
+    """
+
+    ELSEWHERE = frozenset({25})
+    ACCOUNT_WIDE = None
+
+    @staticmethod
+    def _refuses(dropped_villages, scope) -> bool:
+        """The condition `/execute` applies, isolated from the handler."""
+        return dropped_villages is None or scope is None or bool(set(dropped_villages) & scope)
+
+    def test_an_unnarrowed_run_is_still_refused(self):
+        assert self._refuses(self.ELSEWHERE, None) is True
+
+    def test_a_run_that_never_goes_there_proceeds(self):
+        assert self._refuses(self.ELSEWHERE, {TEST_VILLAGE, 11}) is False
+
+    def test_a_run_that_DOES_go_there_is_refused(self):
+        assert self._refuses(self.ELSEWHERE, {TEST_VILLAGE, 25}) is True
+
+    def test_an_account_wide_drop_refuses_every_run(self):
+        """ "No rate is known for ANY village" is not escapable by narrowing."""
+        assert self._refuses(self.ACCOUNT_WIDE, {TEST_VILLAGE}) is True
+        assert self._refuses(self.ACCOUNT_WIDE, None) is True
