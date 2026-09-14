@@ -533,6 +533,11 @@ async def diag_row_clock(
                 "dest_village_id": r["dest_village_id"],
                 "dest_name": r["dest_name"],
                 "repeat_hours": r.get("repeat_hours"),
+                # Whether the row is switched ON. A disabled row still exists,
+                # still has its id and still states a departure -- the only
+                # thing that changed is that it no longer ships -- so a revert
+                # that disabled rather than deleted is invisible without this.
+                "active": r.get("active"),
                 **clocks(r.get("departure_at")),
             }
             for r in rows
