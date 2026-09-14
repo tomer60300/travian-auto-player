@@ -17,6 +17,8 @@ top-level pages the capture observed, at the URLs it observed, and both callers
 from the one table.
 """
 
+import re
+
 from travian_api.services.oasis_raider_service import _NOISE_PAGES
 from travian_api.stealth.navigator import (
     _WARMUP_PAGE_AFFINITY,
@@ -132,15 +134,19 @@ class TestTheLocaleBundlesAreNotOurs:
     recorder, not the network.
     """
 
+    # A bundle URL in a string literal, not the path written out in prose. The
+    # capture's bundle list is quoted in comments, and describing a request is
+    # not making one -- the same distinction the /videofeature/start guard draws.
+    _ASKING_FOR_A_BUNDLE = re.compile(r"""["']/js/""")
+
     def test_we_ask_for_no_locale_bundles(self):
         from pathlib import Path
 
         src = Path(__file__).resolve().parents[1] / "src" / "travian_api"
         asks = [
-            f"{path.relative_to(src)}"
+            f"{path.relative_to(src)}:{n}"
             for path in src.rglob("*.py")
-            if "/js/" in path.read_text(encoding="utf-8")
+            for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+            if self._ASKING_FOR_A_BUNDLE.search(line)
         ]
-        assert not asks, (
-            f"locale bundles are served from the browser cache, not the network: {asks}"
-        )
+        assert not asks, f"locale bundles come from the browser cache, not the network: {asks}"

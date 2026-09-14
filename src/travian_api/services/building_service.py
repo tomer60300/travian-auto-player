@@ -781,10 +781,13 @@ class BuildingService:
         Note:
             This is a TODO - video reward flow needs implementation
         """
-        # TODO: Implement video reward flow
-        # POST /api/v1/videofeature/open/buildingUpgrade -> {vrid, videoIframeUrl}
-        # POST /api/v1/videofeature/start -> {vrid}
-        # POST /api/v1/videofeature/ends -> {vrid, hash}
+        # TODO: Implement video reward flow. VideoRewardService already does
+        # this; see its class docstring for the shape recorded from a real
+        # watch, which is NOT what the comment here used to describe:
+        #   GET  /api/v1/videofeature/open/buildingUpgrade
+        #   GET  /fallback/v1/request-ad?game_id=<uuid>   (ih.adscale.de iframe)
+        #   POST /fallback/v1/reward                      (~34s later)
+        #   POST /api/v1/videofeature/ends
 
         raise NotImplementedError("Video reward flow not yet implemented")
 

@@ -73,13 +73,33 @@ class VideoRewardService:
     """
     Claims video rewards by simulating the ATG ad provider protocol.
 
-    Flow:
+    Flow as this class implements it:
     1. POST /api/v1/videofeature/open/{type} → vrid + iframe URL
     2. Fetch iframe HTML → extract ATG config (xsign with fc/xs URLs + xc state)
     3. Rapid-fire progress ticks to fc.php (simulates 30s video)
     4. POST xs.php → get signature hash
-    5. POST /api/v1/videofeature/start → notify server
-    6. POST /api/v1/videofeature/ends → claim reward with hash
+    5. POST /api/v1/videofeature/ends → claim reward with hash
+
+    **Two of those steps do not match the game any more**, and the difference
+    is recorded rather than suspected -- a real watch, live, 2026-09-15:
+
+    * ``videofeature/open`` is a **GET**, and answers 200. We POST it, with a
+      body carrying villageId/slotId/buildingId; the real request carries no
+      body and no query at all, because the server reads the target from the
+      session and the Referer (``/build.php?id=22&gid=22``). Changing this
+      needs to be done together with the navigation, or a claim could land on
+      a building nobody chose.
+    * **The ad provider moved.** The real flow is
+      ``GET /fallback/v1/request-ad?game_id=<uuid>`` into an ``ih.adscale.de``
+      iframe, then ``POST /fallback/v1/reward`` 33.6 seconds later. There is
+      no ATG ``fc.php``/``xs.php`` in it. Steps 2-4 here talk to a provider
+      this game no longer uses.
+
+    Neither is fixed yet, deliberately: the request SHAPES are known, the
+    request and response BODIES are not, and rewriting a claim flow against
+    guessed bodies is exactly the risk this branch exists to remove. What the
+    capture did settle, and what has been acted on, is the removal of a
+    ``POST /api/v1/videofeature/start`` that no client sends.
     """
 
     def __init__(self, http_client: HttpClient):
@@ -258,14 +278,28 @@ class VideoRewardService:
                 f"ATG config: fc={fc_url[:50]}... xs={xs_url[:50]}... bid={bid} zone={zone_id}"
             )
 
-            # Phase 3: Notify server that video started
-            logger.info("Notifying server: video started")
-            await self.http_client.post_json(
-                "/api/v1/videofeature/start",
-                {"vrid": vrid},
-                skip_reauth=True,
-                safe_to_retry=False,
-            )
+            # Phase 3 used to POST /api/v1/videofeature/start here. It does not
+            # any more, because the game's client does not.
+            #
+            # Recorded end to end from a real watch, 2026-09-15, with the
+            # operator watching an ad for a building speed-up:
+            #
+            #   +0.0s  GET  /api/v1/videofeature/open/buildingUpgrade   200
+            #   +0.0s  GET  /js/en-US/videoFeature.json
+            #   +0.1s  GET  /fallback/v1/request-ad?game_id=<uuid>      200
+            #   +0.1s  GET  [ih.adscale.de]/map                         (iframe)
+            #  +33.6s  POST /fallback/v1/reward                         200
+            #   +0.2s  POST /api/v1/videofeature/ends                   200
+            #
+            # A complete, successful, rewarded watch, and no `start` in it --
+            # nor in the 1,631-request session captured the same day. So the
+            # endpoint is either gone or vestigial, and either way calling it
+            # is a request that identifies us: nothing a browser does produces
+            # it, and it sits in the middle of a flow the server is certainly
+            # watching, since it is the flow that hands out free upgrades.
+            #
+            # Removing it cannot break a claim that works today. The recorded
+            # watch was granted without it.
 
             # Phase 4: Send progress ticks to fc.php (real 3s timing required)
             total_duration = 30

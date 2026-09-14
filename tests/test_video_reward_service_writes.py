@@ -1,17 +1,21 @@
 """`VideoRewardService.claim_reward` spends the operator's ad-view sessions and,
-at the end, claims a real production/build reward from the live game. Four
+at the end, claims a real production/build reward from the live game. Three
 `http_client.post_json` calls are its write surface: the session open
-(`/api/v1/videofeature/open/{type}`), the mid-flow start notify
-(`/api/v1/videofeature/start`), the reward claim (`/api/v1/videofeature/ends`
--- the one call that actually grants something), and the availability read
-(`/api/v1/graphql`) `get_available_rewards` uses to decide which types are
-worth attempting.
+(`/api/v1/videofeature/open/{type}`), the reward claim
+(`/api/v1/videofeature/ends` -- the one call that actually grants something),
+and the availability read (`/api/v1/graphql`) `get_available_rewards` uses to
+decide which types are worth attempting.
+
+It was four until 2026-09-15, when a real watch was recorded end to end and a
+complete, granted claim turned out to contain no `/api/v1/videofeature/start`
+at all. Nor did the 1,631-request session captured the same day. The notify is
+gone; `tests/test_the_video_flow_has_no_phantom_start.py` keeps it gone.
 
 The ad-network (ATG) leg -- the iframe config, the 3s tick loop, the xs.php
 signature -- is faked out entirely: `_extract_atg_config` and `_get_atg_client`
 are monkeypatched, and `asyncio.sleep`/`HumanTiming.micro_jitter`/
 `HumanTiming.reaction_time` are all patched to be instant, so these tests
-exercise the same open -> start -> ends sequence real playback does without
+exercise the same open -> ends sequence real playback does without
 any real HTTP, the real ~33s of ticking, or the reaction-time wait.
 `tests/test_action_url_integrity.py` already pins the ad client's own
 header/TLS identity; this file does not repeat that.
@@ -141,7 +145,6 @@ def test_a_production_boost_claim_opens_with_its_resource_param():
     svc, http = _service(
         {
             "videofeature/open": {"vrid": "v1", "videoIframeUrl": "//x.ad/iframe"},
-            "videofeature/start": {},
             "videofeature/ends": {},
         }
     )
@@ -156,7 +159,6 @@ def test_a_building_upgrade_claim_opens_with_village_slot_and_building():
     svc, http = _service(
         {
             "videofeature/open": {"vrid": "v2", "videoIframeUrl": "//x.ad/iframe"},
-            "videofeature/start": {},
             "videofeature/ends": {},
         }
     )
@@ -223,61 +225,36 @@ def test_a_lost_open_answer_is_reported_as_ambiguous_with_no_further_calls():
     assert len(http.bills) == 1, "the failed request must still be billed"
 
 
-# ── Call site 2: POST /api/v1/videofeature/start ──────────────────────────
+# ── The call site that is NOT there: /api/v1/videofeature/start ───────────
 
 
-def test_the_start_notify_carries_only_the_vrid():
+def test_a_claim_goes_straight_from_open_to_ends():
+    """No start notify, because a real granted watch does not send one.
+
+    Recorded 2026-09-15, the operator watching an ad for a building speed-up:
+    open (a GET, 200), the ad, `POST /fallback/v1/reward` 33.6s later, then
+    `POST /api/v1/videofeature/ends`. Three of those four are calls this
+    service makes in some form. `start` is not among them, and is not in the
+    same day's 1,631-request session either.
+
+    Which makes it the worst kind of request to have been sending: one no
+    browser produces, in the middle of the one flow the server has the
+    strongest reason to watch, because it is the flow that gives away free
+    upgrades.
+    """
     svc, http = _service(
         {
             "videofeature/open": {"vrid": "vrid-42", "videoIframeUrl": "//x.ad/iframe"},
-            "videofeature/start": {},
             "videofeature/ends": {},
         }
     )
 
     asyncio.run(svc.claim_reward("ironProductionBonus"))
 
-    assert http.calls[1] == ("/api/v1/videofeature/start", {"vrid": "vrid-42"})
-
-
-def test_a_refusal_shaped_start_answer_does_not_stop_the_flow():
-    """Documents current behaviour: `/start`'s answer is never inspected, so
-    the flow still proceeds to `/ends` even if `/start` names an error."""
-    svc, http = _service(
-        {
-            "videofeature/open": {"vrid": "v1", "videoIframeUrl": "//x.ad/iframe"},
-            "videofeature/start": {"error": "sessionExpired"},
-            "videofeature/ends": {},
-        }
-    )
-
-    result = asyncio.run(svc.claim_reward("ironProductionBonus"))
-
-    assert result.success is True
     assert [c[0] for c in http.calls] == [
         "/api/v1/videofeature/open/productionBoost",
-        "/api/v1/videofeature/start",
         "/api/v1/videofeature/ends",
     ]
-
-
-def test_a_lost_start_answer_is_reported_as_ambiguous_and_ends_is_never_called():
-    svc, http = _service(
-        {
-            "videofeature/open": {"vrid": "v1", "videoIframeUrl": "//x.ad/iframe"},
-            "videofeature/start": NetworkError("Connection reset (non-retryable): peer closed"),
-        }
-    )
-
-    result = asyncio.run(svc.claim_reward("ironProductionBonus"))
-
-    assert result.success is False
-    assert "non-retryable" in result.message
-    assert [c[0] for c in http.calls] == [
-        "/api/v1/videofeature/open/productionBoost",
-        "/api/v1/videofeature/start",
-    ]
-    assert len(http.bills) == 2
 
 
 # ── Call site 3: POST /api/v1/videofeature/ends (the actual claim) ────────
@@ -287,7 +264,6 @@ def _through_ends(ends_body, *, reward_type="ironProductionBonus", **extra):
     svc, http = _service(
         {
             "videofeature/open": {"vrid": "v1", "videoIframeUrl": "//x.ad/iframe"},
-            "videofeature/start": {},
             "videofeature/ends": ends_body,
         }
     )
@@ -297,7 +273,7 @@ def _through_ends(ends_body, *, reward_type="ironProductionBonus", **extra):
 def test_the_claim_post_carries_the_vrid_and_the_parsed_signature():
     result, http = _through_ends({})
 
-    assert http.calls[2] == ("/api/v1/videofeature/ends", {"vrid": "v1", "hash": "deadbeef"})
+    assert http.calls[1] == ("/api/v1/videofeature/ends", {"vrid": "v1", "hash": "deadbeef"})
     assert result.success is True
     assert "Reward claimed" in result.message
 
@@ -353,7 +329,6 @@ def test_a_lost_claim_answer_is_not_re_sent_and_stays_ambiguous():
     svc, http = _service(
         {
             "videofeature/open": {"vrid": "v1", "videoIframeUrl": "//x.ad/iframe"},
-            "videofeature/start": {},
             "videofeature/ends": NetworkError("Connection reset (non-retryable): peer closed"),
         }
     )
@@ -364,17 +339,16 @@ def test_a_lost_claim_answer_is_not_re_sent_and_stays_ambiguous():
     assert "non-retryable" in result.message
     assert [c[0] for c in http.calls] == [
         "/api/v1/videofeature/open/productionBoost",
-        "/api/v1/videofeature/start",
         "/api/v1/videofeature/ends",
     ], "the claim must be attempted exactly once, never re-sent"
-    assert len(http.bills) == 3
+    assert len(http.bills) == 2
 
 
 def test_a_dispatched_claim_bills_once_per_post_json_call():
     _result, http = _through_ends({})
 
-    assert len(http.calls) == 3
-    assert len(http.bills) == 3
+    assert len(http.calls) == 2
+    assert len(http.bills) == 2
 
 
 # ── Call site 4: POST /api/v1/graphql (get_available_rewards) ─────────────

@@ -216,8 +216,9 @@ API_ENDPOINTS = {
     "autocomplete_village": "/api/v1/autocomplete/villagename",
     "map_position": "/api/v1/map/position",
     "graphql": "/api/v1/graphql",
+    # A GET, recorded live 2026-09-15. `video_start` used to sit between these
+    # two; the game has no such call -- see video_reward_service's class docstring.
     "video_open": "/api/v1/videofeature/open/buildingUpgrade",
-    "video_start": "/api/v1/videofeature/start",
     "video_end": "/api/v1/videofeature/ends",
 }
 
