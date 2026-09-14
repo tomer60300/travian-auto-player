@@ -35,10 +35,18 @@ OBSERVED = {
     "/karte.php",
     "/report",
     "/statistics",
+    # Linked by the live navigation, read 2026-09-15. Never opened in the
+    # capture, which is why it was briefly dropped -- but a URL the game's own
+    # markup links is a URL the client produces, and that is the real standard.
+    "/profile",
     "/build.php?gid=19",
 }
 
-# Present in the codebase before the capture, absent from all 1,631 requests.
+# Present in the codebase before the live page was read, absent from its
+# markup. `/report/all` is the one that survived longest: the report tabs are
+# /report, /report/overview, /report/offensive, /report/defensive,
+# /report/scouting, /report/other, /report/archive and /report/surrounding, and
+# pagination is a bare `?page=N`. There is no `all`.
 NEVER_OBSERVED = {"/statistiken.php", "/spieler.php", "/profile.php", "/report/all"}
 
 
@@ -94,3 +102,45 @@ class TestTheUrlComesFromTheTableNotFromTheName:
         # the idle walk claim it was already there.
         assert PageNavigator._page_key("/build.php?gid=17&t=3") is None
         assert PageNavigator._page_key("/build.php") is None
+
+
+class TestTheLocaleBundlesAreNotOurs:
+    """Settled, so nobody re-treads it: we should NOT fetch the /js/ bundles.
+
+    They are 1,265 of the capture's 1,631 requests -- 84% -- and we ask for
+    none, which looked for a while like the largest single divergence on the
+    branch, and like an easy win.
+
+    It is neither. Playwright's recorder fires on cache hits, and reading the
+    live page's own `performance` entries on 2026-09-15 settles what the
+    recorder could not::
+
+        /js/en-US/layout.json    transferSize=0  decodedBodySize=4169   1ms
+        /js/en-US/plus.json      transferSize=0  decodedBodySize=48668  3ms
+        ... twelve of them, every one transferSize=0
+
+    `transferSize` 0 against a non-zero `decodedBodySize` is the definition of
+    a cache hit. The player's browser fetched these once, weeks ago, and has
+    touched the network for them zero times since. So on the wire -- which is
+    the only place anyone is looking -- a real session and ours already agree:
+    both ask for none.
+
+    Fetching them would have taken us from matching the observation to being
+    the only "browser" on the server with a permanently cold cache, at 12
+    requests per page load against a shared daily activity ceiling. The
+    intuition "84% of their traffic is missing from ours" was measuring the
+    recorder, not the network.
+    """
+
+    def test_we_ask_for_no_locale_bundles(self):
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1] / "src" / "travian_api"
+        asks = [
+            f"{path.relative_to(src)}"
+            for path in src.rglob("*.py")
+            if "/js/" in path.read_text(encoding="utf-8")
+        ]
+        assert not asks, (
+            f"locale bundles are served from the browser cache, not the network: {asks}"
+        )

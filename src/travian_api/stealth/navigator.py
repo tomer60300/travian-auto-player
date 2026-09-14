@@ -58,15 +58,20 @@ logger = logging.getLogger(__name__)
 # is evidence, not recollection: a page goes in when the capture shows a player
 # loading it, at the URL the capture shows.
 #
-# The profile page left the set entirely. It is surely reachable somehow, but
-# the player never opened it, so there is no observed URL to use -- and
-# guessing is the mistake this table exists to stop.
+# The profile page was dropped from this table when it held only the capture,
+# which never opened one, and came back when the live page was read on
+# 2026-09-15: the navigation's own anchor is ``/profile``. Which is the real
+# standard here, and worth stating exactly, because "the capture" was only ever
+# a proxy for it -- **a URL belongs here when the game's own markup links it.**
+# An observed load proves that; so does reading the href. What does not prove
+# it is remembering what Travian used to call the page.
 PAGE_PATHS = {
     "dorf1": "/dorf1.php",
     "dorf2": "/dorf2.php",
     "karte": "/karte.php",
     "report": "/report",
     "statistics": "/statistics",
+    "profile": "/profile",
     # The troop overview. Bare ``gid``, no slot: unlike the marketplace, all
     # four of the capture's visits address it this way.
     "troops": "/build.php?gid=19",
@@ -84,6 +89,7 @@ _WARMUP_PAGE_DESC = {
     "karte": "glancing at the map",
     "report": "reading through reports",
     "statistics": "checking statistics",
+    "profile": "checking own profile",
     "troops": "checking troop numbers",
 }
 # Pre-persona destination affinity: how commonly a page is visited at all.
@@ -103,6 +109,7 @@ _WARMUP_PAGE_AFFINITY = {
     "report": 0.45,
     "dorf2": 0.3,
     "troops": 0.25,
+    "profile": 0.15,
     "statistics": 0.1,
 }
 # Base stop weight, scaled per-account by a stop bias.

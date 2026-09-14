@@ -227,7 +227,10 @@ PAGE_ENDPOINTS = {
     "dorf1": "/dorf1.php",  # Resource fields
     "dorf2": "/dorf2.php",  # Village buildings
     "build": "/build.php",
-    "reports": "/report/all",
+    # One URL, not two. `/report/all` is not a path this gpack links: the
+    # report page's own tabs are /report, /report/overview, /report/offensive,
+    # /report/defensive, /report/scouting, /report/other, /report/archive and
+    # /report/surrounding, and pagination is a bare `?page=N` on /report.
     "report": "/report",
 }
 
