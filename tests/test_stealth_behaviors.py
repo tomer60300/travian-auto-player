@@ -159,8 +159,16 @@ def test_throttler_gap_is_right_skewed_not_uniform():
     # Floor preserved: a gap is never below the configured minimum, so no
     # spike piles up below min_gap_s.
     assert min(samples) >= 1.0
-    # Tail soft-capped so a single draw can't stall a loop.
-    assert max(samples) <= 2.5 * 3.0
+    # Tail soft-capped so a single draw can't stall a loop -- but the cap is now
+    # the DISTRACTION ceiling, not `max_gap_s * 3`. A recorded human session's
+    # longest gap was 380.7s, mid-session with the tab still open, and the old
+    # bound made that impossible to emit: our traffic was continuous purposeful
+    # activity from the first request to the last. See
+    # test_throttler_is_bimodal.py.
+    assert max(samples) <= 1.0 + 600.0
+    # The BODY of the distribution is still inside the configured band: the long
+    # draws are rare, not the norm.
+    assert ordered[int(n * 0.97)] <= 2.5 * 3.0
     # Right-skewed: a uniform distribution has mean == median; ours does not.
     assert mean > median + 0.02
     # Body stays in the lower half of the configured band (median fraction is

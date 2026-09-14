@@ -16,6 +16,32 @@ from collections import deque
 logger = logging.getLogger(__name__)
 
 
+# The request classes a browser actually produces, and the reason this module
+# needed to learn about them at all.
+#
+# Measured against a recorded human session, 1,631 requests, 2026-09-15: the gap
+# distribution is BIMODAL and this throttler only modelled one of the modes.
+#
+#   deliberate    a click, a form submit, choosing a target. A decision, so it
+#                 costs human time: p50 ~0.9s, tail to 20s and beyond.
+#   consequential subresources, the page's own API chatter, read-backs. NOT a
+#                 decision -- the browser makes them because the first one
+#                 happened -- so they arrive at p50 0.00s, p75 0.10s.
+#
+# A single floor applied to both smears the two modes into one band no human
+# emits. 94% of that session's gaps fell BELOW this module's 1.5s minimum, and
+# its median for documents-and-API was 0.90s: our floor sat above their typical.
+#
+# `HttpClient` has always known which class a request is -- it picks the headers
+# from it -- and never told us.
+_CONSEQUENTIAL = frozenset({"fetch", "xhr", "json"})
+
+# Ceiling on a distraction pause. Above the 380.7s the recording's longest gap
+# measured, so the shape is not clipped where the evidence lives, and far below
+# "this loop has hung".
+_MAX_DISTRACTION_S = 600.0
+
+
 class RequestThrottler:
     """Global rate limiter for all HTTP requests to Travian.
 
@@ -34,8 +60,21 @@ class RequestThrottler:
         min_gap_s: float = 1.5,
         max_gap_s: float = 3.0,
         burst_window_s: float = 60.0,
-        burst_max_requests: int = 20,
+        # 60, not 20. Measured against a recorded human session 2026-09-15: a
+        # SINGLE page load is 13 requests (the document plus twelve locale
+        # bundles the page fires in parallel), and the largest observed burst
+        # was 35 requests under 0.5s apart. Three ordinary page loads inside a
+        # minute is 39. The old cap of 20 would have flagged that session as a
+        # burst violation and sat it in a cooldown -- a stealth guard calibrated
+        # so that genuine human traffic trips it is calibrated wrong, and the
+        # cooldown it imposes is itself the unnatural shape.
+        burst_max_requests: int = 60,
         burst_cooldown_s: float = 15.0,
+        # How often a deliberate gap becomes a real pause instead. 1.5% puts
+        # roughly one distraction in a seventy-request session, which is the
+        # order the recording showed (one 380s gap in 1,631 requests, plus
+        # several tens-of-seconds ones).
+        distraction_chance: float = 0.015,
         enabled: bool = True,
     ):
         """
@@ -55,6 +94,7 @@ class RequestThrottler:
         self.burst_window_s = burst_window_s
         self.burst_max_requests = burst_max_requests
         self.burst_cooldown_s = burst_cooldown_s
+        self.distraction_chance = distraction_chance
         self.enabled = enabled
 
         self._last_request_time: float = 0
@@ -107,11 +147,16 @@ class RequestThrottler:
         self._gap_median_frac = rng.uniform(0.30, 0.48)
         self._gap_sigma = rng.uniform(0.45, 0.85)
 
-    async def wait(self, context: str = "") -> float:
+    async def wait(self, context: str = "", request_type: str = "page") -> float:
         """Wait until it's safe to make the next request.
 
         Args:
             context: Optional description for logging (e.g., "upgrade building")
+            request_type: "page", "form", "json", "xhr" or "fetch" -- the class
+                the caller already resolved to choose its headers. Consequential
+                classes (see `_CONSEQUENTIAL`) are paced on a near-zero floor,
+                because the browser fires them off the back of something else
+                rather than deciding to.
 
         Returns:
             Actual seconds waited
@@ -160,7 +205,7 @@ class RequestThrottler:
             # correlated, not iid) but never below the hard floor.
             if self._last_request_time > 0:
                 elapsed = now - self._last_request_time
-                target_gap = self._effective_gap()
+                target_gap = self._effective_gap(request_type)
                 if elapsed < target_gap:
                     gap_wait = target_gap - elapsed
                     await asyncio.sleep(gap_wait)
@@ -176,7 +221,7 @@ class RequestThrottler:
 
             return waited
 
-    def _effective_gap(self) -> float:
+    def _effective_gap(self, request_type: str = "page") -> float:
         """The target inter-request gap after session-tempo scaling.
 
         Tempo scales only the INCREMENT above the floor, never the whole gap:
@@ -186,6 +231,13 @@ class RequestThrottler:
         increment is non-negative and tempo is positive, so the result is never
         below the floor and the density there stays zero.
         """
+        if request_type in _CONSEQUENTIAL:
+            # The page's own chatter. Recorded p50 0.00s, p75 0.10s, so this is
+            # a small positive draw rather than a floor: enough that two
+            # requests never share a timestamp exactly, not enough to read as a
+            # decision. Tempo is not applied -- a browser firing a read-back
+            # does not get tired.
+            return random.lognormvariate(math.log(0.06), 0.9)
         target_gap = self._sample_gap()
         if self._tempo is not None:
             increment = max(0.0, (target_gap - self.min_gap_s) * self._tempo.current())
@@ -194,6 +246,18 @@ class RequestThrottler:
 
     def _sample_gap(self) -> float:
         """Sample an inter-request gap from a right-skewed distribution.
+
+        Occasionally very long. The same recorded session's largest gap was
+        380.7 SECONDS -- six minutes of nothing, mid-session, with the tab still
+        open. Nothing in this module could emit that: `max_gap_s` is 3.0 and the
+        body of the distribution sits under it, so our traffic was continuous
+        purposeful activity from the first request to the last. A person stops
+        to read something, answers the door, reads a message.
+
+        So a small fraction of DELIBERATE gaps are drawn from a second,
+        much longer mode instead. Deliberate only -- a page's own subresources
+        do not pause to think -- and rare enough that a short run usually has
+        none, which is also what the recording shows.
 
         A uniform draw over ``[min_gap_s, max_gap_s]`` yields a flat gap
         histogram — the exact "uniform-random timing" pattern that statistical
@@ -207,6 +271,24 @@ class RequestThrottler:
         and sigma are per-session (see ``__init__``) so the shape is not a
         cross-account constant.
         """
+        if random.random() < self.distraction_chance:
+            # Log-normal so the tail is smooth rather than a uniform block: most
+            # distractions are half a minute, a few are several. Returned before
+            # the band below, because the whole point is a draw the band cannot
+            # produce -- its support stops at `max_gap_s * 3`.
+            # ON TOP of the floor, not instead of it. A bare log-normal around
+            # 45s still puts a few draws at a couple of seconds -- a
+            # "distraction" shorter than an ordinary gap, which is not a
+            # distraction at all and quietly breaks this sampler's one hard
+            # guarantee, that a deliberate gap is never under the floor.
+            # Capped. The old soft cap (`max_gap_s * 3`) is what made a long
+            # idle impossible, so this draw has to escape it -- but "a single
+            # draw cannot stall a loop" was a fair rule and still is. 600s sits
+            # above the longest gap the recording contains (380.7s) and bounds
+            # the worst case at ten minutes rather than at nothing.
+            return self.min_gap_s + min(
+                random.lognormvariate(math.log(45.0), 1.0), _MAX_DISTRACTION_S
+            )
         span = self.max_gap_s - self.min_gap_s
         if span <= 0:
             return self.min_gap_s
@@ -215,7 +297,6 @@ class RequestThrottler:
 
     async def wait_for_penalty(self) -> float:
         """Sleep out any outstanding penalty. Returns the seconds waited.
-
         Deliberately independent of ``enabled``. That flag is the operator's
         pacing preference — how fast to go when the server has said nothing —
         but a 429 is the server saying stop, and honouring it is not a

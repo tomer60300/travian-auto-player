@@ -661,7 +661,11 @@ class HttpClient:
             return headers
 
         # Throttle
-        await self._throttler.wait(context=url)
+        # The class goes to the throttler as well as to the headers. It was
+        # resolved here already and kept to itself, so every request -- a page
+        # the operator navigates to and a read-back the page fires off the back
+        # of a write alike -- was paced as a human decision.
+        await self._throttler.wait(context=url, request_type=request_type)
 
         # Get browser-appropriate headers
         if request_type == "fetch":
