@@ -6333,3 +6333,66 @@ class TestTheDisableRecordSaysWhatHappenedToEachRow:
         kinds = [e["kind"] for e in _trace_events(res.trace_path)]
         order = [kinds.index(k) for k in ("replacement_started", "rows_disabled", "created")]
         assert order == sorted(order), kinds
+
+
+class TestTheAccountSleeps:
+    """A live run is refused during this account's night-rest window.
+
+    `ActivityScheduler` has drawn every account a per-account sleep window since
+    it was written, and `http_client.rest_pause_seconds()` exposes it. Nothing
+    in the project has ever called either -- `is_rest_window` and
+    `seconds_until_rest_ends` have exactly one reference between them, the
+    helper itself. Every automation loop here runs straight through the night.
+
+    Its own docstring names the stake: "activity that respects no sleep window
+    is the most reliable machine-vs-human signal there is." Per-request pacing,
+    TLS impersonation and drifting session tempo are all defeated by one fact
+    about the account -- that it writes trade routes at 04:00 and never rests.
+
+    Refused rather than slept through: this is a request/response endpoint, and
+    pausing until morning would hang the caller for hours.
+    """
+
+    def _svc(self, seconds):
+        svc = _FakeLiveSvc(existing={20011: []})
+        svc.http_client.rest_pause_seconds = lambda: seconds
+        return svc
+
+    def test_a_live_run_inside_the_window_is_refused(self):
+        with pytest.raises(HTTPException) as exc:
+            _run_live(self._svc(3 * 3600 + 25 * 60), _one_origin_account())
+
+        assert exc.value.status_code == 409
+        assert "night-rest" in exc.value.detail
+
+    def test_the_refusal_says_when_it_reopens(self):
+        """A refusal the operator cannot act on is an outage, not a guard."""
+        with pytest.raises(HTTPException) as exc:
+            _run_live(self._svc(3 * 3600 + 25 * 60), _one_origin_account())
+
+        assert "3h25m" in exc.value.detail
+
+    def test_outside_the_window_the_run_proceeds(self):
+        res = _run_live(self._svc(0.0), _one_origin_account())
+
+        assert res.dry_run is False
+
+    def test_a_preview_is_never_refused(self):
+        """It issues no game request, so there is nothing to observe -- and
+        refusing one would stop the operator planning tomorrow's work tonight."""
+        svc = self._svc(3 * 3600)
+        res = _execute(_exec_body(), svc=svc)
+
+        assert res.dry_run is True
+
+    def test_a_scheduler_that_cannot_answer_does_not_take_the_run_down(self):
+        """Stealth is advisory here. The budget and captcha gates are the ones
+        that refuse on their own failure; this one defers to them."""
+
+        def _boom():
+            raise RuntimeError("no scheduler")
+
+        svc = _FakeLiveSvc(existing={20011: []})
+        svc.http_client.rest_pause_seconds = _boom
+
+        assert _run_live(svc, _one_origin_account()).dry_run is False

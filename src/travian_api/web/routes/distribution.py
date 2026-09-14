@@ -7418,6 +7418,45 @@ async def post_execute(
     canary_rows_created: list[int] | None = None
     canary_settled = False  # the read-back reached a verdict about that create
 
+    # ── The account's night ────────────────────────────────────────────────
+    #
+    # `ActivityScheduler` has drawn this account a per-account sleep window
+    # since it was written, `http_client.rest_pause_seconds()` exposes it, and
+    # NOTHING has ever called either. Its own docstring names the stake:
+    # "activity that respects no sleep window is the most reliable
+    # machine-vs-human signal there is." A player who sets up trade routes at
+    # 04:00 every night is not a player.
+    #
+    # Refused rather than slept through. This is a request/response endpoint, so
+    # pausing until morning would hang the caller for hours; the operator (or
+    # their scheduler) is told when the window reopens and comes back then. That
+    # also keeps the decision where it can be seen, instead of inside a sleep
+    # nobody can observe.
+    #
+    # LIVE runs only. A preview issues no game request at all, so there is
+    # nothing about it for anyone to observe, and refusing one would stop the
+    # operator planning tomorrow's work this evening.
+    _rest_seconds = 0.0
+    try:
+        _rest_seconds = float(svc.http_client.rest_pause_seconds())
+    except Exception:
+        # Stealth is advisory here, and a scheduler that cannot answer must not
+        # take the run down with it -- the budget and captcha gates below are
+        # the ones that refuse on their own failure.
+        _rest_seconds = 0.0
+    if _rest_seconds > 0:
+        _mins = int(_rest_seconds // 60)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"This account is in its night-rest window for another "
+                f"{_mins // 60}h{_mins % 60:02d}m. A live run now is the one pattern "
+                f"no amount of per-request pacing disguises: real players sleep. "
+                f'Re-run after it closes, or use execution_mode: "preview" to see '
+                f"what would be written."
+            ),
+        )
+
     # Register the run so the session-lifecycle guards see it: disconnect/
     # reconnect consults ActiveOpRegistry and will not close this HttpClient
     # underneath the run (issue #63). Registered synchronously before the first
