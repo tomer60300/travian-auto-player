@@ -1,14 +1,18 @@
-"""The row-clock diagnostic reads both clocks off one page and compares them.
+"""Travian publishes epochs in UTC and shows the operator a clock an hour ahead.
 
 #76 turns on whether `departure_at % 86400` is already the minute the create
 payload asked for, or a UTC minute an hour behind it. The repository carried one
 claim in comments and a live measurement saying the opposite, and getting the
 sign wrong either deletes live rows or recreates correct routes on every run.
 
-The question is settled by reading the server's OWN "now" and a row's departure
-off the same page: if the page's epoch and the clock it renders disagree by an
-hour, every epoch on that page is on the other clock, and `departureAt` is one
-of them. This pins that arithmetic so the answer cannot drift.
+It is settled by reading the server's OWN "now" against the clock it renders in
+the same page: if those two disagree by an hour, every epoch on that page is on
+the other clock, and `departureAt` is one of them. This pins that arithmetic so
+the answer cannot drift.
+
+Sibling to `test_server_clock_offset.py`, which covers the PARSER. This covers
+what the parsed offset then means for a real timestamp, including the midnight
+wrap that makes the error a different day rather than a different hour.
 
 Measured against the live account 2026-09-13 with exactly these fields:
 `Travian.Game.timestamp = 1789312427` (15:13 UTC) rendered as 16:13 server time,
@@ -19,7 +23,7 @@ against 00:30 on the game's clock.
 from travian_api.parsers.html_parser import parse_server_utc_offset_minutes
 from travian_api.services.distribution.window_pruning import minute_of_day
 
-# The two lines the diagnostic keys on, verbatim in the shape the game emits.
+# Verbatim in the shape the game emits it.
 PAGE = """
 <script type="application/javascript">
     Travian.Game.timestamp = 1789312427;

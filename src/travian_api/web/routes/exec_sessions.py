@@ -21,15 +21,11 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 
 from travian_api.operation_manager import operation_manager
-from travian_api.parsers.html_parser import (
-    parse_server_utc_offset_minutes,
-    parse_trade_routes,
-)
 from travian_api.services.recon_account import acquire_recon_client
 from travian_api.web.auth import get_current_user
 from travian_api.web.execution_sessions import exec_session_manager
 from travian_api.web.operation_gate import active_ops, captcha_stop
-from travian_api.web.sessions import get_live_travian_session, get_travian_session
+from travian_api.web.sessions import get_travian_session
 from travian_api.web.ws.manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -472,75 +468,3 @@ async def _listen_for_stop(websocket: WebSocket, session_id: str) -> None:
                 # client that sends stop multiple times is harmless.
     except (WebSocketDisconnect, RuntimeError):
         return
-
-
-@router.get("/api/__diag/row-clock")
-async def diag_row_clock(
-    village_id: int,
-    session=Depends(get_live_travian_session),
-):
-    """Read BOTH clocks off one marketplace page, and compare them (#76).
-
-    Costs exactly one game request and writes nothing.
-
-    The repository carries two incompatible claims about ``departure_at``. Two
-    comments in ``distribution.py`` and ``window_pruning.py``'s module docstring
-    say ``departure_at % 86400`` is already the minute the create payload asked
-    for and needs no timezone. A measurement on this account said the live rows
-    sat a uniform hour behind the minutes the plan asked for.
-
-    Getting the sign wrong is expensive in both directions -- one deletes live
-    rows, the other recreates routes that were already correct on every run --
-    so this settles it from data instead of from either claim.
-
-    Both readings come off the SAME page, which is what makes it airtight:
-    ``Travian.Game.timestamp`` is the server's own "now", the rendered
-    ``servertime`` timer is that same instant as the operator sees it, and
-    ``departureAt`` is a row's next firing. If the epoch and the rendered clock
-    disagree by an hour, every epoch on the page is on the other clock -- and
-    ``departure_at`` is one of them.
-    """
-    html = await session.http_client.get_html(f"/build.php?gid=17&t=3&newdid={village_id}")
-
-    page_epoch = re.search(r"Travian\.Game\.timestamp\s*=\s*(\d+)", html)
-    rendered = re.search(r'class="timer"[^>]*value="(\d+)"', html)
-    offset = parse_server_utc_offset_minutes(html)
-    rows = parse_trade_routes(html)
-
-    def clocks(epoch: int | None) -> dict:
-        if epoch is None:
-            return {}
-        shift = (offset or 0) * 60
-        return {
-            "epoch": epoch,
-            "utc_minute_of_day": (epoch % 86_400) // 60,
-            "utc_hhmm": f"{(epoch % 86_400) // 3600:02d}:{(epoch % 86_400) % 3600 // 60:02d}",
-            "shifted_minute_of_day": ((epoch + shift) % 86_400) // 60,
-            "shifted_hhmm": (
-                f"{((epoch + shift) % 86_400) // 3600:02d}:"
-                f"{((epoch + shift) % 86_400) % 3600 // 60:02d}"
-            ),
-        }
-
-    return {
-        "village_id": village_id,
-        "server_utc_offset_minutes": offset,
-        "page_now": clocks(int(page_epoch.group(1)) if page_epoch else None),
-        "rendered_timer_value": int(rendered.group(1)) if rendered else None,
-        "rows": [
-            {
-                "route_id": r["route_id"],
-                "dest_village_id": r["dest_village_id"],
-                "dest_name": r["dest_name"],
-                "repeat_hours": r.get("repeat_hours"),
-                # Whether the row is switched ON. A disabled row still exists,
-                # still has its id and still states a departure -- the only
-                # thing that changed is that it no longer ships -- so a revert
-                # that disabled rather than deleted is invisible without this.
-                "active": r.get("active"),
-                **clocks(r.get("departure_at")),
-            }
-            for r in rows
-            if r.get("departure_at") is not None
-        ],
-    }
