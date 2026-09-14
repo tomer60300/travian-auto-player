@@ -3696,3 +3696,58 @@ describe('the night’s two ends (v12)', () => {
     expect(back.preNightBaseline).toBeNull()
   })
 })
+
+describe('the queues declaration round-trips in both directions (v13)', () => {
+  // The page keeps a SPARSE map: the key is deleted when the box goes back on,
+  // so absence means "queues run". Writing that map straight out made the
+  // setting one-directional, because mergeSetup starts from what is on screen
+  // and only overwrites the keys a document mentions.
+  const twoProfiles = { Day: { lumber: {} }, Night: { lumber: {} } }
+
+  const save = (queuesRunning) =>
+    roundTrip(
+      buildSetup({
+        account: 'a|b',
+        villages: VILLAGES,
+        profiles: twoProfiles,
+        queuesRunning,
+        exportedAt: STAMP,
+      })
+    )
+
+  const load = (setup, onScreen) =>
+    mergeSetup({ setup, villages: VILLAGES, profiles: twoProfiles, queuesRunning: onScreen })
+
+  it('writes an explicit answer for every profile, not only the stopped ones', () => {
+    const doc = buildSetup({
+      account: 'a|b',
+      villages: VILLAGES,
+      profiles: twoProfiles,
+      queuesRunning: { Night: false },
+      exportedAt: STAMP,
+    })
+
+    expect(doc.queues_running).toEqual({ Day: true, Night: false })
+  })
+
+  it('a saved RUNNING profile clears a locally stopped one', () => {
+    // The direction that silently failed: the file says Night runs, the screen
+    // says it is stopped, and the loaded setup used to keep the stop -- omitting
+    // real consumption from every plan built after it.
+    const merged = load(save({}), { Night: false })
+
+    expect(merged.queuesRunning.Night).toBe(true)
+  })
+
+  it('a saved STOPPED profile still stops a locally running one', () => {
+    const merged = load(save({ Night: false }), {})
+
+    expect(merged.queuesRunning.Night).toBe(false)
+  })
+
+  it('an account with no profiles writes nothing at all', () => {
+    const doc = buildSetup({ account: 'a|b', villages: VILLAGES, exportedAt: STAMP })
+
+    expect(doc.queues_running).toBeUndefined()
+  })
+})

@@ -4194,6 +4194,18 @@ export default function ResourcePlanner() {
       delete next[activeProfile]
       return next
     })
+    // And the queues declaration, on the same rule as the three above. It is
+    // the one where an orphan is silently EXPENSIVE: absence means "queues
+    // run", so a renamed profile forgets that its spend was stopped and starts
+    // charging consumption again, while the stale `oldName: false` waits to
+    // stop the spend of whatever profile next takes that name.
+    setProfileQueues((prev) => {
+      if (!(activeProfile in prev)) return prev
+      const next = { ...prev }
+      next[name] = next[activeProfile]
+      delete next[activeProfile]
+      return next
+    })
     setActiveProfile(name)
   }
 
@@ -4228,6 +4240,15 @@ export default function ResourcePlanner() {
       return next
     })
     setProfileOvernight((prev) => {
+      if (!(activeProfile in prev)) return prev
+      const next = { ...prev }
+      delete next[activeProfile]
+      return next
+    })
+    // Deleted with the rest. A stale `false` left behind is not inert: absence
+    // means "queues run", so the orphan lies in wait and stops the spend of the
+    // next profile created with this name.
+    setProfileQueues((prev) => {
       if (!(activeProfile in prev)) return prev
       const next = { ...prev }
       delete next[activeProfile]
@@ -9038,7 +9059,7 @@ export default function ResourcePlanner() {
       <ConfirmDialog
         open={confirmDeleteProfile != null}
         title={`Delete profile "${confirmDeleteProfile}"?`}
-        message="Its allocations, hours, attendance answer and overnight declaration go with it. Nothing in the game changes — this is the plan, not the routes."
+        message="Its allocations, hours, attendance answer, overnight declaration and queues answer go with it. Nothing in the game changes — this is the plan, not the routes."
         confirmText="Delete"
         cancelText="Keep it"
         variant="danger"

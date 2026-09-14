@@ -56,6 +56,10 @@ def _live(dest_id, x=40, y=40, *, minute=None, route_id=1):
         dest_x=x,
         dest_y=y,
         departure_at=None if minute is None else _EPOCH_DAY + minute * 60,
+        # The clock context a real read stamps. Stated rather than re-derived:
+        # the reconciler no longer assumes UTC when it is absent (#76), so a row
+        # without it reads as unknown and can never match a planned minute.
+        departure_minute=minute,
     )
 
 

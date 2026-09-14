@@ -485,6 +485,10 @@ class _FakeLiveSvc:
                         dest_y=route.dest_y,
                         active=True,
                         departure_at=_EPOCH_DAY + minute * 60,
+                        # The clock context a real read stamps. Stated here
+                        # rather than left to be re-derived: the executor no
+                        # longer assumes UTC when it is missing (#76).
+                        departure_minute=minute,
                         # The real page shows each row's cargo, and the pooled
                         # trim breaks same-minute ties with it.
                         cargo=dict(route.cargo),
@@ -933,6 +937,10 @@ def _fanned(
                 active=active,
                 cargo=dict(cargo) if cargo else None,
                 departure_at=_EPOCH_DAY + minute * 60,
+                # The clock context a real read stamps. Stated here
+                # rather than left to be re-derived: the executor no
+                # longer assumes UTC when it is missing (#76).
+                departure_minute=minute,
             )
         )
     return rows
@@ -1745,6 +1753,10 @@ class TestTheFanOutDoesNotCauseAReRun:
                         dest_y=created.dest_y,
                         active=True,
                         departure_at=_EPOCH_DAY + minute * 60,
+                        # The clock context a real read stamps. Stated here
+                        # rather than left to be re-derived: the executor no
+                        # longer assumes UTC when it is missing (#76).
+                        departure_minute=minute,
                     )
                 )
         return rows

@@ -660,6 +660,28 @@ class TradeRouteService:
                 f"village(s) {stray}, so this village's schedule is unknown"
             )
 
+        # FAIL CLOSED, and only once the page has proved it IS this village's
+        # marketplace -- an unreadable page has a better story to tell, and the
+        # checks above tell it.
+        #
+        # Every schedule decision downstream (which live rows match the plan,
+        # which fall outside a profile's hours and get deleted) is a
+        # minute-of-day comparison, and the operator's minutes are on the
+        # server's clock. Without the offset a row cannot be put on that clock,
+        # and the tempting answer -- read the epoch raw, i.e. assume UTC -- is
+        # exactly the bug #76 is about: an hour out on this account, which near
+        # midnight is a different DAY.
+        #
+        # Every real page states it, and the value is remembered, so this only
+        # fires when no page has ever stated it.
+        if any(r.get("departure_at") is not None for r in parsed) and (
+            self.server_utc_offset_minutes is None
+        ):
+            raise MarketplaceUnreadable(
+                f"village {village_id}: the marketplace page did not state the server's "
+                f"clock (Travian.Game.timezoneOffsetToUTC), so a row's departure cannot "
+                f"be placed on the game's clock; refusing rather than assuming UTC"
+            )
         return [
             ExistingRoute(
                 route_id=r["route_id"],

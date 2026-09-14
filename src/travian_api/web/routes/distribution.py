@@ -132,7 +132,6 @@ from travian_api.services.distribution.storage import (
     storage_findings,
     store_status,
 )
-from travian_api.services.distribution.window_pruning import minute_of_day
 from travian_api.services.trade_route_service import (
     ExistingRoute,
     MarketplaceUnreadable,
@@ -6274,21 +6273,27 @@ def _row_minute(e: ExistingRoute) -> int:
     -1 can never equal a planned minute, so a row whose departure could not be
     read reconciles by recreation rather than by trust.
 
-    Prefers ``departure_minute``, which the trade-route service derived from the
-    row's epoch and the server's OWN stated clock at the moment it read the
-    page. That conversion is #76's answer: the page publishes UTC epochs and the
+    ``departure_minute`` is stamped by the trade-route service from the row's
+    epoch and the server's OWN stated clock at the moment it read the page.
+    That conversion is #76's answer: the page publishes UTC epochs and the
     operator's "send at HH:MM" is an hour ahead of them, so a raw
     ``departure_at % 86400`` names a different minute -- and, for a row near
     midnight, a different day.
 
-    Falls back to the unshifted reading only for a route with no clock context
-    at all, which in practice means one built in a test rather than read from a
-    page.
+    **There is deliberately no fall back to the unshifted reading.** It used to
+    fall back, on the belief that a row without clock context could only be one
+    built in a test. That was wrong: a real
+    :meth:`TradeRouteService.list_existing_routes` leaves the stamp `None`
+    whenever the page's clock assignment is missing or out of range, and the
+    fallback then answered with a UTC minute -- quietly restoring the very
+    comparison of UTC departures against game-clock schedules that #76 is about.
+    On a non-UTC account that replaces correct schedules and prunes the wrong
+    rows.
+
+    Unknown is now unknown. `_offset_is_known` refuses the run before any
+    schedule-dependent write rather than letting -1 recreate a route on a guess.
     """
-    if e.departure_minute is not None:
-        return e.departure_minute
-    minute = minute_of_day(e.departure_at)
-    return -1 if minute is None else minute
+    return -1 if e.departure_minute is None else e.departure_minute
 
 
 def _stable_rows(rows: Sequence[ExistingRoute]) -> Counter:
@@ -6950,23 +6955,43 @@ async def post_execute(
         return sum(a.live_game_rows for a in reported if a.live_game_rows is not None)
 
     def _execution_scope(_body, _segments) -> set[int] | None:
-        """The villages a narrowed run will actually write to, or None.
+        """The villages a narrowed run can write to, or None for "all of them".
 
-        None means "not narrowed", and every feasibility check then behaves
-        exactly as it did before this existed.
+        None means the unnarrowed gate, exactly as it behaved before this
+        existed. Narrowing is only returned when the run's whole mutation
+        footprint is KNOWABLE from the plan, which is a stricter condition than
+        "the request named some origins".
 
         Both ends of a surviving route are in scope, not just the origin: the
         run creates a route INTO a village as surely as out of one, so a
-        shortfall at that destination is a reason to refuse. What falls outside
-        is the rest of the account, which a scoped run cannot touch and
-        therefore cannot make worse.
+        shortfall at that destination is a reason to refuse. Built from the same
+        two filters the route loop applies, so an origin whose every route was
+        filtered out by `only_destinations` contributes nothing.
 
-        Built from the same two filters the route loop applies, so the set is
-        the villages that run actually acts on rather than the ones the operator
-        typed -- an origin whose every route was filtered out by
-        `only_destinations` contributes nothing.
+        **Two footprints are wider than the surviving routes, and both give up
+        the narrowing rather than guess at it.**
+
+        `disable_existing` lets the run switch off whatever it finds at those
+        origins, and what it finds is not known until the marketplace is read --
+        the rows may point anywhere, including at a village whose allocation the
+        planner had to drop. Reproduced: a plan holding only `20003 -> -1`, a
+        dropped crop allocation at `20011` and a live `20003 -> 20011` route.
+        With `only_origins=[20003]` the surviving-route scope is `{20003, -1}`,
+        the gate passes, and the run disables a route to a village the gate
+        never considered.
+
+        `reconcile_all_origins` sweeps villages with no planned rows at all, so
+        the surviving-route scope can be EMPTY while the run still disables
+        every old row it meets. Those origins are enumerable -- they are the
+        snapshot -- but a sweep is the whole account by definition, so there is
+        nothing left to narrow.
+
+        The narrowing therefore survives exactly where it is sound: a run that
+        only creates, within a named set.
         """
         if _body.only_origins is None and _body.only_destinations is None:
+            return None
+        if _body.disable_existing or _body.reconcile_all_origins:
             return None
         scope: set[int] = set()
         for _, _acc in _segments:

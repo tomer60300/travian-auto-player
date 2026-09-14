@@ -20,10 +20,18 @@ true UTC epoch, so anything echoing it stays honest; `departure_minute` is what
 every schedule decision reads.
 """
 
+import asyncio
+import re
 from types import SimpleNamespace
 
+import pytest
+
 from travian_api.services.distribution.window_pruning import in_window
-from travian_api.services.trade_route_service import ExistingRoute, TradeRouteService
+from travian_api.services.trade_route_service import (
+    ExistingRoute,
+    MarketplaceUnreadable,
+    TradeRouteService,
+)
 from travian_api.web.routes.distribution import _row_minute
 
 # Village 24's first tribute row to 01 Ariados, exactly as the live page stated
@@ -95,10 +103,79 @@ class TestTheReconcilerReadsTheStampedMinute:
         """-1 can never equal a planned minute, which is the point of it."""
         assert _row_minute(self._row(departure_at=None)) == -1
 
-    def test_a_row_with_no_clock_context_falls_back_rather_than_inventing_one(self):
-        """A route built without a page behind it -- in practice, in a test.
+    def test_a_row_with_no_clock_context_is_UNKNOWN_not_utc(self):
+        """The fallback that used to live here was wrong, and dangerously so.
 
-        It reads unshifted, which is what this code did everywhere before the
-        offset existed, so no existing caller changes meaning by accident.
+        It read the epoch unshifted -- i.e. assumed UTC -- on the belief that a
+        row without clock context could only be one built in a test. A real
+        `list_existing_routes` leaves the stamp None whenever the page's clock
+        assignment is missing or out of range, so the fallback quietly restored
+        the very comparison #76 is about, on live data.
+
+        -1 never equals a planned minute. Nothing is written on it either: the
+        service refuses the read outright (see
+        `TestAPageThatWillNotStateItsClockIsRefused`), so this is the second
+        line of defence rather than the first.
         """
-        assert _row_minute(self._row(departure_at=TRIBUTE_ROW)) == 23 * 60 + 30
+        assert _row_minute(self._row(departure_at=TRIBUTE_ROW)) == -1
+
+
+class TestAPageThatWillNotStateItsClockIsRefused:
+    """The first line of defence: refuse the READ, before any write decision.
+
+    `_row_minute` returning -1 is safe but not sufficient -- -1 means "recreate
+    this route", which is itself a write, taken because a clock could not be
+    read. So the read refuses instead, and only once the page has proved it is
+    this village's marketplace: an unreadable page has a better story to tell.
+
+    Driven by the real captured fixture rather than a hand-written model, with
+    the clock line removed for the negative case, so the two runs differ in
+    exactly one thing.
+    """
+
+    FIXTURE = "tests/fixtures/marketplace_trade_routes.html"
+    VILLAGE = 20002  # the fixture states this as currentVillageId
+
+    def _html(self):
+        with open(self.FIXTURE, encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+
+    def _service(self, html):
+        service = TradeRouteService(SimpleNamespace())
+
+        async def _page(*_a, **_k):
+            return html
+
+        service.open_marketplace = _page
+        return service
+
+    def test_the_fixture_states_its_clock(self):
+        """The premise. If the fixture loses it, the next case proves nothing."""
+        assert "timezoneOffsetToUTC" in self._html()
+
+    def test_the_same_page_without_that_line_is_refused(self):
+        stripped = re.sub(r"Travian\.Game\.timezoneOffsetToUTC\s*=\s*-?\d+;", "", self._html())
+        service = self._service(stripped)
+
+        with pytest.raises(MarketplaceUnreadable, match="clock"):
+            asyncio.run(service.list_existing_routes(self.VILLAGE))
+
+    def test_with_the_line_the_rows_are_read_and_stamped(self):
+        service = self._service(self._html())
+        rows = asyncio.run(service.list_existing_routes(self.VILLAGE))
+
+        assert service.server_utc_offset_minutes == 60
+        assert rows, "the fixture has routes"
+        stamped = [r for r in rows if r.departure_at is not None]
+        assert stamped, "and they state departures"
+        for row in stamped:
+            assert row.departure_minute == (row.departure_at // 60 + 60) % 1440
+
+    def test_a_remembered_offset_carries_a_page_that_omits_it(self):
+        """The offset is a property of the SERVER, not of one page."""
+        stripped = re.sub(r"Travian\.Game\.timezoneOffsetToUTC\s*=\s*-?\d+;", "", self._html())
+        service = self._service(stripped)
+        service.server_utc_offset_minutes = 60
+
+        rows = asyncio.run(service.list_existing_routes(self.VILLAGE))
+        assert any(r.departure_minute is not None for r in rows)

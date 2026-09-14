@@ -276,3 +276,44 @@ test.describe('the queues-running declaration', () => {
     ])
   })
 })
+
+test.describe('the declaration belongs to the profile, not to its name', () => {
+  test.use({ viewport: { width: 1440, height: 1400 } })
+
+  // The map is keyed by name and the key is DELETED when queues run, so an
+  // orphan is not inert -- it is a stop lying in wait for whatever profile next
+  // takes that name, and a rename that loses it quietly starts charging
+  // consumption again.
+
+  test('a rename carries the stop with it', async ({ page }) => {
+    await isolate(page)
+    await seed(page, DAY_AND_NIGHT)
+    await openDayStage(page)
+
+    await boxFor(page, 'Night').uncheck()
+    expect(await stored(page)).toEqual({ Night: false })
+
+    await page.getByRole('button', { name: 'Rename' }).click()
+    await page.getByLabel('Profile name').fill('Sleep')
+    await page.getByRole('button', { name: 'Rename it' }).click()
+
+    // The box must still be UNCHECKED under the new name...
+    await expect(boxFor(page, 'Sleep')).not.toBeChecked()
+    // ...and the old key must be gone, not merely shadowed.
+    expect(await stored(page)).toEqual({ Sleep: false })
+  })
+
+  test('a deleted profile does not leave its stop behind', async ({ page }) => {
+    await isolate(page)
+    await seed(page, DAY_AND_NIGHT)
+    await openDayStage(page)
+
+    await boxFor(page, 'Night').uncheck()
+    expect(await stored(page)).toEqual({ Night: false })
+
+    await page.getByRole('button', { name: 'Delete profile Night' }).click()
+    await page.getByRole('button', { name: 'Delete', exact: true }).click()
+
+    expect(await stored(page)).toEqual({})
+  })
+})

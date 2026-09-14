@@ -1,5 +1,14 @@
 <!doctype html>
 <html><head><title>Marketplace fixture</title></head><body>
+<!-- The server's clock, exactly as every real page states it. Present because
+     `list_existing_routes` now REFUSES a page that does not state it: a row's
+     departure is a UTC epoch and the operator's schedule is on the server's
+     clock, so without this the two cannot be compared and the executor would
+     be guessing about which rows to keep (#76). -1 hour to UTC = UTC+01:00,
+     which is the account this fixture was taken from. -->
+<script type="application/javascript">
+    Travian.Game.timezoneOffsetToUTC = -3600;
+</script>
 <!-- Anonymised from a real Europe 2 marketplace page, gid=17&t=3, 2026-08-21.
      Village ids, route ids, player id, village names, map ids and timestamps
      are stand-ins. Structure, counts and field names are the real thing. -->

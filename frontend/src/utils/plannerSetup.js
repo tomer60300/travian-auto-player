@@ -1585,11 +1585,27 @@ export function buildSetup({
   if (overnight && Object.keys(overnight).length) {
     doc.overnight = overnight
   }
-  // v13. Only the profiles that STOPPED are ever in this map -- the page deletes
-  // the key when the box goes back on -- so writing it whole writes exactly the
-  // answers somebody gave, and an untouched account writes nothing.
-  if (queuesRunning && Object.keys(queuesRunning).length) {
-    doc.queues_running = queuesRunning
+  // v13, and the one map that must be written as EXPLICIT booleans rather than
+  // as the sparse map the page keeps.
+  //
+  // On screen the key is deleted when the box goes back on, so absence means
+  // "queues run". Writing that sparse map straight out made the setting
+  // one-directional: `mergeSetup` starts from the map already on screen and
+  // only overwrites the keys the file mentions, so a document saved with Night
+  // RUNNING said nothing about Night, and loading it over a locally STOPPED
+  // Night left the stop in place. The loaded setup then silently omitted real
+  // consumption -- the exact failure `queues_running` exists to prevent, from
+  // the direction nobody tests by hand.
+  //
+  // So every profile the document carries states its answer, and the two
+  // directions round-trip. An account with no profiles still writes nothing.
+  const exportedProfiles = Object.keys(profiles ?? {})
+  if (exportedProfiles.length) {
+    const answers = {}
+    for (const name of exportedProfiles) {
+      answers[name] = queuesRunning?.[name] !== false
+    }
+    doc.queues_running = answers
   }
   // v9, and the only owned answer that used to be carried by NEITHER
   // persistence path: it lived in localStorage alone, which is per browser
