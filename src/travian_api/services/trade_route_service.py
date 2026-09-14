@@ -464,6 +464,55 @@ class TradeRouteService:
         self._marketplace_referer[village_id] = f"{base}{path}"
         return html
 
+    async def settle_after_write(self, village_id: int) -> None:
+        """The two requests a real client fires after a marketplace write.
+
+        Captured from a live session 2026-09-15, and the shape is the same after
+        every write the marketplace makes -- a route created, a route updated, a
+        route deleted, an offer accepted::
+
+            POST /api/v1/trade-routes
+              +0.1s  POST /api/v1/graphql      <- the read-back we already do
+              +0.0s  POST /api/v1/graphql      <- a SECOND one
+            ...and after an offer accept:
+              +0.0s  POST /api/v1/village/resources
+
+        Two things this closes.
+
+        The read-back is fired TWICE by the page, not once. One is the route
+        list; the other reloads the surrounding view the same handler owns.
+        Doing one where the client does two is a per-write count that never
+        varies, which is exactly the kind of invariant that separates a client
+        from a page.
+
+        And `POST /api/v1/village/resources` refreshes the resource bar. A
+        marketplace write moves resources, so the bar at the top of every page
+        must be re-read -- the human sees the numbers change. We never asked for
+        it once, on any write, ever: our resource figures came from the plan's
+        own model, so the page state we present to the server is of an account
+        whose stock apparently never moves when it ships.
+
+        Best-effort throughout. This is mimicry, not the operation: a failure
+        here must not fail a write that already landed, and the caller's own
+        verification is what establishes what happened.
+        """
+        # `Exception`, deliberately, and this is the one place in this module
+        # where that is the narrow choice rather than the lazy one. Nothing here
+        # is load-bearing: the write has already landed and the caller's own
+        # verification has already run. A mimicry request that took down a
+        # confirmed write would be strictly worse than the pattern it exists to
+        # hide, so the contract is "never raise" and the except has to mean it.
+        for path, body, what in (
+            ("/api/v1/graphql", {"query": MARKETPLACE_READBACK_QUERY}, "second read-back"),
+            ("/api/v1/village/resources", {}, "resource-bar refresh"),
+        ):
+            try:
+                await self.http_client.post_json(
+                    path, body, referer=self._marketplace_referer.get(village_id)
+                )
+            except Exception as exc:
+                logger.debug("%s skipped for village %s: %s", what, village_id, exc)
+
     async def refresh_marketplace(self, village_id: int) -> dict[str, Any]:
         """Re-read the route list the way the game's own client does. ONE request.
 
@@ -541,6 +590,10 @@ class TradeRouteService:
         answers and must not collapse into one.
         """
         view = await self.refresh_marketplace(village_id)
+        # The rest of what the page does after a write. Fired AFTER the read we
+        # actually use, so the answer this method returns is unaffected by it
+        # and a failure there cannot cost us the verification.
+        await self.settle_after_write(village_id)
         from ..parsers.html_parser import MarketplaceModelInvalid, read_trade_routes_from_view
 
         try:

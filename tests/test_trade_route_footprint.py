@@ -158,6 +158,13 @@ class _CountingClient:
         self.bodies.append((path, payload))
         if path == GRAPHQL:
             assert self._readbacks, "queue a read-back payload for every confirm"
+            # The page fires this query TWICE after a write -- recorded from a
+            # live session 2026-09-15 -- so a confirm consumes one queued
+            # answer and then re-reads. The second is the same query against
+            # the same state, so serving the same payload is faithful; popping
+            # it would make every test queue a duplicate to say nothing.
+            if len(self._readbacks) == 1:
+                return self._served(self._readbacks[0])
             return self._served(self._readbacks.pop(0))
         return {}
 
@@ -186,8 +193,26 @@ def _route(dest: int = 700) -> PlannedRoute:
     )
 
 
-class TestTheCanaryRunCostsFourRequests:
-    """Read the village, create one route, confirm it. Nothing else."""
+class TestTheCanaryRunCostsSixRequests:
+    """Read the village, create one route, then settle the way the page does.
+
+    It was four until 2026-09-15, when a live session was recorded and the
+    page's own footprint turned out to be longer. After a marketplace write the
+    client fires the read-back query TWICE and then refreshes the resource bar::
+
+        POST /api/v1/trade-routes
+          +0.1s  POST /api/v1/graphql
+          +0.0s  POST /api/v1/graphql
+          +0.0s  POST /api/v1/village/resources
+
+    We did one read-back and never asked for the resource bar at all -- on any
+    write, ever. Which made the account one whose stock apparently never moves
+    when it ships, and whose per-write request count never varied.
+
+    Four was the RIGHT number for "the fewest requests that prove the write
+    landed". It was the wrong number for "what this page does", and this file is
+    about the second.
+    """
 
     def test_a_read_is_two_gets_in_the_human_order(self):
         service, client = _service([EMPTY_MARKETPLACE, EMPTY_MARKETPLACE])
@@ -205,16 +230,21 @@ class TestTheCanaryRunCostsFourRequests:
         assert client.calls == [("POST", "/api/v1/trade-routes")]
         assert client.waits, "a write with no pacing delay is a burst of one"
 
-    def test_a_confirmation_is_a_single_graphql_post_with_no_page_load(self):
+    def test_a_confirmation_is_graphql_only_with_no_page_load(self):
         # Refetching the model the open page runs on is not a navigation at all,
-        # so it must not walk to the page OR reload it. The game's own create
-        # handler fires one GraphQL query; so does this.
+        # so it must not walk to the page OR reload it. Still true -- what
+        # changed is how many API calls the page makes once it is there.
         service, client = _service([], [_readback(20003, _route_row(1, 700))])
         asyncio.run(service.confirm_routes(20003))
 
-        assert client.calls == [("POST", GRAPHQL)]
+        assert client.calls == [
+            ("POST", GRAPHQL),
+            ("POST", GRAPHQL),
+            ("POST", "/api/v1/village/resources"),
+        ]
+        assert not any(m == "GET" for m, _ in client.calls), "no navigation"
 
-    def test_the_whole_canary_is_four_requests_in_this_exact_order(self):
+    def test_the_whole_canary_is_six_requests_in_this_exact_order(self):
         service, client = _service(
             [EMPTY_MARKETPLACE, EMPTY_MARKETPLACE],
             [_readback(20003, _route_row(1, 700))],
@@ -228,13 +258,16 @@ class TestTheCanaryRunCostsFourRequests:
             ("GET", "/build.php?gid=17&t=3&newdid=20003"),
             ("POST", "/api/v1/trade-routes"),
             ("POST", GRAPHQL),
+            ("POST", GRAPHQL),
+            ("POST", "/api/v1/village/resources"),
         ]
-        assert len(client.calls) == 4
+        assert len(client.calls) == 6
         assert [r.route_id for r in confirmed] == [1]
 
-    def test_verifying_costs_exactly_one_request_more_than_not_verifying(self):
-        # The price of not guessing. Worth stating precisely, because the
-        # alternative was reporting routes that may not exist.
+    def test_verifying_costs_exactly_three_requests_more_than_not_verifying(self):
+        # The price of not guessing, and of looking like the page while doing
+        # it. One of the three is the verification; the other two are what the
+        # client does afterwards whether anyone is checking or not.
         service, client = _service([EMPTY_MARKETPLACE, EMPTY_MARKETPLACE], [_readback(20003)])
         asyncio.run(service.list_existing_routes(20003))
         asyncio.run(service.create_route(_route()))
@@ -242,7 +275,7 @@ class TestTheCanaryRunCostsFourRequests:
 
         asyncio.run(service.confirm_routes(20003))
 
-        assert len(client.calls) - before == 1
+        assert len(client.calls) - before == 3
 
 
 class TestTheReadBackIsTheQueryTheGameFires:
