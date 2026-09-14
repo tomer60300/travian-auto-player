@@ -20,24 +20,31 @@ logger = logging.getLogger(__name__)
 
 # ── Where the village selector goes ────────────────────────────────────
 #
-# LAST. Always last, on every URL that carries one.
+# Last, by convention -- and the convention is ours, not the game's.
 #
-# All 23 village-scoped loads in the 2026-09-15 capture agree, and they agree
-# across four different page types::
+# All 23 village-scoped loads in the 2026-09-15 traffic capture put it last,
+# across four page types::
 #
 #     /karte.php?zoom=1&newdid=61837
 #     /build.php?id=30&gid=17&t=2&newdid=64215
 #     /dorf1.php?id=14&gid=1&as=ccI9Tbn0kPZtXJmk&newdid=30540
 #
-# which is what you would expect from how the game produces them: the markup
-# renders the link for the page, and the village selector appends itself to
-# whatever that link already was. Leading with `newdid` is a shape its own
-# markup cannot emit, and four call sites here and in the services were doing
-# exactly that -- `/build.php?newdid=123&id=30` -- while four others put it
-# last. The parameters are order-independent to the SERVER, so this was free to
-# get wrong and free to fix; it is not free to leave wrong, because "same
-# parameters, unusual order" is the cheapest possible clustering feature and
-# one of the few that survives every layer of timing noise beneath it.
+# **But the game's own markup emits the other order too.** Read off a live
+# /dorf1.php on 2026-09-15, in the sidebar::
+#
+#     /build.php?newdid=64215&id=39&&tt=1
+#
+# newdid first, and a stray double ampersand with it. So an earlier version of
+# this note was wrong to call leading with `newdid` "a shape its own markup
+# cannot emit", and wrong to call the ordering a clustering feature: both orders
+# are real, and no one can group accounts on a choice the game makes both ways.
+# The correction is kept here rather than quietly edited away, because the
+# mistake is the instructive part -- 23 observations of one form is not evidence
+# that the other form does not exist, and reading the markup costs nothing.
+#
+# What remains true, and is why the rule stays: four call sites put it first and
+# four put it last, which is not a decision, it is drift. Picking the form the
+# observed TRAFFIC uses costs nothing and makes the codebase say one thing.
 #
 # ── Warm-up navigation model ───────────────────────────────────────────
 #
@@ -72,6 +79,14 @@ PAGE_PATHS = {
     "report": "/report",
     "statistics": "/statistics",
     "profile": "/profile",
+    # Both linked by the live navigation, both pure reads. Deliberately NOT
+    # added alongside them: /messages, /tasks and /auctions are linked too, but
+    # opening an inbox or a task list can mark things seen or collect something,
+    # and idle noise must never change the account's state. A page we browse to
+    # look busy that quietly reads the operator's mail is a worse bug than the
+    # tell it was closing.
+    "hero": "/hero",
+    "production": "/production.php?t=balance",
     # The troop overview. Bare ``gid``, no slot: unlike the marketplace, all
     # four of the capture's visits address it this way.
     "troops": "/build.php?gid=19",
@@ -90,6 +105,8 @@ _WARMUP_PAGE_DESC = {
     "report": "reading through reports",
     "statistics": "checking statistics",
     "profile": "checking own profile",
+    "hero": "looking in on the hero",
+    "production": "checking production",
     "troops": "checking troop numbers",
 }
 # Pre-persona destination affinity: how commonly a page is visited at all.
@@ -109,7 +126,9 @@ _WARMUP_PAGE_AFFINITY = {
     "report": 0.45,
     "dorf2": 0.3,
     "troops": 0.25,
+    "hero": 0.2,
     "profile": 0.15,
+    "production": 0.12,
     "statistics": 0.1,
 }
 # Base stop weight, scaled per-account by a stop bias.

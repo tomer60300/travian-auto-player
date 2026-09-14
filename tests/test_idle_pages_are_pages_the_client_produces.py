@@ -41,6 +41,12 @@ OBSERVED = {
     # capture, which is why it was briefly dropped -- but a URL the game's own
     # markup links is a URL the client produces, and that is the real standard.
     "/profile",
+    # Linked by the live navigation too, and both pure reads. /messages,
+    # /tasks and /auctions are linked as well and are deliberately absent:
+    # opening an inbox or a task list can mark something seen or collect
+    # something, and idle noise must never change the account's state.
+    "/hero",
+    "/production.php?t=balance",
     "/build.php?gid=19",
 }
 
@@ -150,3 +156,16 @@ class TestTheLocaleBundlesAreNotOurs:
             if self._ASKING_FOR_A_BUNDLE.search(line)
         ]
         assert not asks, f"locale bundles come from the browser cache, not the network: {asks}"
+
+
+def test_idle_browsing_never_opens_anything_that_could_change_state():
+    """An inbox, a task list and an auction house are all linked from every
+    page, and all three are plausible idle destinations for a real player.
+
+    None of them are in this table, because "look busy" must never turn into
+    "read the operator's mail" or "collect a reward nobody asked for". A noise
+    page that mutates is a worse bug than the tell it was added to close, and it
+    would be invisible: the request succeeds, the traffic looks human, and the
+    account quietly changes underneath.
+    """
+    assert not {"/messages", "/tasks", "/auctions"} & set(PAGE_PATHS.values())

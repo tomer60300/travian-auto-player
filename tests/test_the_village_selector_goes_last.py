@@ -1,26 +1,31 @@
-"""`newdid` is appended, never prepended -- on every URL, from every caller.
+"""`newdid` is appended, not prepended -- a house rule, consistently applied.
 
-All 23 village-scoped loads in the 2026-09-15 capture put the village selector
-last, across four different page types::
+All 23 village-scoped loads in the 2026-09-15 traffic capture put the village
+selector last, across four different page types::
 
     /karte.php?zoom=1&newdid=61837
     /build.php?id=30&gid=17&t=2&newdid=64215
     /dorf1.php?id=14&gid=1&as=ccI9Tbn0kPZtXJmk&newdid=30540
 
-Which is what the game's own construction implies: the markup renders the link
-for the page, and the village selector appends itself to whatever that link
-already was. Leading with `newdid` is a shape that markup cannot produce.
+**The game's own markup emits the other order as well**, which the first version
+of this file did not know and asserted the opposite of. From a live /dorf1.php,
+same day, in the sidebar::
 
-Four call sites did it anyway -- `/build.php?newdid=123&id=30` -- while four
-others put it last, so the codebase was not even internally consistent. The
-parameters are order-independent to the SERVER, which is exactly why this was
-free to get wrong: nothing breaks, nothing logs, and "same parameters, unusual
-order" is the cheapest clustering feature there is and one of the very few that
-survives every layer of timing noise underneath it.
+    /build.php?newdid=64215&id=39&&tt=1
 
-A source scan rather than a behavioural test, deliberately. The failure mode is
-a NEW call site written the old way, and no behavioural test covers a call site
-that does not exist yet.
+So this is not a detection fix and the docstring no longer claims to be one.
+Twenty-three observations of one form were never evidence that the other form
+cannot occur, and the markup that settles it was a free read away.
+
+The rule stays for the reason it should have been introduced with: four call
+sites put `newdid` first and four put it last. That is not a decision, it is
+drift, and drift is what makes a later real finding impossible to see. Matching
+the form the observed traffic uses costs nothing and makes the codebase say one
+thing.
+
+A source scan rather than a behavioural test, because the failure mode is a NEW
+call site written the other way, and no behavioural test covers a call site that
+does not exist yet.
 """
 
 import re
