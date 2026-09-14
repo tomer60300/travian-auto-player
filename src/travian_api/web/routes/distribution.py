@@ -99,6 +99,7 @@ from travian_api.services.distribution.planner import (
     assess,
     blockers,
     craft_plan,
+    is_feasible_for,
 )
 from travian_api.services.distribution.roles import (
     Role,
@@ -6936,6 +6937,39 @@ async def post_execute(
         """
         return sum(a.live_game_rows for a in reported if a.live_game_rows is not None)
 
+    def _execution_scope(_body, _segments) -> set[int] | None:
+        """The villages a narrowed run will actually write to, or None.
+
+        None means "not narrowed", and every feasibility check then behaves
+        exactly as it did before this existed.
+
+        Both ends of a surviving route are in scope, not just the origin: the
+        run creates a route INTO a village as surely as out of one, so a
+        shortfall at that destination is a reason to refuse. What falls outside
+        is the rest of the account, which a scoped run cannot touch and
+        therefore cannot make worse.
+
+        Built from the same two filters the route loop applies, so the set is
+        the villages that run actually acts on rather than the ones the operator
+        typed -- an origin whose every route was filtered out by
+        `only_destinations` contributes nothing.
+        """
+        if _body.only_origins is None and _body.only_destinations is None:
+            return None
+        scope: set[int] = set()
+        for _, _acc in _segments:
+            for row in _acc.plan.rows:
+                if _body.only_origins is not None and row.origin not in _body.only_origins:
+                    continue
+                if (
+                    _body.only_destinations is not None
+                    and row.destination not in _body.only_destinations
+                ):
+                    continue
+                scope.add(row.origin)
+                scope.add(row.destination)
+        return scope
+
     def _filter_description() -> str | None:
         if body.only_origins is None and body.only_destinations is None:
             return None
@@ -7070,8 +7104,11 @@ async def post_execute(
     # still previews it, warnings and all).
     # Still gated on is_feasible itself, never on the message helper: if the two
     # ever disagree the authoritative one must be the one that refuses.
+    # The villages this run can actually write to. `None` for an unnarrowed run,
+    # which leaves the check exactly as it was.
+    _scope = _execution_scope(body, planned_segments)
     for _segment, _acc in planned_segments:
-        if not _acc.plan.is_feasible:
+        if not is_feasible_for(_acc.plan, _scope):
             # The blockers, not every warning. This used to concatenate
             # plan.warnings -- on a 25-village account that is 132 lines in a
             # 422 body, and the two that explain the refusal are
@@ -7082,7 +7119,9 @@ async def post_execute(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=(
                     f"{_who}plan is not executable; refusing to write to the account. "
-                    + " ".join(f"{reason}." for reason in blockers(_acc.plan, names))
+                    + " ".join(
+                        f"{reason}." for reason in blockers(_acc.plan, names, only_villages=_scope)
+                    )
                 ).strip(),
             )
     # An allocation the operator explicitly wrote that the planner had to IGNORE

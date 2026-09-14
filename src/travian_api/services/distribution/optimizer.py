@@ -93,7 +93,15 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import combinations
 
-from .allocation import EPSILON, MATERIALS, AllocationMode, Resource, ResourcePlan, village_label
+from .allocation import (
+    EPSILON,
+    MATERIALS,
+    NEGLIGIBLE_PER_HOUR,
+    AllocationMode,
+    Resource,
+    ResourcePlan,
+    village_label,
+)
 from .findings import Category, Finding
 from .geometry import MapGeometry
 from .merchants import DAILY_BEAT_CYCLES, MerchantModel, cheapest_cycle, cycle_sweep
@@ -664,7 +672,19 @@ class Plan:
 
     @property
     def is_feasible(self) -> bool:
-        return not self.over_budget and not self.shortfalls
+        return not self.over_budget and not self.blocking_shortfalls
+
+    @property
+    def blocking_shortfalls(self) -> tuple[Shortfall, ...]:
+        """The shortfalls big enough to refuse a plan over.
+
+        Every shortfall is still REPORTED -- `shortfalls` is unfiltered and the
+        findings quote it -- because a village that is short by any amount is
+        worth knowing about. This is the narrower question of which ones justify
+        refusing to write to the account at all, and the answer excludes the
+        ones too small to name (see `NEGLIGIBLE_PER_HOUR`).
+        """
+        return tuple(s for s in self.shortfalls if s.per_hour > NEGLIGIBLE_PER_HOUR)
 
     @property
     def total_merchants(self) -> int:

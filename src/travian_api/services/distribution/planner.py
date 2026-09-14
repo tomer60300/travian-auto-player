@@ -14,10 +14,18 @@ run plans from the snapshot it is given.
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from .allocation import EPSILON, Allocation, Resource, ResourcePlan, resolve_resource, village_label
+from .allocation import (
+    EPSILON,
+    NEGLIGIBLE_PER_HOUR,
+    Allocation,
+    Resource,
+    ResourcePlan,
+    resolve_resource,
+    village_label,
+)
 from .findings import Category, Finding, Severity
 from .geometry import MapGeometry
 from .merchants import CEIL_DUST_TOLERANCE, DAILY_BEAT_CYCLES, MerchantModel
@@ -320,15 +328,72 @@ class Verdict:
         return self.executable and not self.unweighed
 
 
-def blockers(plan: DistributionPlan, names: Mapping[int, str] | None = None) -> tuple[str, ...]:
+def _blocks(short: Shortfall) -> bool:
+    """Is this shortfall big enough to refuse a whole plan over?
+
+    Reads `plan.shortfalls` rather than a `blocking_shortfalls` attribute so
+    that anything shaped like a plan can be passed here -- the same reason
+    :func:`is_feasible_for` is a function. `RoutingResult` applies the identical
+    threshold when it answers `is_feasible`; the constant is shared so the two
+    cannot drift.
+    """
+    return short.per_hour > NEGLIGIBLE_PER_HOUR
+
+
+def is_feasible_for(plan: DistributionPlan, only_villages: Collection[int] | None) -> bool:
+    """Is *plan* feasible for a run narrowed to *only_villages*?
+
+    ``None`` means an unnarrowed run and defers to ``plan.is_feasible``
+    unchanged -- which is also what keeps this callable with any stand-in that
+    only models that one attribute, and why it is a function here rather than a
+    method on the plan. A method would have obliged every test double of a plan
+    to grow one, for a question none of them ask.
+
+    A narrowed run writes to a few named villages, and a blocker somewhere it
+    will not touch cannot be made better or worse by it. Refusing anyway is what
+    made a scoped test impossible: on the operator's account, creating one route
+    out of village 27 was vetoed by a crop demand at village 19 and at a foreign
+    target, neither of which that run goes near.
+
+    Two blockers stay global on purpose. ``over_allocated`` says the allocations
+    claim more than the account produces, so the remainder village would ship
+    what it does not have -- a property of the sheet, not of any village in it.
+    ``npc_short`` is kept global because that is the conservative reading and
+    nothing yet needs it narrowed.
+    """
+    if only_villages is None:
+        return plan.is_feasible
+    if plan.over_allocated or plan.npc_short:
+        return False
+    scope = set(only_villages)
+    return not any(o.village_id in scope for o in plan.over_budget) and not any(
+        s.village_id in scope for s in plan.shortfalls if _blocks(s)
+    )
+
+
+def blockers(
+    plan: DistributionPlan,
+    names: Mapping[int, str] | None = None,
+    *,
+    only_villages: Collection[int] | None = None,
+) -> tuple[str, ...]:
     """Every reason this plan cannot be carried out, named. Empty when it can.
+
+    *only_villages* narrows it to the villages a scoped run will actually write
+    to, and must be the SAME set :meth:`DistributionPlan.is_feasible_for` was
+    given: ``/execute`` refuses on that predicate and then explains itself with
+    this list, so the two disagreeing means a refusal with no reason or a reason
+    with no refusal.
 
     Separate from :func:`assess` because ``/execute`` needs exactly this and
     nothing else: it has no reason to build a verdict whose `unweighed` and
     `critical_findings` it cannot populate honestly.
     """
     reasons: list[str] = []
+    scope = None if only_villages is None else set(only_villages)
     for over in plan.over_budget:
+        if scope is not None and over.village_id not in scope:
+            continue
         # Whose ceiling it is, where the record knows: "its budget allows 8" of
         # a 19-merchant village is a figure the operator can find nowhere in
         # the game, and this tuple is what /execute refuses with. Same clause
@@ -338,7 +403,18 @@ def blockers(plan: DistributionPlan, names: Mapping[int, str] | None = None) -> 
         reasons.append(
             f"{village_label(over.village_id, names)} commits {over.committed} merchants but {said}"
         )
+    # `blocking_shortfalls`, not `shortfalls`: the two must agree, because
+    # `/execute` gates on `is_feasible` and then explains itself with this list.
+    # When they disagreed, a plan could be refused with no reason given, or
+    # listed with a reason it was not refused for.
     for short in plan.shortfalls:
+        if not _blocks(short):
+            # Reported everywhere else, but not a reason to refuse: see
+            # NEGLIGIBLE_PER_HOUR. A 0.20 crop/h gap printed itself as
+            # "needs 0 crop/h" and stopped all 27 villages.
+            continue
+        if scope is not None and short.village_id not in scope:
+            continue
         # `short.reason`, not a second hardcoded "no village has spare": the
         # optimizer distinguishes a genuine lack of surplus from an exclusion
         # list that put the surplus out of reach, and restating only the first

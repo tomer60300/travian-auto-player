@@ -383,7 +383,15 @@ class TestAE05StaleCargoIsUnfinishedWork:
             for dest, minute in ((20011, 100), (20012, 100))
         )
         return SimpleNamespace(
-            plan=SimpleNamespace(is_feasible=True, warnings=(), rows=rows),
+            plan=SimpleNamespace(
+                is_feasible=True,
+                over_allocated=(),
+                npc_short=(),
+                over_budget=(),
+                shortfalls=(),
+                warnings=(),
+                rows=rows,
+            ),
             names={20003: "03", 20011: "11", 20012: "12"},
             coords={20003: (0, 0), 20011: (10, 0), 20012: (20, 0)},
             warnings=[],

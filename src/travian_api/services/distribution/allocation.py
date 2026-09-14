@@ -29,6 +29,25 @@ from .findings import Category, Finding
 # the account total, because summing twenty five-figure rates accumulates more
 # float error than a fixed absolute tolerance allows for.
 EPSILON = 1e-6
+
+# A shortfall smaller than this is arithmetic residue, not a demand.
+#
+# `EPSILON` exists to keep float noise out of comparisons; it is 1e-6, which is
+# the right floor for "is this quantity nonzero" and the wrong one for "is this
+# quantity worth refusing to run over". Measured on the operator's account: a
+# 0.20 crop/h shortfall at village 15 -- 4.8 crop a DAY, against a merchant that
+# carries 12,500 -- vetoed every write on all 27 villages, and the refusal
+# printed itself as "15 needs 0 crop/h". Refusing on a quantity the message
+# cannot even name is not caution, it is a stuck brake.
+#
+# Half a unit an hour, and the comparison is STRICTLY greater, because that is
+# exactly where the reported figure stops rounding to zero. `f"{0.5:,.0f}"` is
+# "0" -- Python rounds half to even -- and `f"{0.51:,.0f}"` is "1", so "> 0.5"
+# and "prints something other than zero" are the same test. A shortfall this
+# code declines to block on is one no reader could have been told about anyway.
+# Anything it CAN name, it still blocks on: 7.8/h reads as "8/h" and remains a
+# refusal.
+NEGLIGIBLE_PER_HOUR = 0.5
 CONSERVATION_RELATIVE_TOLERANCE = 1e-9
 
 

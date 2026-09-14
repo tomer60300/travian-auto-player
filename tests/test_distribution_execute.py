@@ -589,7 +589,15 @@ class TestLiveExecution:
             arrival_minute=0,
             merchants=2,
         )
-        plan = SimpleNamespace(is_feasible=True, warnings=(), rows=(row, row))
+        plan = SimpleNamespace(
+            is_feasible=True,
+            over_allocated=(),
+            npc_short=(),
+            over_budget=(),
+            shortfalls=(),
+            warnings=(),
+            rows=(row, row),
+        )
         account = SimpleNamespace(
             plan=plan,
             names={20003: "03", -1: "Ally"},
@@ -813,7 +821,15 @@ def _two_origin_account():
             merchants=2,
         ),
     )
-    plan = SimpleNamespace(is_feasible=True, warnings=(), rows=rows)
+    plan = SimpleNamespace(
+        is_feasible=True,
+        over_allocated=(),
+        npc_short=(),
+        over_budget=(),
+        shortfalls=(),
+        warnings=(),
+        rows=rows,
+    )
     return SimpleNamespace(
         plan=plan,
         names={20003: "03", 20011: "11", -1: "A", -2: "B"},
@@ -843,7 +859,15 @@ def _four_route_two_origin_account():
             (20011, -4, 800),
         )
     )
-    plan = SimpleNamespace(is_feasible=True, warnings=(), rows=rows)
+    plan = SimpleNamespace(
+        is_feasible=True,
+        over_allocated=(),
+        npc_short=(),
+        over_budget=(),
+        shortfalls=(),
+        warnings=(),
+        rows=rows,
+    )
     return SimpleNamespace(
         plan=plan,
         names={20003: "03", 20011: "11", -1: "A", -2: "B", -3: "C", -4: "D"},
@@ -907,7 +931,15 @@ def _fanned(
 
 
 def _account(rows, coords, names):
-    plan = SimpleNamespace(is_feasible=True, warnings=(), rows=tuple(rows))
+    plan = SimpleNamespace(
+        is_feasible=True,
+        over_allocated=(),
+        npc_short=(),
+        over_budget=(),
+        shortfalls=(),
+        warnings=(),
+        rows=tuple(rows),
+    )
     return SimpleNamespace(
         plan=plan, names=names, coords=coords, warnings=[], dropped_allocations=[]
     )
@@ -959,7 +991,15 @@ def _own_village_account():
             merchants=2,
         ),
     )
-    plan = SimpleNamespace(is_feasible=True, warnings=(), rows=rows)
+    plan = SimpleNamespace(
+        is_feasible=True,
+        over_allocated=(),
+        npc_short=(),
+        over_budget=(),
+        shortfalls=(),
+        warnings=(),
+        rows=rows,
+    )
     return SimpleNamespace(
         plan=plan,
         names={20003: "03", 20011: "11"},
@@ -4428,7 +4468,15 @@ class TestTheUpdateBurstIsBounded:
             ),
         )
         return SimpleNamespace(
-            plan=SimpleNamespace(is_feasible=True, warnings=(), rows=rows),
+            plan=SimpleNamespace(
+                is_feasible=True,
+                over_allocated=(),
+                npc_short=(),
+                over_budget=(),
+                shortfalls=(),
+                warnings=(),
+                rows=rows,
+            ),
             names={20003: "03", 20011: "11", 20012: "12"},
             coords={20003: (0, 0), 20011: (10, 0), 20012: (0, 10)},
             warnings=[],
