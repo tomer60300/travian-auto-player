@@ -36,13 +36,20 @@ def empty_marketplace(village: int) -> str:
     """A page carrying an empty but VALID trade-route model for *village*.
 
     The parser recognises it (no routes) rather than reporting the page as
-    unreadable. It states `currentVillageId`, as the real Europe 2 page does:
+    unreadable. It states `currentVillageId` and the server's clock offset, as
+    the real Europe 2 page does:
     since the 2026-09-08 review the read refuses a model that describes a
     village other than the one asked for, and a fixture that omitted the field
     was quietly exercising a page the game never serves.
     """
     return (
-        "<html><body><script>window.Travian.React.TradeRoutes.render("
+        "<html><body>"
+        # The server's clock, as every real page states it. The read refuses a
+        # page without it rather than assuming UTC (#76), so a fixture that
+        # omitted it was exercising a page the game never serves -- the same
+        # reason `currentVillageId` is here.
+        "<script>Travian.Game.timezoneOffsetToUTC = -3600;</script>"
+        "<script>window.Travian.React.TradeRoutes.render("
         '{viewData: {"ownPlayer":{"currentVillageId":' + str(village) + ","
         '"village":{"marketplace":{"tradeRoutes":[]}}}}}'
         ");</script></body></html>"

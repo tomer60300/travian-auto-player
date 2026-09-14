@@ -203,7 +203,12 @@ class TestLiveGate:
                 routing=Plan(over_budget=(OverBudget(village_id=20003, committed=9, available=4),))
             )
             return SimpleNamespace(
-                plan=plan, names={20003: "Capital"}, coords={}, warnings=[], dropped_allocations=[]
+                plan=plan,
+                names={20003: "Capital"},
+                coords={},
+                warnings=[],
+                dropped_allocations=[],
+                dropped_allocation_villages=frozenset(),
             )
 
         with (
@@ -480,6 +485,10 @@ class _FakeLiveSvc:
                         dest_y=route.dest_y,
                         active=True,
                         departure_at=_EPOCH_DAY + minute * 60,
+                        # The clock context a real read stamps. Stated here
+                        # rather than left to be re-derived: the executor no
+                        # longer assumes UTC when it is missing (#76).
+                        departure_minute=minute,
                         # The real page shows each row's cargo, and the pooled
                         # trim breaks same-minute ties with it.
                         cargo=dict(route.cargo),
@@ -589,13 +598,22 @@ class TestLiveExecution:
             arrival_minute=0,
             merchants=2,
         )
-        plan = SimpleNamespace(is_feasible=True, warnings=(), rows=(row, row))
+        plan = SimpleNamespace(
+            is_feasible=True,
+            over_allocated=(),
+            npc_short=(),
+            over_budget=(),
+            shortfalls=(),
+            warnings=(),
+            rows=(row, row),
+        )
         account = SimpleNamespace(
             plan=plan,
             names={20003: "03", -1: "Ally"},
             coords={20003: (0, 0), -1: (40, 40)},
             warnings=[],
             dropped_allocations=[],
+            dropped_allocation_villages=frozenset(),
         )
 
         async def _fake_plan(_body):
@@ -813,13 +831,22 @@ def _two_origin_account():
             merchants=2,
         ),
     )
-    plan = SimpleNamespace(is_feasible=True, warnings=(), rows=rows)
+    plan = SimpleNamespace(
+        is_feasible=True,
+        over_allocated=(),
+        npc_short=(),
+        over_budget=(),
+        shortfalls=(),
+        warnings=(),
+        rows=rows,
+    )
     return SimpleNamespace(
         plan=plan,
         names={20003: "03", 20011: "11", -1: "A", -2: "B"},
         coords={20003: (0, 0), 20011: (10, 0), -1: (40, 40), -2: (50, 50)},
         warnings=[],
         dropped_allocations=[],
+        dropped_allocation_villages=frozenset(),
     )
 
 
@@ -843,7 +870,15 @@ def _four_route_two_origin_account():
             (20011, -4, 800),
         )
     )
-    plan = SimpleNamespace(is_feasible=True, warnings=(), rows=rows)
+    plan = SimpleNamespace(
+        is_feasible=True,
+        over_allocated=(),
+        npc_short=(),
+        over_budget=(),
+        shortfalls=(),
+        warnings=(),
+        rows=rows,
+    )
     return SimpleNamespace(
         plan=plan,
         names={20003: "03", 20011: "11", -1: "A", -2: "B", -3: "C", -4: "D"},
@@ -857,6 +892,7 @@ def _four_route_two_origin_account():
         },
         warnings=[],
         dropped_allocations=[],
+        dropped_allocation_villages=frozenset(),
     )
 
 
@@ -901,15 +937,32 @@ def _fanned(
                 active=active,
                 cargo=dict(cargo) if cargo else None,
                 departure_at=_EPOCH_DAY + minute * 60,
+                # The clock context a real read stamps. Stated here
+                # rather than left to be re-derived: the executor no
+                # longer assumes UTC when it is missing (#76).
+                departure_minute=minute,
             )
         )
     return rows
 
 
 def _account(rows, coords, names):
-    plan = SimpleNamespace(is_feasible=True, warnings=(), rows=tuple(rows))
+    plan = SimpleNamespace(
+        is_feasible=True,
+        over_allocated=(),
+        npc_short=(),
+        over_budget=(),
+        shortfalls=(),
+        warnings=(),
+        rows=tuple(rows),
+    )
     return SimpleNamespace(
-        plan=plan, names=names, coords=coords, warnings=[], dropped_allocations=[]
+        plan=plan,
+        names=names,
+        coords=coords,
+        warnings=[],
+        dropped_allocations=[],
+        dropped_allocation_villages=frozenset(),
     )
 
 
@@ -959,13 +1012,22 @@ def _own_village_account():
             merchants=2,
         ),
     )
-    plan = SimpleNamespace(is_feasible=True, warnings=(), rows=rows)
+    plan = SimpleNamespace(
+        is_feasible=True,
+        over_allocated=(),
+        npc_short=(),
+        over_budget=(),
+        shortfalls=(),
+        warnings=(),
+        rows=rows,
+    )
     return SimpleNamespace(
         plan=plan,
         names={20003: "03", 20011: "11"},
         coords={20003: (0, 0), 20011: (10, 0)},
         warnings=[],
         dropped_allocations=[],
+        dropped_allocation_villages=frozenset(),
     )
 
 
@@ -1691,6 +1753,10 @@ class TestTheFanOutDoesNotCauseAReRun:
                         dest_y=created.dest_y,
                         active=True,
                         departure_at=_EPOCH_DAY + minute * 60,
+                        # The clock context a real read stamps. Stated here
+                        # rather than left to be re-derived: the executor no
+                        # longer assumes UTC when it is missing (#76).
+                        departure_minute=minute,
                     )
                 )
         return rows
@@ -4428,11 +4494,20 @@ class TestTheUpdateBurstIsBounded:
             ),
         )
         return SimpleNamespace(
-            plan=SimpleNamespace(is_feasible=True, warnings=(), rows=rows),
+            plan=SimpleNamespace(
+                is_feasible=True,
+                over_allocated=(),
+                npc_short=(),
+                over_budget=(),
+                shortfalls=(),
+                warnings=(),
+                rows=rows,
+            ),
             names={20003: "03", 20011: "11", 20012: "12"},
             coords={20003: (0, 0), 20011: (10, 0), 20012: (0, 10)},
             warnings=[],
             dropped_allocations=[],
+            dropped_allocation_villages=frozenset(),
         )
 
     def test_updates_stop_at_the_cap(self):

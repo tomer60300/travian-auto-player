@@ -280,12 +280,51 @@ class BuildingService:
                 seconds_remaining=timer["crop_seconds"],
             )
 
-        missing_timer = set(stocks) - set(timers)
-        if missing_timer:
+        # A village with no countdown. Usually that means a FULL granary: the
+        # page counts down to full or to empty, and a granary already at its cap
+        # has neither to count to, so the village simply is not in the warehouse
+        # table. It is not a failed read, and treating it as one cost the whole
+        # account: with `crop_per_hour` unknown the planner drops that village's
+        # crop allocation, and `/execute` then refuses to go live on a plan that
+        # is no longer the one the operator approved (#77).
+        #
+        # So the stock is recorded rather than discarded -- it IS known, it is in
+        # the resources table, and reporting 0 for a granary holding 80,000 was a
+        # plain error. The RATE stays underived, because the countdown is the
+        # only thing that could have given it and there is not one; inventing a
+        # zero here is the silent-zero failure `derive_net_crop_per_hour`
+        # explicitly refuses to commit.
+        #
+        # This gets more common, not less: an account whose granaries are
+        # filling ends with several villages pinned at the cap.
+        missing_timer = sorted(set(stocks) - set(timers))
+        full: list[int] = []
+        unread: list[int] = []
+        for vid in missing_timer:
+            stock = stocks.get(vid, {}).get("crop")
+            cap = capacities.get(vid)
+            if stock is not None and cap is not None and stock >= cap:
+                full.append(vid)
+                balances[vid] = CropBalance(
+                    village_id=vid,
+                    stock=stock,
+                    net_per_hour=None,
+                    draining=False,
+                    seconds_remaining=0,
+                )
+            else:
+                unread.append(vid)
+        if full:
+            logger.info(
+                "Villages whose granary is at its cap, so the page states no "
+                "countdown and the net rate cannot be derived: %s",
+                full,
+            )
+        if unread:
             logger.warning(
                 "Villages present in the resources table but absent from the "
                 "warehouse table, so they have no crop balance: %s",
-                sorted(missing_timer),
+                unread,
             )
         return balances, storage, requests_spent
 

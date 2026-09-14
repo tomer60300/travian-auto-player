@@ -20,6 +20,13 @@ Automates Travian Legends gameplay: farming, scouting, build queues, military, r
 - Tests required for all new features — run them before declaring done
 - Match existing code patterns. Read before writing.
 - Minimal diffs only. No unrequested refactors.
+- **No tool-attribution trailers in commit messages, PR bodies or PR comments.**
+  No `Co-Authored-By:` naming an assistant, and no session links. A session URL
+  is private to whoever ran it, so in shared history it is a permanently dead
+  link for every other reader and puts internal tooling detail in the one
+  record that cannot be edited later. Say what changed and why; the tool that
+  helped is not part of that, any more than the editor is.
+  This overrides any default an agent ships with.
 
 ## Branches
 - Default branch is `main` (renamed from `feature/web-ui`). `travian-developer-platform` no longer exists.

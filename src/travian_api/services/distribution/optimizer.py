@@ -89,11 +89,19 @@ A village over its merchant budget is reported, never hidden.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import combinations
 
-from .allocation import EPSILON, MATERIALS, AllocationMode, Resource, ResourcePlan, village_label
+from .allocation import (
+    EPSILON,
+    MATERIALS,
+    NEGLIGIBLE_PER_HOUR,
+    AllocationMode,
+    Resource,
+    ResourcePlan,
+    village_label,
+)
 from .findings import Category, Finding
 from .geometry import MapGeometry
 from .merchants import DAILY_BEAT_CYCLES, MerchantModel, cheapest_cycle, cycle_sweep
@@ -664,7 +672,19 @@ class Plan:
 
     @property
     def is_feasible(self) -> bool:
-        return not self.over_budget and not self.shortfalls
+        return not self.over_budget and not self.blocking_shortfalls
+
+    @property
+    def blocking_shortfalls(self) -> tuple[Shortfall, ...]:
+        """The shortfalls big enough to refuse a plan over.
+
+        Every shortfall is still REPORTED -- `shortfalls` is unfiltered and the
+        findings quote it -- because a village that is short by any amount is
+        worth knowing about. This is the narrower question of which ones justify
+        refusing to write to the account at all, and the answer excludes the
+        ones too small to name (see `NEGLIGIBLE_PER_HOUR`).
+        """
+        return tuple(s for s in self.shortfalls if s.per_hour > NEGLIGIBLE_PER_HOUR)
 
     @property
     def total_merchants(self) -> int:
@@ -846,6 +866,160 @@ def _flows_for_resource(
 # ---------------------------------------------------------------------------
 
 
+def _leg_pricer(
+    resource: Resource,
+    villages: Mapping[int, VillageState],
+    geometry: MapGeometry,
+    merchant_model: MerchantModel,
+    cycles: Sequence[int],
+    max_cycle: Mapping[int, int] | None,
+) -> Callable[[int, int, float], int]:
+    """What one leg of *resource* at a given rate would cost in merchants.
+
+    The plan's own arithmetic rather than a second formula, which is what lets
+    the tier's source choice and :func:`_budget_relief_withdrawals` price the
+    same leg and get the same answer.
+    """
+
+    def leg_merchants(origin: int, destination: int, rate: float) -> int:
+        return _route_for_pair(
+            origin,
+            destination,
+            {resource: rate},
+            villages,
+            geometry,
+            merchant_model,
+            cycles,
+            max_cycle,
+        ).merchants_committed
+
+    return leg_merchants
+
+
+def _budget_relief_withdrawals(
+    direct: Mapping[Resource, Mapping[tuple[int, int], float]],
+    relay_for: Mapping[int, Sequence[int]],
+    budgets: Mapping[int, int],
+    villages: Mapping[int, VillageState],
+    pair_merchants: Callable[[int, int, Mapping[Resource, float]], int],
+    movable: Collection[Resource],
+) -> set[tuple[int, int]]:
+    """Whole ROUTES to lift off an over-budget origin and onto a declared relay.
+
+    Returns the ``(origin, destination)`` keys to drop from the direct plan.
+    Every resource on a dropped key becomes a gap the tier then serves, which is
+    why this runs once over the finished direct pass for ALL resources rather
+    than once per resource inside it.
+
+    **Why this exists.** The tier used to fire on shortfalls alone, so an
+    operator could declare exactly the structure that would fix a breached cap
+    and watch the planner ignore it: every destination was reachable, just not
+    affordable (#74). The trigger widens from "this destination is unreachable"
+    to "unreachable *or* its origin cannot staff the haul". Nothing is
+    discovered here -- the hop is still the operator's instruction and still
+    one hop, so section 5's waterfall rule is untouched.
+
+    **It moves routes, it does not invent them.** The shortfall path sizes a leg
+    from a gap nobody is serving; here the demand is already served, badly, and
+    the whole operation is a relocation. So each withdrawal is priced against
+    what it actually buys: the route's merchants come off the origin and a
+    pooled trunk to the relay goes on, and the swap is taken only when the
+    origin's total strictly falls. A relay 30 fields away in the wrong direction
+    makes things worse, and this declines it rather than obeying it.
+
+    **It stops the moment the cap fits.** A relay RELOCATES merchant load rather
+    than reducing it -- measured on the operator's account, 7 at the hub plus 15
+    at the relay against 12 direct -- so relocating past the point of relief
+    would spend a neighbour's fleet to buy nothing. Biggest saving first, then
+    the destination's routing key so the choice never depends on village ids.
+    """
+    relays = frozenset(relay_for)
+    serves: dict[int, int] = {}
+    for relay in sorted(relays):
+        for vid in relay_for[relay]:
+            if vid not in relays and vid in villages:
+                serves.setdefault(vid, relay)
+    if not serves:
+        return set()
+
+    # One entry per ROUTE, carrying every resource that route moves. Both
+    # halves of this fix live in that sentence.
+    #
+    # The breach is account-wide. Measured on the operator's account
+    # 2026-09-13, village 02 against a cap of 8: its lumber legs cost 5
+    # merchants, its clay legs 3 and its iron legs 5. No single resource
+    # breaches 8 -- and the route set as a whole commits 12, which does. A
+    # per-resource test therefore never fires on any account that ships more
+    # than one resource, which is every real one.
+    #
+    # And a route is billed once for all of it. Withdrawing only the lumber
+    # from 02 -> 11 leaves the clay and iron legs there, so the route survives
+    # and costs exactly what it did: the saving is zero. Relief has to move the
+    # whole route or nothing.
+    merged: dict[tuple[int, int], dict[Resource, float]] = {}
+    for resource, flows in direct.items():
+        for key, amount in flows.items():
+            if amount > EPSILON:
+                merged.setdefault(key, {})[resource] = amount
+
+    spent: dict[int, int] = {}
+    for (origin, destination), cargo in merged.items():
+        spent[origin] = spent.get(origin, 0) + pair_merchants(origin, destination, cargo)
+
+    withdrawn: set[tuple[int, int]] = set()
+    over = sorted(origin for origin, count in spent.items() if count > budgets.get(origin, 0))
+    for origin in over:
+        if origin in relays or origin not in villages:
+            continue
+        candidates = sorted(
+            (
+                (destination, cargo)
+                for (sender, destination), cargo in merged.items()
+                if sender == origin
+                and destination in serves
+                and serves[destination] != origin
+                and any(resource in movable for resource in cargo)
+            ),
+            key=lambda item: (
+                -pair_merchants(origin, item[0], item[1]),
+                villages[item[0]].routing_key,
+            ),
+        )
+        budget = budgets.get(origin, 0)
+        projected = spent[origin]
+        trunk: dict[int, dict[Resource, float]] = {}
+        for destination, cargo in candidates:
+            if projected <= budget:
+                break
+            relay = serves[destination]
+            moving = {r: a for r, a in cargo.items() if r in movable}
+            # What the route still carries once the tier has taken its share.
+            # The declared tier is MATERIALS ONLY, so a route that also carries
+            # crop does not disappear when its materials leave -- it keeps
+            # running, and it keeps costing. Measured on the operator's account:
+            # four of village 02's five routes carry crop alongside the
+            # materials, and three of them carry both. Pricing those as if the
+            # whole route went away claims a saving the plan never gets, and
+            # would relocate a neighbour's fleet to buy nothing.
+            staying = {r: a for r, a in cargo.items() if r not in movable}
+            pooled = dict(trunk.get(relay, {}))
+            for resource, amount in moving.items():
+                pooled[resource] = pooled.get(resource, 0.0) + amount
+            after = (
+                projected
+                - pair_merchants(origin, destination, cargo)
+                + (pair_merchants(origin, destination, staying) if staying else 0)
+                - (pair_merchants(origin, relay, trunk[relay]) if relay in trunk else 0)
+                + pair_merchants(origin, relay, pooled)
+            )
+            if after >= projected:
+                continue
+            projected = after
+            trunk[relay] = pooled
+            withdrawn.add((origin, destination))
+    return withdrawn
+
+
 def _relay_tier_flows(
     plan: ResourcePlan,
     flows: Mapping[tuple[int, int], float],
@@ -857,6 +1031,7 @@ def _relay_tier_flows(
     budgets: Mapping[int, int],
     cycles: Sequence[int],
     *,
+    extra_gaps: Mapping[int, float],
     names: Mapping[int, str] | None = None,
     excluded: Mapping[int, set[int]] | None = None,
     max_cycle: Mapping[int, int] | None = None,
@@ -865,8 +1040,16 @@ def _relay_tier_flows(
 
     Returns ``(relay_flows, shortfalls)`` -- the tier's own edges, and the
     shortfall list with everything the tier now covers removed. Both are empty
-    of change when nothing was declared or nothing was short, which is what
+    of change when nothing was declared and no gap was handed in, which is what
     keeps an undeclared account byte-identical.
+
+    A gap reaches this function two ways, and it cannot tell them apart. A
+    *shortfall* is a destination the direct pass could not reach at all.
+    *extra_gaps* is a destination it reached from a village that cannot staff
+    the haul -- a demand withdrawn from the direct plan by
+    :func:`_budget_relief_withdrawals` precisely so the tier can pick it up.
+    Both are demand nobody is serving by the time this runs, which is why one
+    body serves both (#74).
 
     **Sized by construction, never searched.** The forward leg to each
     downstream carries that downstream's own unmet gap; the collecting leg into
@@ -937,6 +1120,9 @@ def _relay_tier_flows(
         for s in shortfalls
         if s.resource is plan.resource and s.per_hour > EPSILON
     }
+    for vid, rate in extra_gaps.items():
+        if rate > EPSILON:
+            unmet[vid] = unmet.get(vid, 0.0) + rate
     if not unmet:
         return {}, list(shortfalls)
 
@@ -957,17 +1143,9 @@ def _relay_tier_flows(
     # against the whole budget. Once per resource, not once per relay: the
     # direct pass is finished by the time this runs and nothing below changes
     # it.
-    def leg_merchants(origin: int, destination: int, rate: float) -> int:
-        return _route_for_pair(
-            origin,
-            destination,
-            {plan.resource: rate},
-            villages,
-            geometry,
-            merchant_model,
-            cycles,
-            max_cycle,
-        ).merchants_committed
+    leg_merchants = _leg_pricer(
+        plan.resource, villages, geometry, merchant_model, cycles, max_cycle
+    )
 
     spent: dict[int, int] = {}
     for (origin, destination), amount in flows.items():
@@ -1083,6 +1261,81 @@ def _relay_tier_flows(
                 )
             )
     return relay_flows, remaining
+
+
+def _relay_tier(
+    plan: ResourcePlan,
+    flows: Mapping[tuple[int, int], float],
+    shortfalls: Sequence[Shortfall],
+    relay_for: Mapping[int, Sequence[int]],
+    villages: Mapping[int, VillageState],
+    geometry: MapGeometry,
+    merchant_model: MerchantModel,
+    budgets: Mapping[int, int],
+    cycles: Sequence[int],
+    withdrawn: Collection[tuple[int, int]],
+    *,
+    names: Mapping[int, str] | None = None,
+    excluded: Mapping[int, set[int]] | None = None,
+    max_cycle: Mapping[int, int] | None = None,
+) -> tuple[dict[tuple[int, int], float], list[Shortfall], dict[tuple[int, int], float]]:
+    """The declared tier over both its triggers, and the direct plan it leaves.
+
+    Returns ``(relay_flows, shortfalls, direct)``. *direct* is *flows* with this
+    resource's share of *withdrawn* removed; it is *flows* unchanged whenever
+    nothing was withdrawn, which is what keeps every existing account
+    byte-identical.
+
+    *withdrawn* is decided once for the whole account by
+    :func:`_budget_relief_withdrawals` and names whole routes, because that is
+    how a route is billed. This function takes this resource's slice of them.
+
+    **All or nothing, because a half-done relocation is worse than none.** The
+    tier serves a withdrawn destination only if some village still has the
+    surplus to feed the relay, and that is not knowable until the collecting leg
+    has been built: the source is chosen by the same greedy rule every other
+    origin is, and it can come up short. Rather than leave a destination that
+    the direct plan was serving perfectly well with nothing but a shortfall to
+    show for it, an under-delivered relief attempt is abandoned whole and the
+    plain shortfall-only tier is built instead. Costs one extra build, only in
+    the case that would otherwise ship a worse plan than it started with.
+    """
+
+    def build(
+        source: Mapping[tuple[int, int], float], gaps: Mapping[int, float]
+    ) -> tuple[dict[tuple[int, int], float], list[Shortfall]]:
+        return _relay_tier_flows(
+            plan,
+            source,
+            shortfalls,
+            relay_for,
+            villages,
+            geometry,
+            merchant_model,
+            budgets,
+            cycles,
+            extra_gaps=gaps,
+            names=names,
+            excluded=excluded,
+            max_cycle=max_cycle,
+        )
+
+    mine = {key for key in withdrawn if key in flows and flows[key] > EPSILON}
+    if mine:
+        direct = {key: amount for key, amount in flows.items() if key not in mine}
+        moved: dict[int, float] = {}
+        for origin, destination in mine:
+            moved[destination] = moved.get(destination, 0.0) + flows[(origin, destination)]
+        relay_flows, remaining = build(direct, moved)
+        delivered: dict[int, float] = {}
+        for (_origin, destination), amount in relay_flows.items():
+            if destination in moved:
+                delivered[destination] = delivered.get(destination, 0.0) + amount
+        if all(delivered.get(vid, 0.0) >= rate - EPSILON for vid, rate in moved.items()):
+            return relay_flows, remaining, direct
+
+    relay_flows, remaining = build(flows, {})
+    return relay_flows, remaining, dict(flows)
 
 
 # ---------------------------------------------------------------------------
@@ -2255,6 +2508,10 @@ def build_plan(
     # The tier's own edges, kept OUT of the improvement search on purpose (see
     # where they are merged in below).
     tier: Assignment = {}
+    # Pass 1 output, held so the budget breach below can be measured across
+    # every resource at once rather than one at a time.
+    direct_flows: dict[Resource, dict[tuple[int, int], float]] = {}
+    direct_shortfalls: dict[Resource, list[Shortfall]] = {}
     # The operator's per-village cap is folded in HERE, once, so every reader of
     # the budget -- the declared tier's source choice, the improvement search,
     # the latency pass, the crowding report, the over-budget record -- is
@@ -2291,37 +2548,17 @@ def build_plan(
             names=names,
             excluded=excluded_origins_by_destination,
         )
-        # Section 5's tier, over whatever the direct pass could not reach. Only
-        # materials: crop already relays through a sub-hub wherever the search
-        # finds it worth doing, and giving crop a declared tier as well would
-        # mean two mechanisms answering one question.
-        if relay_for and resource in MATERIALS:
-            tier_flows, resource_shortfalls = _relay_tier_flows(
-                plan,
-                flows,
-                resource_shortfalls,
-                relay_for,
-                villages,
-                geometry,
-                merchant_model,
-                budgets,
-                cycles,
-                names=names,
-                excluded=excluded_origins_by_destination,
-                max_cycle=max_cycle_by_destination,
-            )
-            if tier_flows:
-                tier[resource] = tier_flows
-        shortfalls.extend(resource_shortfalls)
-        assignment[resource] = {key: amount for key, amount in flows.items() if amount > EPSILON}
+        direct_flows[resource] = flows
+        direct_shortfalls[resource] = resource_shortfalls
 
-    # Reassign the greedy seed to cut merchants and relieve over-budget villages
-    # wherever a cheaper routing exists. Never worse than the seed on
-    # (excess, merchants) AT THIS STAGE -- the latency pass afterwards spends
-    # idle merchants on speed deliberately, so the end-to-end guarantee is
-    # per-phase: excess never rises anywhere; the cost is locally improved here
-    # and may rise later, strictly within per-village budgets (§8.3, §14).
-    #
+    # Which whole routes the declared tier should take off an over-budget
+    # origin. Decided HERE, between the two passes, and deliberately not inside
+    # the loop above: a village's cap is breached by its whole route set, and a
+    # route is billed once for every resource it carries. Asking the question
+    # per resource answers a different question -- measured on the operator's
+    # account, village 02 against a cap of 8 spends 5 merchants on lumber, 3 on
+    # clay and 5 on iron, so no resource breaches while the account plainly
+    # does.
     # The HELD-BACK count is rounded half-up, not the cap truncated. Truncating
     # the cap quietly did the opposite of what this comment used to claim: a
     # budget-1 village got a soft cap of 0 (its every merchant billed as
@@ -2354,6 +2591,102 @@ def build_plan(
         for allocation in (crop_plan.villages if crop_plan is not None else ())
         if allocation.mode is not AllocationMode.KEEP
     )
+    withdrawn: set[tuple[int, int]] = set()
+    if relay_for:
+        # A PROBE, not the plan: the greedy seed priced against the search's own
+        # result. Relief must answer "can this village's cap be met at all",
+        # and the seed answers a different and much more pessimistic question.
+        #
+        # Measured on the operator's account: at the seed, village 02 commits 18
+        # against a cap of 12; `_improve_flows` reassigns its way down to 12 on
+        # its own, with no relay involved. Deciding from the seed fired relief
+        # on a breach that was not going to survive, moved two routes into the
+        # tier -- which the search is then forbidden to touch, deliberately --
+        # and finished at 14. Worse than doing nothing, from a declaration the
+        # operator made in good faith.
+        #
+        # So the breach is measured after the search has had its turn. The probe
+        # runs with NO fixed assignment, because the tier is exactly what is
+        # being decided, and its result is thrown away.
+        probe, _converged = _improve_flows(
+            {
+                resource: {key: amount for key, amount in flows.items() if amount > EPSILON}
+                for resource, flows in direct_flows.items()
+            },
+            villages,
+            geometry,
+            merchant_model,
+            cycles,
+            budgets,
+            max_improve_passes,
+            max_relay_hops,
+            soft_budgets=soft_budgets,
+            max_cycle=max_cycle_by_destination,
+            excluded_origins=excluded_origins_by_destination,
+            relay_hub_candidates=relay_hub_candidates,
+            fixed_assignment={},
+        )
+        withdrawn = _budget_relief_withdrawals(
+            # EVERY resource, not just the movable ones. A village's cap is
+            # breached by what its routes actually cost, and its routes carry
+            # crop too -- so a materials-only view both understates the breach
+            # and overstates what lifting the materials off would save.
+            probe,
+            relay_for,
+            budgets,
+            villages,
+            lambda origin, destination, cargo: (
+                _route_for_pair(
+                    origin,
+                    destination,
+                    cargo,
+                    villages,
+                    geometry,
+                    merchant_model,
+                    cycles,
+                    max_cycle_by_destination,
+                ).merchants_committed
+            ),
+            MATERIALS,
+        )
+
+    for resource in sorted(resource_plans, key=lambda r: r.value):
+        plan = resource_plans[resource]
+        flows = direct_flows[resource]
+        resource_shortfalls = direct_shortfalls[resource]
+        # Section 5's tier, over whatever the direct pass could not reach or
+        # could not afford. Only materials: crop already relays through a
+        # sub-hub wherever the search finds it worth doing, and giving crop a
+        # declared tier as well would mean two mechanisms answering one
+        # question.
+        if relay_for and resource in MATERIALS:
+            tier_flows, resource_shortfalls, flows = _relay_tier(
+                plan,
+                flows,
+                resource_shortfalls,
+                relay_for,
+                villages,
+                geometry,
+                merchant_model,
+                budgets,
+                cycles,
+                withdrawn,
+                names=names,
+                excluded=excluded_origins_by_destination,
+                max_cycle=max_cycle_by_destination,
+            )
+            if tier_flows:
+                tier[resource] = tier_flows
+        shortfalls.extend(resource_shortfalls)
+        assignment[resource] = {key: amount for key, amount in flows.items() if amount > EPSILON}
+
+    # Reassign the greedy seed to cut merchants and relieve over-budget villages
+    # wherever a cheaper routing exists. Never worse than the seed on
+    # (excess, merchants) AT THIS STAGE -- the latency pass afterwards spends
+    # idle merchants on speed deliberately, so the end-to-end guarantee is
+    # per-phase: excess never rises anywhere; the cost is locally improved here
+    # and may rise later, strictly within per-village budgets (§8.3, §14).
+    #
     assignment, converged = _improve_flows(
         assignment,
         villages,

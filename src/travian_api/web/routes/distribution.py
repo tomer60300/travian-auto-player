@@ -99,6 +99,7 @@ from travian_api.services.distribution.planner import (
     assess,
     blockers,
     craft_plan,
+    is_feasible_for,
 )
 from travian_api.services.distribution.roles import (
     Role,
@@ -1226,6 +1227,25 @@ class PlanRequest(BaseModel):
             "that is where the hours are."
         ),
     )
+    queues_running: bool = Field(
+        default=True,
+        description=(
+            "Whether the material spend in `consumption_per_hour` (and in the "
+            "role templates) actually happens during these hours -- the building "
+            "and training queues that burn it. False stops it being netted off "
+            "production for this profile, so the stores only fill. "
+            "TRUE by default, and NOT derived from `overnight`: a queue set "
+            "before bed keeps consuming while its owner sleeps, so silence has "
+            "to mean spending. That is the opposite of `npc_attended`, where "
+            "the conversion really is a manual act nobody performs asleep. "
+            "Declare it false for a profile whose hours the operator does not "
+            "queue in: a DAY spend netted into the night books every army "
+            "village as needing that spend delivered, which is demand no hour "
+            "of that profile ever creates. The figure is still read and still "
+            "validated either way -- an unknown village is the same 422 -- "
+            "because a spend silently dropped is the defect R3-D2 filed."
+        ),
+    )
     npc_attended: bool | None = Field(
         default=None,
         description=(
@@ -2166,6 +2186,15 @@ class DaySegmentInput(BaseModel):
             "not the night)."
         ),
     )
+    queues_running: bool = Field(
+        default=True,
+        description=(
+            "Whether the declared material spend actually happens during THIS "
+            "profile's hours. See `PlanRequest.queues_running`: true by default, "
+            "and never inferred from the window or from `overnight`, because a "
+            "queue runs unattended and sleeping does not stop it."
+        ),
+    )
     npc_attended: bool | None = Field(
         default=None,
         description=(
@@ -2818,10 +2847,23 @@ async def get_snapshot(
         ) from exc
 
     if not production:
+        # Do NOT blame Travian Plus here. This warning used to ask "is Travian
+        # Plus active?", and it sent the same investigation down the wrong road
+        # twice: the real cause both times was a dead session whose login page
+        # the HTTP client handed back as if it were the statistics page, while
+        # the account's own pages stated `travianPlus.isActive: true` outright.
+        # A guess dressed as a diagnosis is worse than no diagnosis, because it
+        # is the first thing anyone checks and it is checkable -- so it burns a
+        # round trip through the operator before the real cause is considered.
+        #
+        # The client now fails closed on a re-auth that did not work, so a dead
+        # session arrives as a 502 and never reaches this branch. What is left
+        # is genuinely "the table was there and had no rows in it", which is
+        # what this says.
         warnings.append(
-            "no production rates could be read from the statistics page (is Travian "
-            "Plus active?); lumber/clay/iron default to 0/h, so a plan built from "
-            "this snapshot would move nothing"
+            "the statistics page was read but carried no production rows; "
+            "lumber/clay/iron default to 0/h, so a plan built from this snapshot "
+            "would move nothing. Check the page in a browser before trusting this"
         )
     else:
         unread = [v.id for v in session.auth_state.villages if v.id not in production]
@@ -3077,6 +3119,27 @@ def _resolve_roles(body: PlanRequest) -> _ResolvedRoles:
     )
 
 
+def _spend_during(
+    consumption: Mapping[int, Mapping[Resource, float]],
+    *,
+    queues_running: bool,
+) -> Mapping[int, Mapping[Resource, float]]:
+    """What is actually spent in one profile's hours.
+
+    ONE place for the rule, exactly as `_resolve_roles` is the one place for
+    the merge: the derivation, the plan and both replays have to read the same
+    answer, and a profile that spends in one of them and not in another is how
+    two endpoints come to describe one account differently.
+
+    Resolving it here rather than at the four call sites also keeps the
+    declaration separate from the VALIDATION of the figure it governs. Every
+    caller still resolves the full map first and still refuses a spend naming a
+    village the snapshot does not contain -- `queues_running=False` says a
+    figure does not apply tonight, never that it stopped being read (R3-D2).
+    """
+    return consumption if queues_running else {}
+
+
 def _npc_store_deltas(plan: DistributionPlan) -> dict[int, dict[Resource, float]]:
     """What section 7's conversion does to a floored village's OWN stores, per hour.
 
@@ -3211,7 +3274,10 @@ def _storage_findings(
     # from the same resolver, because a replay netting a different spend from
     # the one the plan was built with reports overflows that plan never had.
     roles = _resolve_roles(body)
-    consumption = roles.consumption
+    # Only what this profile's hours actually burn: the replay reports what the
+    # stores do, and a day spend charged to a profile that does not queue shows
+    # every army village draining through hours in which nothing spends.
+    consumption = _spend_during(roles.consumption, queues_running=body.queues_running)
     # Section 7's conversion, from the same function the trigger table reads.
     # It is not route cargo -- NPC exchanges inside one village -- so it appears
     # in neither `shipped` below nor the snapshot's own rates, and the two
@@ -3841,6 +3907,10 @@ async def post_night_profile(
                 "fresh state if the village was settled after the snapshot."
             ),
         )
+    # Validated above whatever the answer, applied only where it happens: a
+    # profile the operator does not queue in spends nothing, so a DAY figure
+    # must not be netted off the night's production. See `_spend_during`.
+    spent = _spend_during(declared_consumption, queues_running=body.queues_running)
 
     villages = [
         NightVillage(
@@ -3866,11 +3936,11 @@ async def post_night_profile(
             # subtracting one would double-count the same upkeep.
             production={
                 Resource.LUMBER: (v.lumber_per_hour or 0.0)
-                - declared_consumption.get(v.village_id, {}).get(Resource.LUMBER, 0.0),
+                - spent.get(v.village_id, {}).get(Resource.LUMBER, 0.0),
                 Resource.CLAY: (v.clay_per_hour or 0.0)
-                - declared_consumption.get(v.village_id, {}).get(Resource.CLAY, 0.0),
+                - spent.get(v.village_id, {}).get(Resource.CLAY, 0.0),
                 Resource.IRON: (v.iron_per_hour or 0.0)
-                - declared_consumption.get(v.village_id, {}).get(Resource.IRON, 0.0),
+                - spent.get(v.village_id, {}).get(Resource.IRON, 0.0),
                 Resource.CROP: v.crop_per_hour or 0.0,
             },
         )
@@ -4212,8 +4282,15 @@ async def post_day_check(
         # funded by the trading that actually happens during it. Without this
         # the night profile would be sized from the day's conversion, which is
         # the exact mis-funding `npc_attended` exists to prevent.
+        # `queues_running` travels with the hours for the same reason attendance
+        # does: the spend is a property of the profile that owns the minute, and
+        # the composite replay below gates it per segment off the same answer.
         per_profile = body.model_copy(
-            update={"allocations": segment.allocations, "npc_attended": segment.npc_attended}
+            update={
+                "allocations": segment.allocations,
+                "npc_attended": segment.npc_attended,
+                "queues_running": segment.queues_running,
+            }
         )
         # Only the night's own halves carry a completion deadline, so only they
         # are given where it falls; `build_beat` ignores it on any other
@@ -4298,6 +4375,7 @@ async def post_day_check(
                 # None only where no village declared a floor, in which case no
                 # reserve exists and this decides nothing.
                 npc_attended=bool(segment.npc_attended),
+                queues_running=segment.queues_running,
             )
         )
         # Every segment sizes the same villages' reserves from its own hours, so
@@ -4530,6 +4608,11 @@ class _PlannedAccount:
     prose -- and so both come from one evaluation."""
 
     dropped_allocations: list[str] = field(default_factory=list)
+    # Which villages those dropped allocations belonged to, so a narrowed run
+    # can tell whether any of them is somewhere it actually writes. `None` means
+    # the drop was account-wide (no rate for ANY village) and no choice of
+    # origins escapes it.
+    dropped_allocation_villages: frozenset[int] | None = frozenset()
     """Human-readable descriptions of explicit allocations that were IGNORED
     because the village's rate could not be read. A dry run or /plan shows them
     as CRITICAL findings; a live run refuses on them outright, because executing
@@ -4883,7 +4966,12 @@ async def _plan_account(
             ),
         )
     consumption: dict[Resource, dict[int, float]] = {}
-    for vid, per_resource in declared_consumption.items():
+    # Validated above whatever the answer, applied only where it happens. The
+    # allocation layer sizes every target off the net rate, so a spend charged
+    # to hours that do not queue asks the account to ship what nothing burns.
+    for vid, per_resource in _spend_during(
+        declared_consumption, queues_running=body.queues_running
+    ).items():
         for resource, amount in per_resource.items():
             # Same gate the NPC policy uses: a village whose rate for this
             # resource could not be read is dropped from the resource plan
@@ -5011,8 +5099,12 @@ async def _plan_account(
                 owed = target.crop_per_hour * (1.0 + target.safety_margin_pct / 100.0)
                 crop_allocations[target_id] = Allocation(mode=AllocationMode.ABSOLUTE, value=owed)
         dropped_allocations: list[str] = []
+        dropped_villages: frozenset[int] | None = frozenset()
         for resource in sorted(set(allocations) - set(productions), key=lambda r: r.value):
             if allocations.pop(resource):
+                # Account-wide: nothing this run could be narrowed to would make
+                # a rate readable, so it vetoes every run.
+                dropped_villages = None
                 dropped_allocations.append(
                     f"every {resource.value} allocation (no rate is known for any village)"
                 )
@@ -5036,6 +5128,8 @@ async def _plan_account(
             for vid in unreadable:
                 del per_village[vid]
             if unreadable:
+                if dropped_villages is not None:
+                    dropped_villages = dropped_villages | frozenset(unreadable)
                 labels = [village_label(vid, names) for vid in unreadable]
                 dropped_allocations.append(
                     f"the {resource.value} allocation(s) of " + ", ".join(labels)
@@ -5321,6 +5415,7 @@ async def _plan_account(
         extra_findings=extra_findings,
         role_deviations=roles.deviations,
         dropped_allocations=dropped_allocations,
+        dropped_allocation_villages=dropped_villages,
         npc_triggers=npc_triggers,
     )
 
@@ -6177,10 +6272,28 @@ def _row_minute(e: ExistingRoute) -> int:
 
     -1 can never equal a planned minute, so a row whose departure could not be
     read reconciles by recreation rather than by trust.
+
+    ``departure_minute`` is stamped by the trade-route service from the row's
+    epoch and the server's OWN stated clock at the moment it read the page.
+    That conversion is #76's answer: the page publishes UTC epochs and the
+    operator's "send at HH:MM" is an hour ahead of them, so a raw
+    ``departure_at % 86400`` names a different minute -- and, for a row near
+    midnight, a different day.
+
+    **There is deliberately no fall back to the unshifted reading.** It used to
+    fall back, on the belief that a row without clock context could only be one
+    built in a test. That was wrong: a real
+    :meth:`TradeRouteService.list_existing_routes` leaves the stamp `None`
+    whenever the page's clock assignment is missing or out of range, and the
+    fallback then answered with a UTC minute -- quietly restoring the very
+    comparison of UTC departures against game-clock schedules that #76 is about.
+    On a non-UTC account that replaces correct schedules and prunes the wrong
+    rows.
+
+    Unknown is now unknown. `_offset_is_known` refuses the run before any
+    schedule-dependent write rather than letting -1 recreate a route on a guess.
     """
-    if e.departure_at is None:
-        return -1
-    return int(e.departure_at % 86400) // 60
+    return -1 if e.departure_minute is None else e.departure_minute
 
 
 def _stable_rows(rows: Sequence[ExistingRoute]) -> Counter:
@@ -6587,6 +6700,12 @@ async def post_execute(
                     # that WRITES, so a night profile must be funded by the
                     # trading that happens overnight -- none of it.
                     "npc_attended": segment.npc_attended,
+                    # And the spend, for the same reason and from the same
+                    # declaration /day-check reads: the routes this endpoint
+                    # CREATES are sized off the net rate, so a profile planned
+                    # here against a spend its hours do not make would ship what
+                    # nothing burns.
+                    "queues_running": segment.queues_running,
                     # Latency is NOT overridden here. It used to be replaced by
                     # the segment's own window length, which /day-check does not
                     # do -- so one body was planned against a 2h target by the
@@ -6835,6 +6954,59 @@ async def post_execute(
         """
         return sum(a.live_game_rows for a in reported if a.live_game_rows is not None)
 
+    def _execution_scope(_body, _segments) -> set[int] | None:
+        """The villages a narrowed run can write to, or None for "all of them".
+
+        None means the unnarrowed gate, exactly as it behaved before this
+        existed. Narrowing is only returned when the run's whole mutation
+        footprint is KNOWABLE from the plan, which is a stricter condition than
+        "the request named some origins".
+
+        Both ends of a surviving route are in scope, not just the origin: the
+        run creates a route INTO a village as surely as out of one, so a
+        shortfall at that destination is a reason to refuse. Built from the same
+        two filters the route loop applies, so an origin whose every route was
+        filtered out by `only_destinations` contributes nothing.
+
+        **Two footprints are wider than the surviving routes, and both give up
+        the narrowing rather than guess at it.**
+
+        `disable_existing` lets the run switch off whatever it finds at those
+        origins, and what it finds is not known until the marketplace is read --
+        the rows may point anywhere, including at a village whose allocation the
+        planner had to drop. Reproduced: a plan holding only `20003 -> -1`, a
+        dropped crop allocation at `20011` and a live `20003 -> 20011` route.
+        With `only_origins=[20003]` the surviving-route scope is `{20003, -1}`,
+        the gate passes, and the run disables a route to a village the gate
+        never considered.
+
+        `reconcile_all_origins` sweeps villages with no planned rows at all, so
+        the surviving-route scope can be EMPTY while the run still disables
+        every old row it meets. Those origins are enumerable -- they are the
+        snapshot -- but a sweep is the whole account by definition, so there is
+        nothing left to narrow.
+
+        The narrowing therefore survives exactly where it is sound: a run that
+        only creates, within a named set.
+        """
+        if _body.only_origins is None and _body.only_destinations is None:
+            return None
+        if _body.disable_existing or _body.reconcile_all_origins:
+            return None
+        scope: set[int] = set()
+        for _, _acc in _segments:
+            for row in _acc.plan.rows:
+                if _body.only_origins is not None and row.origin not in _body.only_origins:
+                    continue
+                if (
+                    _body.only_destinations is not None
+                    and row.destination not in _body.only_destinations
+                ):
+                    continue
+                scope.add(row.origin)
+                scope.add(row.destination)
+        return scope
+
     def _filter_description() -> str | None:
         if body.only_origins is None and body.only_destinations is None:
             return None
@@ -6969,8 +7141,11 @@ async def post_execute(
     # still previews it, warnings and all).
     # Still gated on is_feasible itself, never on the message helper: if the two
     # ever disagree the authoritative one must be the one that refuses.
+    # The villages this run can actually write to. `None` for an unnarrowed run,
+    # which leaves the check exactly as it was.
+    _scope = _execution_scope(body, planned_segments)
     for _segment, _acc in planned_segments:
-        if not _acc.plan.is_feasible:
+        if not is_feasible_for(_acc.plan, _scope):
             # The blockers, not every warning. This used to concatenate
             # plan.warnings -- on a 25-village account that is 132 lines in a
             # 422 body, and the two that explain the refusal are
@@ -6981,7 +7156,9 @@ async def post_execute(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=(
                     f"{_who}plan is not executable; refusing to write to the account. "
-                    + " ".join(f"{reason}." for reason in blockers(_acc.plan, names))
+                    + " ".join(
+                        f"{reason}." for reason in blockers(_acc.plan, names, only_villages=_scope)
+                    )
                 ).strip(),
             )
     # An allocation the operator explicitly wrote that the planner had to IGNORE
@@ -6989,12 +7166,24 @@ async def post_execute(
     # different plan than the one they approved. A dry run previews it -- the
     # CRITICAL finding names it -- but going live on it silently would ship a
     # plan nobody wrote. Refused with the exact fix.
+    # Narrowed the same way the feasibility gate is: an allocation dropped at a
+    # village this run never writes to cannot make this run ship a plan nobody
+    # approved. On the operator's account a full granary at village 25 left its
+    # crop rate underivable (#77) and that alone refused a run confined to
+    # village 27, which is 70 fields away and shares nothing with it.
+    #
+    # An account-wide drop -- no rate known for ANY village -- carries `None`
+    # and still refuses everything, because no narrowing escapes it.
+    _dropped_global = any(_acc.dropped_allocation_villages is None for _, _acc in planned_segments)
+    _dropped_villages: set[int] = set()
+    for _, _acc in planned_segments:
+        _dropped_villages |= set(_acc.dropped_allocation_villages or ())
     _dropped = [
         d if _segment is None else f"{_segment.name}: {d}"
         for _segment, _acc in planned_segments
         for d in _acc.dropped_allocations
     ]
-    if _dropped:
+    if _dropped and (_scope is None or _dropped_global or bool(_dropped_villages & _scope)):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(

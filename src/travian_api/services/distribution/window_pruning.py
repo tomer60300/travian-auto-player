@@ -16,14 +16,21 @@ that the create payload's ``hour``/``minute`` and ``dispatch_window`` already
 use -- confirmed against the game, which returned 1410 for a route asked to leave
 at 23:30.
 
-Pure functions over rows the page already reported. No requests and no clock:
+Pure functions over what the page already reported. No requests and no clock:
 deciding to delete something is not a place for a value read from whichever
 machine this happens to run on.
+
+**Which rows to remove is decided in `web/routes/distribution.py`, not here.**
+This module once carried a `rows_outside_window` that nothing ever called: the
+executor answers a strictly harder question -- which live rows correspond to a
+planned FIRING, matching cargo and counting duplicates at the same minute -- and
+its `_planned_minutes` has already applied the window before that match runs. So
+the window rule was never a separate step, and keeping a second, simpler copy of
+it only invited the two to drift. What is left here are the two primitives that
+answer really are shared.
 """
 
 from __future__ import annotations
-
-from typing import Protocol, Sequence
 
 SECONDS_PER_DAY = 86_400
 # No MINUTES_PER_DAY here. It was declared as `1_440` beside `schedule.py`'s
@@ -32,24 +39,23 @@ SECONDS_PER_DAY = 86_400
 # owns it, and this module deliberately depends on no clock at all.
 
 
-class _Row(Protocol):
-    """The part of an ``ExistingRoute`` this decision reads."""
-
-    route_id: int
-    departure_at: int | None
-
-
-def minute_of_day(departure_at: int | None) -> int | None:
-    """Minutes past midnight for a row's departure, or None if it has none.
+def minute_of_day(departure_at: int | None, *, server_utc_offset_minutes: int = 0) -> int | None:
+    """Minutes past midnight for a row's departure, on the GAME's clock.
 
     None is a real answer and not a zero. A row whose departure the page did not
     state has an unknown position in the day, and treating unknown as midnight
     would put it inside a night window and outside a day one -- deleting or
     sparing it for a reason that was never established.
+
+    ``server_utc_offset_minutes`` is what the game server's clock reads ahead of
+    UTC. It defaults to zero, which is the reading this function had before it
+    took the argument at all, so a caller that has not been taught to pass one
+    behaves exactly as it did.
     """
     if departure_at is None:
         return None
-    return (int(departure_at) % SECONDS_PER_DAY) // 60
+    shifted = int(departure_at) + server_utc_offset_minutes * 60
+    return (shifted % SECONDS_PER_DAY) // 60
 
 
 def in_window(minute: int, window: tuple[int, int]) -> bool:
@@ -62,35 +68,3 @@ def in_window(minute: int, window: tuple[int, int]) -> bool:
     if start <= end:
         return start <= minute < end
     return minute >= start or minute < end
-
-
-def rows_outside_window(rows: Sequence[_Row], window: tuple[int, int] | None) -> list[_Row]:
-    """The rows to delete so a route only fires inside *window*.
-
-    Returns them rather than deleting them: the caller owns the write, the
-    verification and the pacing, and a pure answer can be asserted against.
-
-    A row with no stated departure is never proposed for deletion. Erring toward
-    keeping leaves a route shipping outside its hours, which the plan already
-    reports as a finding; erring the other way destroys a row on a guess.
-
-    Raises:
-        ValueError: if every row would be removed. A window that matches nothing
-            would delete the entire route the run just created, which is a bug in
-            the caller -- most likely a window and a dispatch time that disagree --
-            not an instruction to carry out.
-    """
-    if window is None:
-        return []
-    doomed = [
-        row
-        for row in rows
-        if (minute := minute_of_day(row.departure_at)) is not None and not in_window(minute, window)
-    ]
-    if rows and len(doomed) == len(rows):
-        raise ValueError(
-            f"pruning to window {window} would remove every row of this route "
-            f"({len(rows)} of {len(rows)}); refusing, because that deletes the route "
-            f"the run just created rather than confining it"
-        )
-    return doomed

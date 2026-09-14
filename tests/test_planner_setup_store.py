@@ -378,12 +378,12 @@ class TestABlankMerchantLeverMeansThePlannersOwn:
 
 class TestTheVersion:
     def test_a_newer_version_says_so(self, client, account):
-        # 13, not 12: v12 became readable when the night's two ends started
+        # 14, not 13: v13 became readable when `queues_running` started
         # travelling in the document. This case needs a version that is
         # guaranteed to be beyond this build, so it moves whenever
         # READABLE_VERSIONS grows -- and the parametrised case below is what
         # would fail if the two ever disagreed.
-        res = _put(client, account, _minimal(account, version=13))
+        res = _put(client, account, _minimal(account, version=14))
 
         assert res.status_code == 422, res.text
         assert "NEWER build" in res.text
@@ -865,9 +865,9 @@ class TestWhatThePlannerWouldRefuse:
         doc = _realistic(account)
         assert _put(client, account, doc).status_code == 200
 
-        # 13 for the same reason as TestTheVersion's: v12 is readable now, so a
+        # 14 for the same reason as TestTheVersion's: v13 is readable now, so a
         # refusal has to be asked for with a version beyond this build.
-        assert _put(client, account, _minimal(account, version=13)).status_code == 422
+        assert _put(client, account, _minimal(account, version=14)).status_code == 422
 
         assert _get(client, account).json()["setup"] == doc
 

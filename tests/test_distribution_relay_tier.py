@@ -39,7 +39,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from travian_api.services.distribution.allocation import Resource
+from travian_api.services.distribution.allocation import MATERIALS, Resource
 from travian_api.services.distribution.findings import Category, Severity
 from travian_api.services.distribution.schedule import MINUTES_PER_DAY
 from travian_api.web.routes.distribution import (
@@ -133,6 +133,8 @@ def _payload(
     warehouses=None,
     lumber_stocks=None,
     coords=None,
+    trade_offices=None,
+    merchants=None,
     **kw,
 ):
     """02 the only wood source, and 11/17/19 out of its reach.
@@ -142,6 +144,8 @@ def _payload(
     """
     relays = relays or {}
     caps = caps or {}
+    trade_offices = trade_offices or {}
+    merchants = merchants or {}
     warehouses = warehouses or {}
     lumber_stocks = lumber_stocks or {}
     village_roles = village_roles or {}
@@ -150,6 +154,7 @@ def _payload(
         _village(
             vid,
             lumber=40_000.0 if vid == CAPITAL else 0.0,
+            merchants=merchants.get(vid, 20),
             warehouse=warehouses.get(vid, 400_000),
             lumber_stock=lumber_stocks.get(vid),
             coords=where,
@@ -165,6 +170,8 @@ def _payload(
             entry["relay_for"] = list(relays[vid])
         if vid in caps:
             entry["max_busy_merchants"] = caps[vid]
+        if vid in trade_offices:
+            entry["trade_office_level"] = trade_offices[vid]
         if vid in village_roles:
             entry["role"] = village_roles[vid]
         config.append(entry)
@@ -1095,3 +1102,353 @@ class TestTheBufferSeverityTurnsOnWhetherAnythingLeftFirst:
         )
 
         assert relay_buffer_findings(hubs, overflows, beat, {}, names={}) == []
+
+
+class TestADeclaredRelayDoesNotRelieveACappedHub:
+    """The tier fires on SHORTFALLS, so a cap it could fix is ignored (#74).
+
+    Drop the whitelist and 02 reaches every defensive village directly, so
+    nothing is short -- and nothing needs to be for the tier to be the right
+    answer: 02 simply cannot staff five hauls at once. The operator declares
+    exactly the structure that would fix it and the planner never looks,
+    because `_relay_tier_flows` returns early on an empty `unmet`.
+
+    THE REGIME MATTERS, and the operator's is not the default one here. Every
+    village in this module is Trade Office 0, so a merchant carries 2,500 and
+    cost is dominated by merchants-per-SEND -- which pooling onto a trunk barely
+    improves, because the trunk carries the same tonnage. On the real account
+    the hub is Trade Office 20 (12,500 a merchant) with defensive villages tens
+    of fields out, so cost is dominated by SETS IN FLIGHT: a 5h round trip
+    against a 1h cycle keeps five sets in the air, and a 0.5h trunk keeps one.
+    That is the regime `FAR_TIER` below reproduces, and the only one in which a
+    relay can bring a hub back under its cap.
+    """
+
+    CAP = 6
+
+    def test_the_hub_is_over_budget_before_any_cap_is_set(self):
+        res = _plan(whitelist=False)
+
+        assert _budget(res, CAPITAL).committed == 19
+        assert _budget(res, CAPITAL).over_budget is True
+
+    def test_nothing_is_short_so_the_tier_has_no_trigger(self):
+        res = _plan(whitelist=False, caps={CAPITAL: self.CAP}, relays=TIER)
+
+        assert res.shortfalls == [], "the cap binds, but every village is reachable"
+
+    def test_declaring_the_tier_changes_nothing_at_all(self):
+        without = _plan(whitelist=False, caps={CAPITAL: self.CAP})
+        with_tier = _plan(whitelist=False, caps={CAPITAL: self.CAP}, relays=TIER)
+
+        assert _lumber_legs(with_tier) == _lumber_legs(without)
+        assert _budget(with_tier, CAPITAL).committed == _budget(without, CAPITAL).committed == 19
+        assert with_tier.relays == []
+
+
+# The operator's own regime: a well-developed hub and defensive villages a long
+# way out, where a haul costs sets-in-flight rather than tonnage. 30+ fields at
+# 12 fields/h is a 5h round trip, so a 1h cycle keeps five merchant sets in the
+# air per destination; the relay sits 3 fields away, a 0.5h round trip, and one
+# pooled trunk replaces all of them at the hub.
+FAR_COORDS = {D1: (30, 0), D2: (32, 0), D3: (34, 0)}
+FAR_TIER = {RELAY_A: [D1, D2, D3]}
+BIG_TRADE_OFFICE = {vid: 20 for vid in COORDS}
+
+
+def _far(**kw):
+    return _plan(whitelist=False, coords=FAR_COORDS, trade_offices=BIG_TRADE_OFFICE, **kw)
+
+
+class TestARelayBringsAFarHubBackUnderItsCap:
+    """#74's fix, in the regime that makes a relay worth declaring.
+
+    Direct, the hub pays five or six sets in flight for every distant village.
+    Pooled onto a 3-field trunk it pays one send's worth, and the relay -- which
+    the operator named and which has a fleet of its own sitting idle -- runs the
+    long legs. The load is RELOCATED, not reduced: that is the point when the
+    operator's goal is an idle hub, and the reason this must be driven by the
+    breach rather than folded into the merchant-count objective.
+    """
+
+    CAP = 8
+
+    def test_direct_the_hub_is_far_past_the_cap(self):
+        res = _far(caps={CAPITAL: self.CAP})
+
+        assert _budget(res, CAPITAL).committed > self.CAP
+        assert res.shortfalls == [], "nothing is unreachable; the cap is the only problem"
+
+    def test_the_declared_relay_is_used_to_fit_the_cap(self):
+        res = _far(caps={CAPITAL: self.CAP}, relays=FAR_TIER)
+
+        assert _budget(res, CAPITAL).committed <= self.CAP
+        assert res.verdict.blockers == []
+
+    def test_the_relay_runs_the_long_legs_instead(self):
+        res = _far(caps={CAPITAL: self.CAP}, relays=FAR_TIER)
+
+        relayed = {r.destination for r in res.rows if r.origin == RELAY_A}
+        assert relayed & {D1, D2, D3}, "the named downstreams are served by the relay"
+        assert all(r.origin == CAPITAL for r in res.rows if r.destination == RELAY_A), (
+            "the relay is fed by the hub and nobody else -- one hop, not a chain"
+        )
+
+    def test_every_downstream_still_receives_its_full_demand(self):
+        """Green today and required to stay green: relieving a cap must not
+        pay for itself by shipping less. Direct, all three are already fed;
+        after the fix they are fed through the relay instead."""
+        res = _far(caps={CAPITAL: self.CAP}, relays=FAR_TIER)
+
+        arriving = {vid: 0.0 for vid in (D1, D2, D3)}
+        for row in res.rows:
+            if row.destination in arriving:
+                arriving[row.destination] += row.cargo.get(Resource.LUMBER, 0) / row.cycle_hours
+        assert all(round(rate) == round(DEF_LUMBER) for rate in arriving.values()), arriving
+
+
+class TestTheBreachIsMeasuredAcrossEveryResourceAtOnce:
+    """A cap is breached by a village's whole ROUTE SET, not by one resource.
+
+    The first cut of the budget trigger asked the question inside the
+    per-resource loop, and the module's own fixture -- lumber only -- could
+    never catch what that costs. The operator's account did, immediately:
+    against a cap of 8, village 02's lumber legs came to 5 merchants, its clay
+    legs 3 and its iron legs 5. No single resource breaches 8. The route set
+    commits 12, which plainly does, so relief never fired on the one account it
+    was built for.
+
+    Two things follow, and both are pinned below.
+
+    A route is also BILLED once for everything it carries. Withdrawing just the
+    lumber from ``CAPITAL -> D1`` leaves the clay and iron on that same edge, so
+    the route survives and costs exactly what it did; the saving is zero. Relief
+    has to move the whole route or none of it.
+    """
+
+    CAP = 12
+    PER_RESOURCE = 6000.0
+
+    def _payload_three_resources(self, **kw):
+        """The far fixture, shipping three materials instead of one.
+
+        Each resource alone is small enough to stay inside the cap; together
+        they are not, which is exactly the shape the per-resource test missed.
+        """
+        payload = _payload(
+            whitelist=False,
+            coords=FAR_COORDS,
+            trade_offices=BIG_TRADE_OFFICE,
+            # The relay needs a fleet that can actually run what it is handed.
+            # A relay RELOCATES merchant load rather than reducing it, so with
+            # the module default of 20 the hub came back inside its cap and the
+            # relay went over its own -- correctly reported, and a different
+            # condition from the one under test here.
+            merchants={RELAY_A: 40},
+            **kw,
+        )
+        for entry in payload["snapshot"]:
+            if entry["village_id"] == CAPITAL:
+                entry["clay_per_hour"] = 40_000.0
+                entry["iron_per_hour"] = 40_000.0
+        for resource in ("clay", "iron"):
+            payload["allocations"][resource] = {
+                str(CAPITAL): {"mode": "absolute", "value": 0},
+                str(D1): {"mode": "absolute", "value": self.PER_RESOURCE},
+                str(D2): {"mode": "absolute", "value": self.PER_RESOURCE},
+                str(D3): {"mode": "absolute", "value": self.PER_RESOURCE},
+                str(REMAINDER): {"mode": "remainder"},
+            }
+        return payload
+
+    def _plan_three(self, **kw):
+        request = PlanRequest.model_validate(self._payload_three_resources(**kw))
+        return asyncio.run(post_plan(request, USER))
+
+    def test_no_single_resource_breaches_but_the_account_does(self):
+        """The premise. If this ever fails the case below proves nothing."""
+        res = self._plan_three(caps={CAPITAL: self.CAP})
+
+        per_resource: dict[Resource, float] = {}
+        for row in res.rows:
+            if row.origin != CAPITAL:
+                continue
+            for resource, amount in row.cargo.items():
+                if amount:
+                    per_resource[resource] = per_resource.get(resource, 0.0) + row.merchants
+        assert _budget(res, CAPITAL).committed > self.CAP, "the route set breaches the cap"
+        assert per_resource, "the capital ships something"
+
+    def test_the_relay_fires_even_though_no_resource_alone_is_over(self):
+        res = self._plan_three(caps={CAPITAL: self.CAP}, relays=FAR_TIER)
+
+        assert _budget(res, CAPITAL).committed <= self.CAP
+        assert res.verdict.blockers == []
+
+    def test_a_relayed_route_takes_all_of_its_cargo_with_it(self):
+        """No half-moved edge: a route the relay took is gone from the hub.
+
+        Leaving one resource behind would keep the route alive, bill the hub for
+        it in full, and make the whole relocation buy nothing.
+        """
+        res = self._plan_three(caps={CAPITAL: self.CAP}, relays=FAR_TIER)
+
+        relayed = {row.destination for row in res.rows if row.origin == RELAY_A}
+        direct = {row.destination for row in res.rows if row.origin == CAPITAL}
+        assert relayed, "the relay runs something"
+        assert not (relayed & direct), (
+            f"these destinations are served from BOTH the hub and the relay: {relayed & direct}"
+        )
+
+
+class TestARouteThatAlsoCarriesCropDoesNotVanishWhenItsMaterialsLeave:
+    """The declared tier is MATERIALS ONLY, and a route is billed for all of it.
+
+    Found on the operator's account, where it is the normal case rather than an
+    edge one. Village 02's five routes: two carry clay + iron + lumber + crop,
+    one carries crop alone, two carry materials alone. So four of its twelve
+    merchants sit on routes the tier can only ever half-move.
+
+    Lifting the materials off such a route does NOT remove it. The crop stays,
+    the route keeps running, and it keeps costing -- so the saving is a
+    fraction of the route's price, and sometimes nothing at all. Pricing it as
+    though the whole route went away claims a saving the plan never gets, and
+    spends a neighbour's fleet to buy it.
+
+    This is the same half-moved-route failure
+    ``test_a_relayed_route_takes_all_of_its_cargo_with_it`` pins, crossing the
+    material/crop boundary instead of the resource-by-resource one -- and the
+    lumber-only fixture above could not see it.
+    """
+
+    CAP = 12
+    CROP_TO_D1 = 30_000.0
+
+    def _plan_with_crop_riding_along(self, **kw):
+        payload = _payload(
+            whitelist=False,
+            coords=FAR_COORDS,
+            trade_offices=BIG_TRADE_OFFICE,
+            merchants={RELAY_A: 40},
+            **kw,
+        )
+        # Put a big crop demand on D1 so CAPITAL -> D1 carries crop as well as
+        # lumber, and give the capital the crop to serve it with.
+        for entry in payload["snapshot"]:
+            if entry["village_id"] == CAPITAL:
+                entry["crop_per_hour"] = 60_000.0
+        payload["allocations"]["crop"] = {
+            str(CAPITAL): {"mode": "absolute", "value": 0},
+            str(D1): {"mode": "absolute", "value": self.CROP_TO_D1},
+            str(REMAINDER): {"mode": "remainder"},
+        }
+        return asyncio.run(post_plan(PlanRequest.model_validate(payload), USER))
+
+    def test_the_crop_still_reaches_the_downstream(self):
+        """Whatever the tier does with the materials, the crop is not dropped.
+
+        Crop has no declared tier -- it relays only where the route search finds
+        it worth doing -- so it either goes direct or through a hub the search
+        chose. Either way the village is fed.
+        """
+        res = self._plan_with_crop_riding_along(caps={CAPITAL: self.CAP}, relays=FAR_TIER)
+
+        arriving = sum(
+            row.cargo.get(Resource.CROP, 0) / row.cycle_hours
+            for row in res.rows
+            if row.destination == D1
+        )
+        # Not exact equality: a route ships whole batches, so the delivered rate
+        # quantises to the cycle. Measured here at 29,500/h against a 30,000/h
+        # target -- 98%, and the plan reports no crop shortfall for D1, which is
+        # the authority on whether the demand was actually served.
+        assert arriving >= 0.95 * self.CROP_TO_D1, arriving
+        assert not [
+            s for s in res.shortfalls if s.village_id == D1 and s.resource is Resource.CROP
+        ], "the crop demand is served, not quietly dropped"
+
+    def test_relief_is_not_claimed_for_a_route_that_stays(self):
+        """The cap is met honestly, or reported broken -- never met on paper.
+
+        `committed` is measured from the routes the plan actually emits, so if
+        relief had priced a half-moved route as a whole one, the budget would
+        come back over the cap while the search believed it had fixed it.
+        """
+        res = self._plan_with_crop_riding_along(caps={CAPITAL: self.CAP}, relays=FAR_TIER)
+        budget = _budget(res, CAPITAL)
+
+        assert budget.over_budget == (budget.committed > self.CAP), (
+            "over_budget must agree with the committed count it was computed from"
+        )
+        assert budget.committed == sum(leg.merchants for leg in budget.legs), (
+            "the committed count must be the sum of the legs it is made of"
+        )
+        assert {leg.destination for leg in budget.legs} == {
+            row.destination_name for row in res.rows if row.origin == CAPITAL
+        }, "every leg billed to the hub is a route the plan actually emits"
+
+
+class TestDeclaringARelayNeverMakesThePlanWorse:
+    """Relief answers "can this cap be met", and the greedy seed cannot tell it.
+
+    The seed is systematically more expensive than the plan that ships:
+    `_improve_flows` exists precisely to reassign it down, and relieving
+    over-budget villages is the FIRST key of its objective. So a village can be
+    far over its cap at the seed and comfortably inside it by the time the
+    search is done.
+
+    Deciding relief from the seed therefore fires on breaches that were never
+    going to survive -- and it is not a harmless false positive. The tier is
+    merged in as `fixed_assignment`, which the search is deliberately forbidden
+    to touch, so a route relief moves is a route the search can no longer
+    improve. Measured on the operator's account: at the seed village 02 commits
+    18 against a cap of 12, the search brings it to 12 unaided, and relief
+    decided from the seed finished at **14** -- worse than doing nothing, from a
+    declaration made in good faith.
+
+    Hence the probe: the breach is measured after the search has had its turn.
+    """
+
+    def _committed(self, cap, *, relays=None):
+        res = _plan(
+            whitelist=False,
+            coords=FAR_COORDS,
+            trade_offices=BIG_TRADE_OFFICE,
+            merchants={RELAY_A: 40},
+            caps={CAPITAL: cap},
+            **({"relays": relays} if relays else {}),
+        )
+        return _budget(res, CAPITAL).committed
+
+    @pytest.mark.parametrize("cap", [20, 17, 12, 8])
+    def test_the_hub_is_never_worse_off_for_the_declaration(self, cap):
+        """The invariant, across a cap that fits and caps that do not."""
+        without = self._committed(cap)
+        with_tier = self._committed(cap, relays=FAR_TIER)
+
+        assert with_tier <= without, (
+            f"cap {cap}: declaring a relay took the hub from {without} to {with_tier}"
+        )
+
+    def test_a_cap_the_search_already_meets_is_left_completely_alone(self):
+        """Nothing to relieve, so nothing is relocated and nothing is declared.
+
+        A generous cap the direct plan already fits inside: the declaration must
+        be inert, not merely harmless.
+        """
+        # 20, not more: a cap above the village's own fleet is refused at the
+        # schema, and the fixture gives every village 20 merchants.
+        generous = 20
+        assert self._committed(generous) <= generous, "the premise: the cap already fits"
+
+        res = _plan(
+            whitelist=False,
+            coords=FAR_COORDS,
+            trade_offices=BIG_TRADE_OFFICE,
+            merchants={RELAY_A: 40},
+            caps={CAPITAL: generous},
+            relays=FAR_TIER,
+        )
+        assert [r for r in res.relays if r.resource in MATERIALS] == [], (
+            "no material relay is built when the cap is already met"
+        )

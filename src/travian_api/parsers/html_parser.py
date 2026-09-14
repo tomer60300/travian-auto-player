@@ -1143,6 +1143,52 @@ def _stats_int(text: str) -> int:
     return int(cleaned) if cleaned.lstrip("-").isdigit() else 0
 
 
+# Travian hands its own JavaScript the server clock in a plain assignment. The
+# value is the offset *to* UTC in seconds -- what you add to server time to
+# reach UTC -- so a server one hour ahead states `-3600`. Read as a number
+# rather than off the rendered `(UTC +01:00)` beside it: the string is localised
+# and the constant is not.
+_SERVER_TZ_OFFSET_RE = re.compile(
+    r"Travian\.Game\.timezoneOffsetToUTC\s*=\s*(-?\d+)",
+)
+# Earth runs UTC-12:00 to UTC+14:00. A value outside that is a match that
+# latched onto the wrong number, not a timezone, and acting on it would shift
+# every departure the planner reads.
+_MIN_TZ_OFFSET_MINUTES = -12 * 60
+_MAX_TZ_OFFSET_MINUTES = 14 * 60
+
+
+def parse_server_utc_offset_minutes(html: str) -> int | None:
+    """How many minutes the GAME server's clock runs ahead of UTC, or None.
+
+    Every minute the planner holds is in the server's clock -- the create
+    payload's ``hour``/``minute``, a profile's ``dispatch_window``, the night's
+    23:00-07:00 -- while a route row's departure arrives as a unix timestamp.
+    Turning one into the other needs this, and issue #76 is what happens without
+    it: on a UTC+01:00 server every row read an hour early, so verification
+    matched none of the rows it had just created, the trim refused rather than
+    delete all of them, and the undo disowned the route.
+
+    It must come from the GAME. The host clock is a different machine in a
+    different place -- measured, the operator's is UTC+03:00 against a UTC+01:00
+    server -- and a constant would be wrong twice a year when daylight saving
+    moves it.
+
+    None where the page does not say, and that is a real answer rather than a
+    zero: zero is the claim "this server is at UTC", which is precisely the
+    implicit guess that caused the defect. A caller that cannot read the offset
+    must decline to prune rather than prune against a guess.
+    """
+    match = _SERVER_TZ_OFFSET_RE.search(html or "")
+    if match is None:
+        return None
+    # Negated: the page states the offset TO UTC, we want the offset FROM it.
+    minutes = -int(match.group(1)) // 60
+    if not _MIN_TZ_OFFSET_MINUTES <= minutes <= _MAX_TZ_OFFSET_MINUTES:
+        return None
+    return minutes
+
+
 def _stats_village_rows(html: str, table_id: str) -> List[Any]:
     """Yield ``(village_id, data_cells)`` for each village row of a statistics table.
 
