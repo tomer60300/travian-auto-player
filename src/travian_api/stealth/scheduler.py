@@ -371,6 +371,29 @@ class ActivityScheduler:
             )
             return False
 
+        # The account's night. This is a SCHEDULE, not a quota -- the two above
+        # ask "have I worked too long", this asks "is it 4am" -- but every caller
+        # already means the same thing by False, which is "stop working now".
+        #
+        # It belongs here because here is the one place all three loops pass
+        # through. Before this, `next_break_duration` had a correct night branch
+        # that slept 6-9h, and nothing could reach it: the trigger never fired at
+        # night, so the only way into it was for the daily budget to run out
+        # during the window by coincidence. The machinery was written, tested and
+        # unreachable, and every loop ran straight through to morning.
+        #
+        # Which is the signal the rest of the stealth layer cannot cover for.
+        # Impersonated TLS, log-normal delays, a drifting session tempo and
+        # truthful Referers all describe how a single request looks; none of them
+        # says anything about an account that has never once been idle at 4am.
+        if self.is_rest_window():
+            logger.info(
+                "Night-rest window (%.1f -> %.1f): pausing until it closes",
+                self._night_start_hour,
+                self._night_end_hour,
+            )
+            return False
+
         return True
 
     def is_rest_window(self, now: datetime | None = None) -> bool:
@@ -425,17 +448,23 @@ class ActivityScheduler:
         buffer_s = random.uniform(0.0, 2700.0)  # up to 45 min so wake isn't a constant
         return remaining_h * 3600.0 + buffer_s
 
-    def next_break_duration(self) -> float:
+    def next_break_duration(self, now: datetime | None = None) -> float:
         """How long to break (in seconds).
 
-        Short break (mid-session): min_break_minutes + random jitter
+        Night break: to the end of the rest window (see seconds_until_rest_ends)
         Long break (rolling limit near): 1-3 hours
-        Night break (if past 11pm local): 6-9 hours
+        Short break (mid-session): min_break_minutes + random jitter
+
+        *now* is injectable for the same reason :meth:`is_rest_window` and
+        :meth:`seconds_until_rest_ends` take it: all three have to agree about
+        where the window is, and a method that reads the clock itself can only
+        be tested by monkeypatching time -- which is how two of them would come
+        to disagree about the edge without anything failing.
         """
         if not self.enabled:
             return 0.0
 
-        now = datetime.now()
+        now = now or datetime.now()
         rolling_hours = self._rolling_24h_seconds() / 3600.0
 
         # Triangular (not uniform) so the duration histogram tapers to zero at
@@ -448,10 +477,21 @@ class ActivityScheduler:
         # start hour of 24.0) so this duration path can never disagree with the
         # detection path about where the window is.
         if self.is_rest_window(now):
-            lo, hi, mode = self._night_break_band
-            duration_h = random.triangular(lo, hi, mode)
-            logger.info("Night break: sleeping %.1fh", duration_h)
-            return duration_h * 3600.0
+            # Delegated, not re-derived. `seconds_until_rest_ends` already sleeps
+            # to the END of the window plus a one-sided buffer, and already
+            # carries the reasoning for it: a 6-9h draw measured from wherever
+            # the loop happens to be standing could land short -- waking it back
+            # INSIDE its own night to fire a burst, which is worse than not
+            # sleeping, because now there is activity at 4am AND a gap that looks
+            # deliberate -- or land hours past morning and waste the day.
+            #
+            # This branch used to make that 6-9h draw itself. Adding a second
+            # jitter here would not have been belt and braces, it would have been
+            # two independent samples of the same decision, which is how a pause
+            # comes to disagree with the window it was computed from.
+            duration_s = self.seconds_until_rest_ends(now)
+            logger.info("Night break: sleeping %.1fh to the end of the window", duration_s / 3600.0)
+            return duration_s
 
         # Rolling limit approaching (>85% used): longer break
         if rolling_hours >= self.max_daily_hours * 0.85:
