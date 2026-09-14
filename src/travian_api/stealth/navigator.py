@@ -18,6 +18,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# ── Where the village selector goes ────────────────────────────────────
+#
+# LAST. Always last, on every URL that carries one.
+#
+# All 23 village-scoped loads in the 2026-09-15 capture agree, and they agree
+# across four different page types::
+#
+#     /karte.php?zoom=1&newdid=61837
+#     /build.php?id=30&gid=17&t=2&newdid=64215
+#     /dorf1.php?id=14&gid=1&as=ccI9Tbn0kPZtXJmk&newdid=30540
+#
+# which is what you would expect from how the game produces them: the markup
+# renders the link for the page, and the village selector appends itself to
+# whatever that link already was. Leading with `newdid` is a shape its own
+# markup cannot emit, and four call sites here and in the services were doing
+# exactly that -- `/build.php?newdid=123&id=30` -- while four others put it
+# last. The parameters are order-independent to the SERVER, so this was free to
+# get wrong and free to fix; it is not free to leave wrong, because "same
+# parameters, unusual order" is the cheapest possible clustering feature and
+# one of the few that survives every layer of timing noise beneath it.
+#
 # ── Warm-up navigation model ───────────────────────────────────────────
 #
 # The pages, their URLs and their weights all come from a recorded human
@@ -305,7 +326,7 @@ class PageNavigator:
         # Actually fetch the building page (creates realistic referer chain)
         build_url = f"/build.php?id={slot_id}"
         if village_id:
-            build_url = f"/build.php?newdid={village_id}&id={slot_id}"
+            build_url = f"/build.php?id={slot_id}&newdid={village_id}"
         await self._visit(build_url, f"opening resource field slot {slot_id}")
 
     async def navigate_to_building(self, slot_id: int, village_id: Optional[int] = None) -> None:
@@ -328,7 +349,7 @@ class PageNavigator:
         # Actually fetch the building page (creates realistic referer chain)
         build_url = f"/build.php?id={slot_id}"
         if village_id:
-            build_url = f"/build.php?newdid={village_id}&id={slot_id}"
+            build_url = f"/build.php?id={slot_id}&newdid={village_id}"
         await self._visit(build_url, f"opening building slot {slot_id}")
 
     async def navigate_to_rally_point(self, village_id: Optional[int] = None) -> None:

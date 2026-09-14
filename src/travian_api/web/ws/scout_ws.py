@@ -115,7 +115,7 @@ async def _send_scout_fast(
     scout_target_value = "1" if scout_type == "resources" else "2"
 
     if village_id:
-        rally_url = f"/build.php?newdid={village_id}&gid=16&tt=2"
+        rally_url = f"/build.php?gid=16&tt=2&newdid={village_id}"
     else:
         rally_url = "/build.php?gid=16&tt=2"
 
