@@ -74,15 +74,18 @@ def test_the_claim_still_ends_the_video():
     assert '"/api/v1/videofeature/open/' in source
 
 
-def test_the_known_divergences_are_written_down_where_the_next_reader_looks():
+def test_the_capture_is_written_down_where_the_next_reader_looks():
     """A finding nobody recorded is a finding that gets re-derived from scratch.
 
-    These two are known-wrong and knowingly unfixed, so the docstring at the
-    top of the service has to say so -- it is the first thing anyone touching
-    this flow reads.
+    When this file was written, two divergences were known-wrong and knowingly
+    unfixed, and the docstring's job was to say so. A second recorded watch --
+    bodies included -- closed both, so its job is now to carry the protocol
+    itself: the module docstring holds the capture byte for byte, and it is the
+    first thing anyone touching this flow reads.
     """
-    from travian_api.services.video_reward_service import VideoRewardService
+    from travian_api.services import video_reward_service
 
-    doc = VideoRewardService.__doc__ or ""
-    assert "GET" in doc and "ih.adscale.de" in doc
-    assert "fallback/v1" in doc
+    doc = video_reward_service.__doc__ or ""
+    assert "/fallback/v1/request-ad" in doc
+    assert "conversionId" in doc and "signature" in doc
+    assert "videofeature/start" in doc, "why the call is absent has to outlive the removal"

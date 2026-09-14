@@ -141,74 +141,61 @@ async def _none():
     return None
 
 
-class TestTheAdClientDoesNotAnnounceItself:
-    """The video-reward flow talks to Travian's ad partner on its own httpx
-    client, deliberately, so Travian's session cookies never reach that host.
-    But headers left to httpx mean ``User-Agent: python-httpx/<version>`` goes
-    out in cleartext, on a host whose response Travian's own reward endpoint
-    then validates. No amount of TLS impersonation elsewhere survives that.
+class TestTheAdClientIsGone:
+    """The video-reward flow used to open a SECOND HTTP client for the ad host.
+
+    Deliberately, so Travian's session cookies never reached that host -- and
+    the cost was a whole second identity to keep coherent with the first. This
+    class used to pin five properties of it, each one a bug that had already
+    happened: it announced ``User-Agent: python-httpx/<version>`` in cleartext;
+    it wore Chrome headers over Python TLS, the one combination HttpClient
+    refuses to run at all; it could drift to a different impersonation target
+    than the game client, which is two Chrome fingerprints from one account;
+    and it had a closer that leaked a session per claim if you called the wrong
+    one.
+
+    All five are now unreachable, because there is no second client. The ad
+    network moved onto Travian's own host (``/fallback/v1/``), recorded live
+    2026-09-15, so the claim runs on the session that was already open and
+    inherits its identity by construction rather than by copying.
+
+    The strongest form of "these headers cannot be wrong" is not a test. It is
+    having nowhere for them to be wrong.
     """
 
-    def _client(self):
-        from travian_api.clients.http_client import HttpClient
-        from travian_api.config import Settings
+    def test_there_is_no_second_client_to_get_wrong(self):
         from travian_api.services.video_reward_service import VideoRewardService
 
-        http = HttpClient(
-            Settings(
-                base_url="https://ts2.x1.europe.travian.com",
-                username="test@example.com",
-                password="test123",
-            )
-        )
-        service = VideoRewardService(http_client=http)
-        try:
-            return asyncio.run(service._get_atg_client()), http
-        finally:
-            pass
+        assert not hasattr(VideoRewardService, "_get_atg_client")
+        assert not hasattr(VideoRewardService, "_extract_atg_config")
 
-    def test_it_never_sends_a_python_user_agent(self):
-        atg, _ = self._client()
-        ua = atg.headers.get("User-Agent", "")
-        assert ua, "the ad client must state a User-Agent"
-        assert "httpx" not in ua.lower()
-        assert "python" not in ua.lower()
+    def test_closing_the_service_is_a_no_op_that_still_answers(self):
+        """Callers call it in a `finally`; it must stay callable."""
+        from travian_api.services.video_reward_service import VideoRewardService
 
-    def test_it_borrows_the_same_browser_identity_as_the_game_client(self):
-        atg, http = self._client()
-        expected = http._browser_headers.for_page_load()
-        assert atg.headers["User-Agent"] == expected["User-Agent"]
-        assert atg.headers["Accept-Language"] == expected["Accept-Language"]
+        svc = VideoRewardService(http_client=object())
+        assert asyncio.run(svc.close()) is None
 
-    def test_it_impersonates_chrome_at_the_tls_layer_too(self):
-        """Chrome headers over Python TLS is the one combination HttpClient
-        refuses to run at all -- it raises RuntimeError rather than send a Chrome
-        User-Agent behind a non-Chrome JA3, because the mismatch is a stronger
-        tell than sending no Chrome headers. This client had the full Chrome
-        persona bolted onto a bare httpx session, so the ad host saw a
-        fingerprint no browser produces, while the game path two files away
-        impersonated properly."""
-        atg, http = self._client()
+    def test_the_ad_leg_is_on_travians_own_host(self):
+        import inspect
 
-        assert type(atg).__module__.startswith("curl_cffi"), (
-            f"the ad client is {type(atg).__module__}, so its TLS does not match "
-            f"the Chrome headers it sends"
-        )
+        from travian_api.services.video_reward_service import VideoRewardService
 
-    def test_it_uses_the_same_impersonation_target_as_the_game_client(self):
-        # Two different Chrome fingerprints from one account would be its own
-        # tell, so the ad client borrows the persona rather than picking.
-        atg, http = self._client()
-        persona = http._persona
-        assert persona.impersonate, "the persona must name a target"
-        assert getattr(atg, "impersonate", None) == persona.impersonate
+        # The claim itself, not the module: the module docstring names ATG's
+        # fc.php and xs.php on purpose, recording what this used to do and why
+        # it stopped. Prose about a dead provider is the point; a call to one
+        # is the defect.
+        claim = inspect.getsource(VideoRewardService.claim_reward)
+        assert '"/fallback/v1/reward"' in claim
+        assert "request-ad?game_id=" in claim
+        assert "fc.php" not in claim
+        assert "xs.php" not in claim
 
-    def test_it_does_not_claim_travian_as_the_referer(self):
-        # A cross-origin ad host is not same-origin with the game, and saying it
-        # is would be a worse tell than saying nothing.
-        atg, _ = self._client()
-        assert "Referer" not in atg.headers
-        assert "Sec-Fetch-Site" not in atg.headers, "set per request, not per client"
+    def test_the_service_no_longer_imports_a_second_transport(self):
+        from travian_api.services import video_reward_service
+
+        assert not hasattr(video_reward_service, "httpx")
+        assert not hasattr(video_reward_service, "_CurlAsyncSession")
 
 
 class TestTheVillageCannotChangeUnderAScrapeThenAct:

@@ -1616,6 +1616,111 @@ class HttpClient:
 
     @_billed
     @_transient_retry
+    async def get_json(
+        self,
+        url: str,
+        *,
+        skip_reauth: bool = False,
+        safe_to_retry: bool = True,
+        referer: str | None = None,
+        request_type: str = "fetch",
+    ) -> Dict[str, Any]:
+        """A GET the page's own script would make, parsed as JSON.
+
+        The counterpart to :meth:`post_json`, and it exists because some of the
+        game's API is read with GET -- ``/api/v1/videofeature/open/<type>`` and
+        ``/fallback/v1/request-ad`` both are, verified against a live capture.
+        Without this the only GET available was :meth:`get_html`, which sends
+        the headers of a NAVIGATION: ``Accept: text/html…``, ``Sec-Fetch-Mode:
+        navigate``, ``Sec-Fetch-Dest: document``. A browser asking its own API
+        for JSON does not send those, and using them here would have been the
+        same class of mismatch the whole stealth layer exists to avoid -- worse,
+        it would also have moved the account-wide "last page visited" to an API
+        URL, poisoning the Referer of everything after it.
+
+        ``request_type`` picks the browser shape, defaulting to ``fetch``;
+        ``_stealth_post_request`` is told the same, so page context is left
+        alone exactly as it is for a POST.
+
+        Returns the decoded object, or ``{"response_text": ...}`` when the body
+        was not JSON -- the same shape :meth:`post_json` uses, so callers can
+        recognise an HTML soft-block or a maintenance page rather than crash on
+        it.
+        """
+        if not url.startswith("http"):
+            url = urljoin(self.base_url, url.lstrip("/"))
+
+        headers = await self._stealth_pre_request(url, request_type, referer=referer)
+
+        try:
+            logger.debug(f"GET(json) {url}")
+
+            if self._use_curl:
+                response = await self._curl_get(url, headers)
+            else:
+                response = await self.client.get(url, headers=headers, follow_redirects=True)
+
+            await self._check_suspicious_response(
+                response.text, url=url, status_code=response.status_code
+            )
+
+            resp_url = str(response.url) if hasattr(response, "url") else url
+            if "login" in resp_url.lower() or (
+                "auth" in resp_url.lower() and "code" not in resp_url
+            ):
+                # Fail closed, exactly as get_html does. An API GET answered
+                # with the login page is a dead session, and handing the caller
+                # a parse of it would report "no data" for "not logged in".
+                if skip_reauth:
+                    raise SessionExpiredError(f"Session expired (redirected to login): {resp_url}")
+                await self._handle_session_expired()
+                response = (
+                    await self._curl_get(url, headers)
+                    if self._use_curl
+                    else await self.client.get(url, headers=headers, follow_redirects=True)
+                )
+                retry_url = str(response.url) if hasattr(response, "url") else url
+                if "login" in retry_url.lower():
+                    raise SessionExpiredError(
+                        f"Session expired and re-authentication failed: {retry_url}"
+                    )
+
+            if response.status_code >= 400:
+                if response.status_code == 429:
+                    self._penalize_rate_limit()
+                self._dump_http_error(
+                    method="GET", url=url, status=response.status_code, body=response.text
+                )
+                raise NetworkError(
+                    f"HTTP {response.status_code}: {response.text}", response.status_code
+                )
+
+            self._stealth_post_request(request_type, response, fallback_url=url)
+
+            try:
+                return response.json()
+            except Exception:
+                return {"response_text": response.text}
+
+        except NetworkError:
+            raise
+        except SessionExpiredError:
+            raise
+        except httpx.RequestError as e:
+            if not safe_to_retry:
+                raise NetworkError(f"Request failed (non-retryable): {e}")
+            raise
+        except Exception as e:
+            if HAS_CURL_CFFI and isinstance(e, CurlError):
+                if not safe_to_retry:
+                    raise NetworkError(f"Request failed (curl, non-retryable): {e}")
+                raise
+            if not safe_to_retry:
+                raise NetworkError(f"Request failed (non-retryable): {e}")
+            raise
+
+    @_billed
+    @_transient_retry
     async def get_html(
         self,
         url: str,
