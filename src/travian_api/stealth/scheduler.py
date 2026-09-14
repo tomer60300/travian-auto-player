@@ -210,6 +210,33 @@ class ActivityScheduler:
             return None
         return value
 
+    @property
+    def seconds_idle(self) -> float:
+        """How long since this account last did anything.
+
+        The same quantity :meth:`_auto_reset_session_if_idle` compares against
+        ``min_break_minutes`` to decide a new logical session has begun, exposed
+        so a caller can ask the question WITHOUT the side effect of answering it
+        -- reading it must not reset the counter it is reading.
+
+        A caller that has been away this long is arriving, not continuing, and
+        should arrive the way a person does: on a landing page, not on the form
+        it came for.
+        """
+        return time.monotonic() - self._last_activity_time
+
+    @property
+    def is_new_session(self) -> bool:
+        """True when the idle gap is long enough to count as arriving afresh.
+
+        Shares `min_break_minutes` with the auto-reset above rather than picking
+        its own threshold, so "the scheduler thinks this is a new session" and
+        "the navigator thinks this is an arrival" can never disagree.
+        """
+        if not self.enabled:
+            return False
+        return self.seconds_idle >= self.min_break_minutes * 60
+
     def _auto_reset_session_if_idle(self) -> None:
         """Auto-reset session counter if enough idle time has passed."""
         idle_seconds = time.monotonic() - self._last_activity_time

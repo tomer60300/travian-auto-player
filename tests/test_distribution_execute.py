@@ -6396,3 +6396,49 @@ class TestTheAccountSleeps:
         svc.http_client.rest_pause_seconds = _boom
 
         assert _run_live(svc, _one_origin_account()).dry_run is False
+
+
+class TestAnOperatorAtTheKeyboardMayRunLate:
+    """The night guard stops a PATTERN, not an evening.
+
+    Someone who opens the game at 23:30 and sorts out their trade routes is an
+    ordinary Tuesday. What gives an account away is an unattended run at 04:00
+    every night, and the difference between the two is whether a person is
+    there -- which the server cannot see and the request can state.
+
+    Off by default, so a scheduler that never sets it can never drift into the
+    pattern; available, so the guard does not become a reason to disable the
+    guard.
+    """
+
+    def _svc(self):
+        svc = _FakeLiveSvc(existing={20011: []})
+        svc.http_client.rest_pause_seconds = lambda: 4 * 3600
+        return svc
+
+    def test_without_it_the_run_is_refused(self):
+        with pytest.raises(HTTPException) as exc:
+            _run_live(self._svc(), _one_origin_account())
+
+        assert exc.value.status_code == 409
+
+    def test_with_it_the_run_proceeds(self):
+        res = _run_live(self._svc(), _one_origin_account(), i_am_awake=True)
+
+        assert res.dry_run is False
+
+    def test_the_refusal_names_the_way_out(self):
+        """A refusal nobody can act on is an outage."""
+        with pytest.raises(HTTPException) as exc:
+            _run_live(self._svc(), _one_origin_account())
+
+        assert "i_am_awake" in exc.value.detail
+
+    def test_it_does_not_bypass_anything_else(self):
+        """It answers one question -- is a person here -- and no other. The
+        activity budget is not about presence and is unmoved by it."""
+        svc = _FakeLiveSvc(existing={20011: []}, budget_ok=False)
+        svc.http_client.rest_pause_seconds = lambda: 4 * 3600
+
+        res = _run_live(svc, _one_origin_account(), i_am_awake=True)
+        assert res.stopped_early is True

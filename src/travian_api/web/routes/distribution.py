@@ -2407,6 +2407,18 @@ class ExecuteRequest(PlanRequest):
         '`execution_mode: "live"` is a 422, and `dry_run: true` alongside '
         '`execution_mode: "live"` is a 422.',
     )
+    i_am_awake: bool = Field(
+        default=False,
+        description=(
+            "Run even though the account is inside its night-rest window. For an "
+            "operator actually at the keyboard: a person who opens the game at "
+            "23:30 and sorts out their trade routes is an ordinary evening, and "
+            "refusing that protects nothing. What the window exists to stop is an "
+            "UNATTENDED run at 04:00 every night, which is a pattern rather than "
+            "an evening -- so this defaults to off and a scheduler that never sets "
+            "it can never drift into one."
+        ),
+    )
     disable_existing: bool = Field(
         default=True,
         description="Disable a village's existing routes before creating new ones.",
@@ -7444,7 +7456,7 @@ async def post_execute(
         # take the run down with it -- the budget and captcha gates below are
         # the ones that refuse on their own failure.
         _rest_seconds = 0.0
-    if _rest_seconds > 0:
+    if _rest_seconds > 0 and not body.i_am_awake:
         _mins = int(_rest_seconds // 60)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -7452,8 +7464,9 @@ async def post_execute(
                 f"This account is in its night-rest window for another "
                 f"{_mins // 60}h{_mins % 60:02d}m. A live run now is the one pattern "
                 f"no amount of per-request pacing disguises: real players sleep. "
-                f'Re-run after it closes, or use execution_mode: "preview" to see '
-                f"what would be written."
+                f"Re-run after it closes, or send i_am_awake: true if you are at the "
+                f"keyboard right now -- an operator having a late evening is not the "
+                f"pattern this guards against."
             ),
         )
 
@@ -7519,6 +7532,43 @@ async def post_execute(
                 # was written here, but the contract is about whether the run
                 # finished its work, not about whether it managed to do damage.
                 stopped_early = True
+
+            # ── Arriving, rather than appearing ────────────────────────────
+            #
+            # A run that resumes a session hours old opens with a village view
+            # and goes straight to a marketplace. `PageNavigator.warm_up` exists
+            # to stop exactly that -- its own docstring calls the pattern
+            # "login -> immediate API blast" -- and until now only the login path
+            # called it, so a session reused later never arrived anywhere. It
+            # simply materialised at the form it came for.
+            #
+            # A person opening the game after a few hours lands on the resource
+            # overview and looks at a page or two before doing the thing they
+            # came to do. `warm_up` is that: dorf1, then a short walk over this
+            # account's own Markov chain of top-level pages, so the visited set
+            # and the transition structure are both account-specific rather than
+            # a shared signature.
+            #
+            # Gated on the SCHEDULER's idea of a new session, not a threshold of
+            # its own, so "the scheduler reset the session counter" and "the
+            # navigator thinks this is an arrival" cannot disagree. Two runs
+            # minutes apart are one visit and warm up once; a run after a long
+            # gap is a new visit and arrives again.
+            #
+            # Costs a handful of GETs on a run that is about to write to the
+            # game, which is the cheapest part of it, and nothing at all on a
+            # preview -- this is inside the live path.
+            try:
+                _sched = svc.http_client.activity_scheduler
+                _nav = svc.http_client.navigator
+                if getattr(_sched, "is_new_session", False) and getattr(_nav, "enabled", False):
+                    await _nav.warm_up()
+            except Exception as exc:
+                # Advisory, like the rest of the stealth layer at this point. A
+                # navigator that cannot walk must not stop a run the operator
+                # asked for; the budget and captcha gates are the ones that
+                # refuse on their own failure.
+                logger.debug("skipping arrival walk: %s", exc)
 
             # A full reconciliation must not be cut short by the CREATE budget:
             # the whole point is that no village is left holding a route the plan
