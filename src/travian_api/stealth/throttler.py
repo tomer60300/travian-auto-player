@@ -41,6 +41,18 @@ _CONSEQUENTIAL = frozenset({"fetch", "xhr", "json"})
 # "this loop has hung".
 _MAX_DISTRACTION_S = 600.0
 
+# Above this, a pause is reported to the operator rather than only to the debug
+# log. Chosen so ordinary pacing stays quiet -- the body of the deliberate
+# distribution is a few seconds -- while a distraction always announces itself.
+_VISIBLE_PAUSE_S = 8.0
+
+
+def _human_duration(seconds: float) -> str:
+    """ "4m12s", "45s". Written for a person reading a log line, not a chart."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    return f"{int(seconds) // 60}m{int(seconds) % 60:02d}s"
+
 
 class RequestThrottler:
     """Global rate limiter for all HTTP requests to Travian.
@@ -187,13 +199,14 @@ class RequestThrottler:
             self._cleanup_burst_window(now)
             if len(self._request_times) >= self._effective_burst_max:
                 burst_wait = self.burst_cooldown_s + random.lognormvariate(math.log(3.0), 0.6)
-                if context:
-                    logger.info(
-                        f"Burst limit reached ({len(self._request_times)} reqs in {self.burst_window_s}s). "
-                        f"Cooling down {burst_wait:.1f}s before: {context}"
-                    )
-                else:
-                    logger.info(f"Burst limit reached. Cooling down {burst_wait:.1f}s")
+                logger.info(
+                    "Slowing down for %s — %d requests in the last %.0fs is more "
+                    "than a person clicks.%s",
+                    _human_duration(burst_wait),
+                    len(self._request_times),
+                    self.burst_window_s,
+                    f" (next: {context})" if context else "",
+                )
                 await asyncio.sleep(burst_wait)
                 waited += burst_wait
                 now = time.monotonic()
@@ -208,6 +221,20 @@ class RequestThrottler:
                 target_gap = self._effective_gap(request_type)
                 if elapsed < target_gap:
                     gap_wait = target_gap - elapsed
+                    # A pause long enough for the operator to notice is a pause
+                    # the operator should be TOLD about. These reach the UI:
+                    # `LogBroadcastHandler` streams this logger to /ws/logs at
+                    # level=info, and a run that sits silent for four minutes
+                    # otherwise looks hung rather than deliberate -- which
+                    # invites exactly the response that undoes it, restarting
+                    # the run.
+                    if gap_wait >= _VISIBLE_PAUSE_S:
+                        logger.info(
+                            "Pausing %s before continuing — stepping away from the "
+                            "keyboard, as a player does. Nothing is stuck.%s",
+                            _human_duration(gap_wait),
+                            f" (next: {context})" if context else "",
+                        )
                     await asyncio.sleep(gap_wait)
                     waited += gap_wait
                     now = time.monotonic()

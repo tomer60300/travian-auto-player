@@ -7562,6 +7562,14 @@ async def post_execute(
                 _sched = svc.http_client.activity_scheduler
                 _nav = svc.http_client.navigator
                 if getattr(_sched, "is_new_session", False) and getattr(_nav, "enabled", False):
+                    # Announced, because it costs the operator a few seconds of
+                    # apparently nothing happening before the run they asked for
+                    # starts. Reaches the UI through LogBroadcastHandler.
+                    logger.info(
+                        "Opening the game first — landing on the overview and "
+                        "looking around, the way a session starts. The routes come "
+                        "after."
+                    )
                     await _nav.warm_up()
             except Exception as exc:
                 # Advisory, like the rest of the stealth layer at this point. A

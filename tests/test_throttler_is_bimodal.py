@@ -144,3 +144,73 @@ class TestTheBurstCapNoLongerFlagsAHuman:
         rolls = {t._roll_burst_threshold() for _ in range(200)}
 
         assert len(rolls) > 5, "a fixed trigger point is itself a signature"
+
+
+class TestALongPauseTellsTheOperator:
+    """A run that sits silent for four minutes looks hung, not deliberate.
+
+    Which matters more than it sounds: an operator who thinks a run has hung
+    restarts it, and a restart is the one response that undoes the pause. The
+    pause has to announce itself, and at a level that reaches the screen --
+    `LogBroadcastHandler` streams this logger to /ws/logs at level=info, so
+    INFO is the difference between visible and not.
+    """
+
+    def test_a_distraction_is_reported_at_info(self, caplog):
+        import asyncio
+        import logging
+        import time
+
+        t = _throttler(min_gap_s=0.0, max_gap_s=0.01, distraction_chance=1.0)
+        # Must be NOW, not 1.0: elapsed is measured against time.monotonic(), so
+        # an ancient timestamp means the gap has already passed and nothing waits.
+        t._last_request_time = time.monotonic()
+
+        async def _instant(_s):
+            return None
+
+        with caplog.at_level(logging.INFO, logger="travian_api.stealth.throttler"):
+            import travian_api.stealth.throttler as mod
+
+            real_sleep = mod.asyncio.sleep
+            mod.asyncio.sleep = _instant
+            try:
+                asyncio.run(t.wait(context="creating trade route"))
+            finally:
+                mod.asyncio.sleep = real_sleep
+
+        said = " ".join(r.getMessage() for r in caplog.records)
+        assert "Pausing" in said
+        assert "Nothing is stuck" in said, "the operator must be told it is not hung"
+        assert "creating trade route" in said, "and what it is pausing before"
+
+    def test_ordinary_pacing_stays_quiet(self, caplog):
+        """Announcing every 2s gap would bury the one that matters."""
+        import asyncio
+        import logging
+        import time
+
+        t = _throttler(min_gap_s=0.0, max_gap_s=0.01, distraction_chance=0.0)
+        t._last_request_time = time.monotonic()
+
+        with caplog.at_level(logging.INFO, logger="travian_api.stealth.throttler"):
+            asyncio.run(t.wait(context="a short one"))
+
+        assert not [r for r in caplog.records if "Pausing" in r.getMessage()]
+
+
+class TestTheDurationReadsLikeAPerson:
+    def test_seconds_under_a_minute(self):
+        from travian_api.stealth.throttler import _human_duration
+
+        assert _human_duration(45.4) == "45s"
+
+    def test_minutes_and_seconds_above_it(self):
+        from travian_api.stealth.throttler import _human_duration
+
+        assert _human_duration(252.0) == "4m12s"
+
+    def test_a_round_minute_keeps_its_seconds(self):
+        from travian_api.stealth.throttler import _human_duration
+
+        assert _human_duration(120.0) == "2m00s"
