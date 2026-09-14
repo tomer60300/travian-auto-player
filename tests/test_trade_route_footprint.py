@@ -58,8 +58,35 @@ def empty_marketplace(village: int) -> str:
 
 EMPTY_MARKETPLACE = empty_marketplace(20003)
 
+# The slot this fixture's village keeps its marketplace on. Arbitrary, and
+# deliberately not 17: the slot is a per-village fact with no relationship to
+# the building's gid, and a fixture where the two coincide would let a bug that
+# confuses them pass.
+MARKETPLACE_SLOT = 30
+
+
+def village_view(slot: int = MARKETPLACE_SLOT) -> str:
+    """A dorf2 page in the markup ``parse_dorf2`` reads, with a marketplace.
+
+    This used to be another copy of the marketplace page, which parsed to no
+    buildings at all -- so every URL pinned below was the one we emit when the
+    village view is UNREADABLE, not the one a live run emits. The file's whole
+    claim is "this is exactly what goes on the wire", so the village view has to
+    be a village view.
+    """
+    return (
+        "<html><body><div id='village_map'>"
+        f"<a href='/build.php?id={slot}' class='level colorLayer gid17' "
+        "data-gid='17' title='Marketplace Level 5'></a>"
+        "<a href='/build.php?id=19' class='emptyBuildingSlot'></a>"
+        "</div></body></html>"
+    )
+
+
+VILLAGE_VIEW = village_view()
 
 GRAPHQL = "/api/v1/graphql"
+MARKETPLACE_URL = f"/build.php?id={MARKETPLACE_SLOT}&gid=17&t=3&newdid=20003"
 
 
 def _readback(village: int, *routes: dict) -> dict:
@@ -215,12 +242,12 @@ class TestTheCanaryRunCostsSixRequests:
     """
 
     def test_a_read_is_two_gets_in_the_human_order(self):
-        service, client = _service([EMPTY_MARKETPLACE, EMPTY_MARKETPLACE])
+        service, client = _service([VILLAGE_VIEW, EMPTY_MARKETPLACE])
         asyncio.run(service.list_existing_routes(20003))
 
         assert client.calls == [
             ("GET", "/dorf2.php?newdid=20003"),
-            ("GET", "/build.php?gid=17&t=3&newdid=20003"),
+            ("GET", MARKETPLACE_URL),
         ], "the village view must come first, or the marketplace Referer is a lie"
 
     def test_a_create_is_one_post_and_it_waits_first(self):
@@ -246,7 +273,7 @@ class TestTheCanaryRunCostsSixRequests:
 
     def test_the_whole_canary_is_six_requests_in_this_exact_order(self):
         service, client = _service(
-            [EMPTY_MARKETPLACE, EMPTY_MARKETPLACE],
+            [VILLAGE_VIEW, EMPTY_MARKETPLACE],
             [_readback(20003, _route_row(1, 700))],
         )
         asyncio.run(service.list_existing_routes(20003))
@@ -255,7 +282,7 @@ class TestTheCanaryRunCostsSixRequests:
 
         assert client.calls == [
             ("GET", "/dorf2.php?newdid=20003"),
-            ("GET", "/build.php?gid=17&t=3&newdid=20003"),
+            ("GET", MARKETPLACE_URL),
             ("POST", "/api/v1/trade-routes"),
             ("POST", GRAPHQL),
             ("POST", GRAPHQL),
@@ -268,7 +295,7 @@ class TestTheCanaryRunCostsSixRequests:
         # The price of not guessing, and of looking like the page while doing
         # it. One of the three is the verification; the other two are what the
         # client does afterwards whether anyone is checking or not.
-        service, client = _service([EMPTY_MARKETPLACE, EMPTY_MARKETPLACE], [_readback(20003)])
+        service, client = _service([VILLAGE_VIEW, EMPTY_MARKETPLACE], [_readback(20003)])
         asyncio.run(service.list_existing_routes(20003))
         asyncio.run(service.create_route(_route()))
         before = len(client.calls)
@@ -335,19 +362,19 @@ class TestEveryMarketplaceRequestStatesItsOwnReferer:
     farm loop or queue poll landing in the window takes the Referer with it.
     """
 
-    MARKETPLACE = "https://example.invalid/build.php?gid=17&t=3&newdid=20003"
+    MARKETPLACE = f"https://example.invalid{MARKETPLACE_URL}"
 
     def test_the_marketplace_get_is_referred_from_the_village_view(self):
         # The navigation stays a page load precisely so this Referer is truthful:
         # dorf2 is the page a human clicks the marketplace from. Pinning it is
         # what makes the claim survive a concurrent GET.
-        service, client = _service([EMPTY_MARKETPLACE, EMPTY_MARKETPLACE])
+        service, client = _service([VILLAGE_VIEW, EMPTY_MARKETPLACE])
         asyncio.run(service.list_existing_routes(20003))
 
         assert client.referers == [
             ("/dorf2.php?newdid=20003", None),
             (
-                "/build.php?gid=17&t=3&newdid=20003",
+                MARKETPLACE_URL,
                 "https://example.invalid/dorf2.php?newdid=20003",
             ),
         ]
@@ -355,7 +382,7 @@ class TestEveryMarketplaceRequestStatesItsOwnReferer:
     def test_a_create_is_referred_from_the_page_that_has_the_form(self):
         # A POST to the trade-route endpoint referred from anywhere else is a
         # desync no browser produces: the form only exists on that tab.
-        service, client = _service([EMPTY_MARKETPLACE, EMPTY_MARKETPLACE])
+        service, client = _service([VILLAGE_VIEW, EMPTY_MARKETPLACE])
         asyncio.run(service.list_existing_routes(20003))
         asyncio.run(service.create_route(_route()))
 
@@ -365,14 +392,14 @@ class TestEveryMarketplaceRequestStatesItsOwnReferer:
         # An API request never advances page context, so the GraphQL read-back
         # cannot inherit a truthful Referer -- it has to be given one, and the
         # only page whose script fires this query is the trade-route tab.
-        service, client = _service([EMPTY_MARKETPLACE, EMPTY_MARKETPLACE], [_readback(20003)])
+        service, client = _service([VILLAGE_VIEW, EMPTY_MARKETPLACE], [_readback(20003)])
         asyncio.run(service.list_existing_routes(20003))
         asyncio.run(service.confirm_routes(20003))
 
         assert dict(client.referers)[GRAPHQL] == self.MARKETPLACE
 
     def test_the_navigation_still_establishes_the_pin_for_later_writes(self):
-        service, _ = _service([EMPTY_MARKETPLACE, EMPTY_MARKETPLACE])
+        service, _ = _service([VILLAGE_VIEW, EMPTY_MARKETPLACE])
         asyncio.run(service.list_existing_routes(20003))
 
         assert service._marketplace_referer[20003] == self.MARKETPLACE
@@ -434,7 +461,7 @@ class TestAFailedReadIsBilledToo:
     def test_a_marketplace_get_that_fails_after_the_village_view_bills_both(self):
         # Two requests went out, so two bills -- the one that answered and the
         # one that did not. Both spent a throttler gap.
-        service, client = _service([EMPTY_MARKETPLACE, NetworkError("HTTP 500: the game said no")])
+        service, client = _service([VILLAGE_VIEW, NetworkError("HTTP 500: the game said no")])
 
         with pytest.raises(NetworkError):
             asyncio.run(service.open_marketplace(20003))
@@ -466,7 +493,7 @@ class TestAFailedReadIsBilledToo:
     def test_a_read_that_answers_is_billed_once_per_request(self):
         # The regression anchor: open_marketplace is two GETs and two billings,
         # refresh_marketplace is one POST and one more.
-        service, client = _service([EMPTY_MARKETPLACE, EMPTY_MARKETPLACE], [_readback(20003)])
+        service, client = _service([VILLAGE_VIEW, EMPTY_MARKETPLACE], [_readback(20003)])
         asyncio.run(service.list_existing_routes(20003))
         assert len(client.logged_activity) == 2
 

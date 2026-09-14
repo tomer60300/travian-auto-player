@@ -41,6 +41,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
+import re
 import time
 import weakref
 from collections.abc import Callable
@@ -51,7 +53,7 @@ from typing import Any
 from ..clients.http_client import HttpClient
 from ..concurrency import KeyedLock
 from ..exceptions import NetworkError, TravianError
-from ..parsers.html_parser import DEFAULT_MAP_SPAN
+from ..parsers.html_parser import DEFAULT_MAP_SPAN, parse_dorf2
 from ..services.distribution.allocation import Resource
 from ..stealth.human_delay import ActionType
 from .distribution.execution_trace import ExecutionTrace
@@ -61,6 +63,32 @@ logger = logging.getLogger(__name__)
 
 # Marketplace building id (gid=17); its page lists a village's trade routes.
 MARKETPLACE_GID = 17
+
+# How often a direct village switch re-plays the client's own stale-slot load.
+#
+# The real client ALWAYS does it (4 of 4 switches in the 2026-09-15 capture
+# where the two villages keep their marketplace on different slots; the fifth
+# switch was slot-to-same-slot and emitted nothing extra). We deliberately do
+# not always, and the reason is worth stating because "be faithful" argues the
+# other way.
+#
+# Reproducing a deterministic quirk deterministically trades one invariant for
+# another. An account whose marketplace slots are fixed would then emit exactly
+# two document loads on exactly the same village pairs, every run, forever --
+# a pattern with less entropy than the one it replaces. Sometimes gives the
+# switch two shapes instead of one, and both are shapes the client produces.
+_STALE_SLOT_CHANCE = 0.35
+
+# Anchored on a query-parameter boundary so lookalikes (`targetMapId=`, `aid=`)
+# cannot match -- the same care `_STATS_NEWDID_RE` takes in the HTML parser.
+_SLOT_RE = re.compile(r"[?&]id=(\d+)")
+
+
+def _slot_in(path: str) -> int | None:
+    """The building slot a build.php URL addresses, or None if it names none."""
+    match = _SLOT_RE.search(path)
+    return int(match.group(1)) if match else None
+
 
 # ── The read-back query, taken from the game's own bundle ──────────────────
 #
@@ -394,6 +422,16 @@ class TradeRouteService:
         # doing a single GET during a write's 3-20s pacing delay would otherwise
         # leave the write referred from a page that has no trade-route form.
         self._marketplace_referer: dict[int, str] = {}
+        # Which slot each village keeps its marketplace on, read off the village
+        # view we already load. A building's slot is a per-village fact -- the
+        # same account has its marketplace on 30, 21 and 31 across five villages
+        # in the 2026-09-15 capture -- so there is no constant to hardcode and
+        # nothing here is specific to any one account's layout.
+        self._marketplace_slot: dict[int, int] = {}
+        # The marketplace tab URL this service loaded last, for ANY village.
+        # Compared against the session's real last page before we claim to be
+        # switching villages from one marketplace to another.
+        self._last_marketplace_path: str | None = None
         self._origin_lock = KeyedLock()
         # Serializes whole execute runs for this ACCOUNT -- see `execute_lock`
         # below and `_EXECUTE_LOCKS`. Held here only as the key; the lock itself
@@ -424,44 +462,148 @@ class TradeRouteService:
             return None
         return minute_of_day(departure_at, server_utc_offset_minutes=self.server_utc_offset_minutes)
 
+    def _marketplace_path(self, village_id: int) -> str:
+        """The trade-route tab's URL, in the game's own parameter order.
+
+        ``/build.php?id=<slot>&gid=17&t=3&newdid=<village>``. Three parts, and
+        each earns its place:
+
+        * ``id`` is the building's SLOT, and the real client never omits it --
+          every marketplace load in the 2026-09-15 capture carries one. We
+          omitted it entirely, which made our URL one no in-game link produces:
+          the game's markup builds these hrefs from the slot, and ``gid`` alone
+          is the shape a script writes when it knows the building type but has
+          never looked at the village. It is dropped only while the slot is
+          genuinely unknown -- see :meth:`_learn_marketplace_slot`.
+        * ``t=3`` is the trade-route tab. Without it we never load the tab the
+          routes live on -- so the reconciler read a page that cannot contain
+          them, and a server-side "did this session render the trade-route tab
+          before POSTing to it?" check would fail outright.
+        * ``newdid`` pins the village, so a concurrent same-session request
+          switching the active village cannot make us read -- and disable --
+          another village's routes.
+        """
+        slot = self._marketplace_slot.get(village_id)
+        slot_q = f"id={slot}&" if slot is not None else ""
+        newdid_amp = f"&newdid={village_id}" if village_id else ""
+        return f"/build.php?{slot_q}gid={MARKETPLACE_GID}&t=3{newdid_amp}"
+
+    def _learn_marketplace_slot(self, village_id: int, village_view_html: str) -> None:
+        """Read this village's marketplace slot off the village view.
+
+        Free: :meth:`open_marketplace` loads that page anyway and, until now,
+        threw the HTML away. So the slot costs no request, and nothing about it
+        is hardcoded -- a village with its marketplace somewhere unusual is read
+        as correctly as a village with it where the tutorial puts it.
+
+        Silent when the page carries no marketplace. That is not a swallowed
+        error: a village without one has no slot to know, and the URL simply
+        goes out the way it went out before this existed. Whether such a village
+        can have trade routes at all is the caller's question, and it asks it
+        against the route list rather than against a parse.
+        """
+        for building in parse_dorf2(village_view_html):
+            if building.get("gid") == MARKETPLACE_GID:
+                self._marketplace_slot[village_id] = int(building["slot_id"])
+                return
+
+    async def _stale_slot_load(self, village_id: int, from_path: str, referer: str) -> None:
+        """Re-play the misaddressed load a real browser emits on a village switch.
+
+        Switching villages from an open marketplace, the client reuses the URL
+        it is ON and swaps only ``newdid`` -- which carries the PREVIOUS
+        village's slot. The new village keeps its marketplace somewhere else, so
+        the game corrects the address a tenth of a second later::
+
+            +4.4s  GET /build.php?id=30&gid=17&t=2&newdid=64215   <- previous village's slot
+            +0.1s  GET /build.php?id=21&gid=17&t=2&newdid=64215   <- corrected
+
+        Both refer from the page the player was on, not from each other.
+
+        This is the one change in this file that makes us deliberately messier.
+        A browser addresses the wrong building and then fixes it; we addressed
+        the right one, once, every time. Being tidier than the client is a
+        difference, and differences are what a classifier eats.
+
+        Best-effort, and it must stay that way: the response is discarded
+        unread, so a failure here costs nothing, while letting it propagate
+        would fail a marketplace read over a request whose entire purpose is to
+        be thrown away.
+        """
+        stale_slot = _slot_in(from_path)
+        if stale_slot is None or stale_slot == self._marketplace_slot.get(village_id):
+            return  # same slot in both villages: the real client emits nothing extra
+        if random.random() >= _STALE_SLOT_CHANCE:
+            return
+        newdid_amp = f"&newdid={village_id}" if village_id else ""
+        stale = f"/build.php?id={stale_slot}&gid={MARKETPLACE_GID}&t=3{newdid_amp}"
+        try:
+            await self.http_client.get_html(stale, referer=referer, skip_reauth=True)
+        except Exception as exc:
+            logger.debug("stale-slot load skipped for village %s: %s", village_id, exc)
+
+    async def _walk_to_marketplace(self, village_id: int) -> str:
+        """Get the session to where the marketplace GET can honestly come from.
+
+        Returns the Referer that GET should carry. It is PINNED rather than
+        left to the stealth layer's account-wide "last page visited": the
+        marketplace GET waits out a throttler gap BEFORE its headers are built,
+        and that field is shared with every concurrent operation, so a farm loop
+        or queue poll landing in the window would send our navigation out
+        referred from /dorf1.php. The same hazard ``_marketplace_referer``
+        closes on the writes, closed on the read that establishes them.
+
+        A player has two ways in and so do we.
+
+        **Already on a marketplace, switching villages.** No village view. The
+        capture is unambiguous -- four switches, and not one passes through
+        dorf2; the player stays on the tab and the village selector reloads it
+        under a new ``newdid``. Our unconditional dorf2 hop meant every extra
+        origin in a run cost a page load no player makes, and worse, announced
+        the switch as "went to the village overview, went to the marketplace" on
+        a session that was already looking at the marketplace.
+
+        **Anything else.** The village view first, exactly as before -- which is
+        also the capture's own answer for a player arriving from elsewhere
+        (``/dorf2.php`` -> ``/build.php?id=30&gid=17``, twice). It doubles as
+        where the slot is learned.
+
+        The "already there" test is against the session's REAL last page, not
+        our own note of it, so a farm loop that navigated away during our
+        pacing delay puts us back on the village-view path instead of claiming
+        a Referer the wire will not support.
+        """
+        base = self.http_client.settings.base_url.rstrip("/")
+        from_path = self._last_marketplace_path
+        if (
+            from_path is not None
+            and self.http_client.browser_headers.last_page_path == from_path
+            and village_id in self._marketplace_slot
+        ):
+            referer = f"{base}{from_path}"
+            await self._stale_slot_load(village_id, from_path, referer)
+            return referer
+
+        newdid_q = f"?newdid={village_id}" if village_id else ""
+        village_view = f"/dorf2.php{newdid_q}"
+        self._learn_marketplace_slot(village_id, await self.http_client.get_html(village_view))
+        return f"{base}{village_view}"
+
     async def open_marketplace(self, village_id: int) -> str:
         """Open the marketplace (gid=17) for a village and return its HTML.
 
-        Two GETs, matching how a human reaches the marketplace: the village
-        view (dorf2) first, then the marketplace — so the marketplace request
-        carries a truthful Referer (the village page), not whatever page the
-        loop last touched (a bare gid=17 with a stale Referer is a tell). That
-        Referer is PINNED rather than left to the stealth layer's account-wide
-        "last page visited", which any concurrent request can move -- see the
-        second GET below. The marketplace GET doubles as the read of existing
-        routes, so "disable old routes if needed" needs no further request.
-
-        ``newdid`` rides on BOTH GETs, matching the codebase convention
-        (building_service, oasis_raider): keeping it on the data request pins the
-        village context, so a concurrent same-session request switching the
-        active village between the two GETs cannot make us read — and disable —
-        the wrong village's routes.
+        Walks there the way a player would -- see :meth:`_walk_to_marketplace`
+        for which of the two ways applies and why -- then loads the trade-route
+        tab, whose URL :meth:`_marketplace_path` builds. The marketplace GET
+        doubles as the read of existing routes, so "disable old routes if
+        needed" needs no further request.
         """
-        newdid_q = f"?newdid={village_id}" if village_id else ""
-        newdid_amp = f"&newdid={village_id}" if village_id else ""
         base = self.http_client.settings.base_url.rstrip("/")
-        village_view = f"/dorf2.php{newdid_q}"
-        await self.http_client.get_html(village_view)
-        # `t=3` is the trade-route tab. Without it we never load the tab the
-        # routes live on -- so the reconciler read a page that cannot contain
-        # them, and a server-side "did this session render the trade-route tab
-        # before POSTing to it?" check would fail outright.
-        path = f"/build.php?gid={MARKETPLACE_GID}&t=3{newdid_amp}"
-        # Pin the second GET to the village view we just loaded, rather than
-        # letting BrowserHeaders supply it. The two are the same value only in a
-        # quiet session: this GET waits out a throttler gap BEFORE its headers
-        # are built, and the account-wide "last page" is one field shared with
-        # every concurrent operation -- so a farm loop or queue poll landing in
-        # that window sends this navigation out referred from /dorf1.php. The
-        # same hazard `_marketplace_referer` closes on the writes, closed on the
-        # read that establishes them.
-        html = await self.http_client.get_html(path, referer=f"{base}{village_view}")
+        referer = await self._walk_to_marketplace(village_id)
+        path = self._marketplace_path(village_id)
+        html = await self.http_client.get_html(path, referer=referer)
         self._marketplace_referer[village_id] = f"{base}{path}"
+        self._last_marketplace_path = path
         return html
 
     async def settle_after_write(self, village_id: int) -> None:
