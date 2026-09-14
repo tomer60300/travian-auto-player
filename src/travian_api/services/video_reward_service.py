@@ -203,8 +203,13 @@ class VideoRewardService:
             if village:
                 path = f"{path}&newdid={village}"
             if navigator is not None and navigator.enabled:
-                await navigator.navigate_to_building(int(slot), village)
-            await self.http_client.get_html(path, skip_reauth=True)
+                # The gid goes in, so the navigator lands on this exact URL and
+                # there is nothing left to load afterwards. Passing it also
+                # spares the village-view parse: we were handed the building's
+                # type by the caller.
+                await navigator.navigate_to_building(int(slot), village, gid=int(gid))
+            else:
+                await self.http_client.get_html(path, skip_reauth=True)
             return f"{origin}{path}"
 
         known = _OFFER_PAGE.get(reward_type)

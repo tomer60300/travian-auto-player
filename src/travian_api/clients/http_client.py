@@ -1660,10 +1660,11 @@ class HttpClient:
             else:
                 response = await self.client.get(url, headers=headers, follow_redirects=True)
 
-            await self._check_suspicious_response(
-                response.text, url=url, status_code=response.status_code
-            )
-
+            # Session check BEFORE the suspicious-response scan, matching the
+            # order get_html uses. A login page is HTML full of form markup, and
+            # running the captcha/soft-block heuristics over it first can class
+            # an expired session as a block -- which is the wrong recovery
+            # (a block waits; an expired session re-authenticates).
             resp_url = str(response.url) if hasattr(response, "url") else url
             if "login" in resp_url.lower() or (
                 "auth" in resp_url.lower() and "code" not in resp_url
@@ -1684,6 +1685,10 @@ class HttpClient:
                     raise SessionExpiredError(
                         f"Session expired and re-authentication failed: {retry_url}"
                     )
+
+            await self._check_suspicious_response(
+                response.text, url=url, status_code=response.status_code
+            )
 
             if response.status_code >= 400:
                 if response.status_code == 429:

@@ -179,6 +179,9 @@ class PageNavigator:
         # map request every account ever makes; this at least splits it in two,
         # stably per persona.
         self._map_referer_zoomed = random.random() < 0.5
+        # (village_id, slot) -> gid, read off village views we load anyway so a
+        # building can be addressed the way its own link addresses it.
+        self._slot_gid: dict[tuple[Optional[int], int], int] = {}
 
     def map_viewport_referer(self, x: int, y: int) -> str:
         """The Referer for a map XHR about ``(x, y)``, then move the map there.
@@ -407,10 +410,34 @@ class PageNavigator:
             build_url = f"/build.php?id={slot_id}&newdid={village_id}"
         await self._visit(build_url, f"opening resource field slot {slot_id}")
 
-    async def navigate_to_building(self, slot_id: int, village_id: Optional[int] = None) -> None:
+    async def navigate_to_building(
+        self, slot_id: int, village_id: Optional[int] = None, gid: Optional[int] = None
+    ) -> None:
         """Navigate to a village building (slot 19-40) as a human would.
 
-        Chain: dorf2.php → build.php?id=X
+        Chain: dorf2.php -> build.php?id=<slot>&gid=<type>
+
+        **The gid is not optional in the markup.** Read off a live account
+        2026-09-15, the village view links its buildings as
+        ``/build.php?id=22&gid=24``, ``/build.php?id=36&gid=20``,
+        ``/build.php?id=39&gid=16`` -- every one of them -- while the RESOURCE
+        fields on dorf1 are linked bare: ``/build.php?id=1`` through
+        ``/build.php?id=18``. Two different shapes for two different things.
+
+        We sent the bare form for both, so every building we opened was
+        addressed the way the game addresses a wheat field. It answers, which is
+        why this survived: the server does not need the gid, the markup simply
+        always has it.
+
+        The gid costs no request to find. The village view we just loaded lists
+        every slot with its type, and :meth:`_visit` was already returning that
+        HTML and dropping it. A caller that knows the gid can pass it and skip
+        even the parse; the video-reward flow does, because it was handed one.
+
+        Falls back to the bare form when the slot's type is genuinely unknown --
+        an empty slot, or an "already on dorf2" path with nothing cached. Same
+        rule as everywhere else here: address it the way we can prove the game
+        does, or decline to invent the rest.
         """
         if not self.enabled:
             return
@@ -419,16 +446,40 @@ class PageNavigator:
 
         # Visit dorf2 first (building overview)
         if self._current_page != f"/dorf2.php{newdid}":
-            await self._visit(f"/dorf2.php{newdid}", "viewing village buildings")
+            html = await self._visit(f"/dorf2.php{newdid}", "viewing village buildings")
+            self._learn_slot_types(village_id, html)
+
+        if gid is None:
+            gid = self._slot_gid.get((village_id, slot_id))
 
         # Small click delay
         await self._delay.wait(ActionType.CLICK, f"clicking building slot {slot_id}")
 
-        # Actually fetch the building page (creates realistic referer chain)
+        # Actually fetch the building page (creates realistic referer chain).
+        # id, then gid, then newdid -- the order the markup uses.
         build_url = f"/build.php?id={slot_id}"
+        if gid:
+            build_url = f"{build_url}&gid={gid}"
         if village_id:
-            build_url = f"/build.php?id={slot_id}&newdid={village_id}"
+            build_url = f"{build_url}&newdid={village_id}"
         await self._visit(build_url, f"opening building slot {slot_id}")
+
+    def _learn_slot_types(self, village_id: Optional[int], village_view_html: str) -> None:
+        """Cache slot -> gid from a village view we already loaded.
+
+        Free, and silent when the page does not parse: an unreadable village
+        view is a problem for whoever needs the buildings, not for a navigation
+        that has a correct-if-plainer URL to fall back to.
+        """
+        try:
+            from ..parsers.html_parser import parse_dorf2
+
+            for building in parse_dorf2(village_view_html):
+                gid = building.get("gid")
+                if gid:
+                    self._slot_gid[(village_id, int(building["slot_id"]))] = int(gid)
+        except Exception as exc:  # pragma: no cover - parser robustness
+            logger.debug("Could not read slot types from the village view: %s", exc)
 
     async def navigate_to_rally_point(self, village_id: Optional[int] = None) -> None:
         """Navigate to rally point as a human would.

@@ -279,11 +279,33 @@ class TestTheRequestComesFromThePageThatOffersIt:
     def test_a_building_claim_stands_on_that_buildings_page(self):
         """`/build.php?id=22&gid=22` in the capture. A claim made from the wrong
         page is not a failed claim -- it is a claim against whatever the session
-        was last looking at, and the daily video is spent either way."""
+        was last looking at, and the daily video is spent either way.
+
+        With the navigator off (this fake's default) the page is loaded
+        directly; with it on, the navigator walks dorf2 -> the same URL, and the
+        gid is handed to it so there is no second load afterwards.
+        """
         svc, http = _service(_happy())
         asyncio.run(svc.claim_reward("buildingUpgrade", villageId=7, slotId=22, buildingId=22))
 
         assert _paths(http)[0] == "/build.php?id=22&gid=22&newdid=7"
+
+    def test_the_navigator_is_given_the_gid_so_it_lands_in_one_hop(self):
+        seen = {}
+
+        async def _nav(slot, village=None, gid=None):
+            seen.update(slot=slot, village=village, gid=gid)
+
+        svc, http = _service(_happy())
+        http.navigator = SimpleNamespace(enabled=True, navigate_to_building=_nav)
+
+        asyncio.run(svc.claim_reward("buildingUpgrade", villageId=7, slotId=22, buildingId=22))
+
+        assert seen == {"slot": 22, "village": 7, "gid": 22}
+        assert not any(p.startswith("/build.php") for p in _paths(http)), (
+            "the navigator landed on the page; loading it again would be a hop "
+            "the capture does not contain"
+        )
 
     def test_the_village_selector_is_still_last(self):
         svc, http = _service(_happy())
