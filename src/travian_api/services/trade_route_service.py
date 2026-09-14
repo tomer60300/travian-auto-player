@@ -1191,14 +1191,33 @@ class TradeRouteService:
         One request for all of them, matching the UI: it deletes the whole
         selection at once.
 
-        RESPONSE SHAPE, UNVERIFIED. `_rejected_routes` reads
-        ``{"routes": [{"id": .., "error": ..}]}``, which is the shape the game's
-        own bulk-TOGGLE handler uses in `main.js` (`docs/15`). Nobody has
-        observed a DELETE reply on this account at all, so applying that shape
-        here is an assumption, not a reading. It is a safe one -- anything this
-        parser cannot read becomes `unverified` and is settled by re-reading the
-        marketplace -- but it is an assumption, and the first live prune settles
-        it: check the `window_pruned` trace event's `status`.
+        RESPONSE SHAPE: MEASURED, AND THE ASSUMPTION WAS WRONG. `_rejected_routes`
+        reads ``{"routes": [{"id": .., "error": ..}]}``, the shape the game's own
+        bulk-TOGGLE handler uses in `main.js` (`docs/15`). That was applied here
+        as a guess, with a note to check the first live prune.
+
+        The first live prune ran 2026-09-14 (run `b92b3ecbb27f`, eight rows off
+        village 27) and two reverts deleted twelve and four more. Every one
+        traced:
+
+            "status": "unreadable"
+            "the bulk toggle's answer carried no 'routes' array, so which routes
+             the game accepted cannot be read"
+
+        So a DELETE reply on this server does NOT carry the toggle's array. The
+        rows went -- confirmed against the raw marketplace page, which showed
+        them gone -- but not one delete could say so from its own answer.
+
+        Which means the SAFETY here is entirely the fallback, not the parse:
+        anything this parser cannot read becomes `unverified`, and both callers
+        settle it by re-reading the marketplace. That fallback is the only reason
+        the prune and the revert are trustworthy, and it must not be optimised
+        away on the theory that a 2xx means the rows are gone.
+
+        The parse is kept rather than deleted: it costs nothing, it is the right
+        reading if the game ever does answer that way, and removing it would
+        leave a bare 2xx looking authoritative. What is no longer true is the
+        note that called this unverified.
         """
         if not routes:
             return None
