@@ -612,60 +612,42 @@ class TradeRouteService:
         return html
 
     async def settle_after_write(self, village_id: int) -> None:
-        """The two requests a real client fires after a marketplace write.
+        """Deliberately does nothing, and the reason is worth keeping.
 
-        Captured from a live session 2026-09-15, and the shape is the same after
-        every write the marketplace makes -- a route created, a route updated, a
-        route deleted, an offer accepted::
+        The capture shows the page firing two more requests after a marketplace
+        write::
 
             POST /api/v1/trade-routes
-              +0.1s  POST /api/v1/graphql      <- the read-back we already do
+              +0.1s  POST /api/v1/graphql      <- the read-back we do
               +0.0s  POST /api/v1/graphql      <- a SECOND one
-            ...and after an offer accept:
               +0.0s  POST /api/v1/village/resources
 
-        Two things this closes.
+        This method used to send both. It should not have, because we do not
+        know what either one SAYS.
 
-        The read-back is fired TWICE by the page, not once. One is the route
-        list; the other reloads the surrounding view the same handler owns.
-        Doing one where the client does two is a per-write count that never
-        varies, which is exactly the kind of invariant that separates a client
-        from a page.
+        The second GraphQL call is a different query -- the capture's own note
+        is that it "reloads the surrounding view", which the route-list query is
+        not. We re-sent the route-list query byte for byte, so every write
+        produced two identical GraphQL bodies zero milliseconds apart. No client
+        does that. It is not a missing request, it is a present and distinctive
+        one, and distinctive is the expensive kind.
 
-        And `POST /api/v1/village/resources` refreshes the resource bar. A
-        marketplace write moves resources, so the bar at the top of every page
-        must be re-read -- the human sees the numbers change. We never asked for
-        it once, on any write, ever: our resource figures came from the plan's
-        own model, so the page state we present to the server is of an account
-        whose stock apparently never moves when it ships.
+        The resource refresh had the same problem one level down: the recorder
+        captured the request but not its body, and we sent ``{}`` on a guess.
 
-        Best-effort throughout. This is mimicry, not the operation: a failure
-        here must not fail a write that already landed, and the caller's own
-        verification is what establishes what happened.
+        So the choice was between emitting three requests of which two are
+        invented, and emitting one that is verbatim. An invented request is a
+        POSITIVE anomaly -- something on the wire that should not be there, and
+        the cheapest possible thing to alert on. A missing one is an absence,
+        which is weaker evidence and consistent with a dozen innocent causes.
+        Fewer beats distinctive.
+
+        Restoring this needs one thing: a capture of a marketplace write with
+        GraphQL bodies recorded, which is the same recorder that settled the
+        video flow, pointed at a route create. Until then the honest footprint
+        is the one we can quote.
         """
-        # `Exception`, deliberately, and this is the one place in this module
-        # where that is the narrow choice rather than the lazy one. Nothing here
-        # is load-bearing: the write has already landed and the caller's own
-        # verification has already run. A mimicry request that took down a
-        # confirmed write would be strictly worse than the pattern it exists to
-        # hide, so the contract is "never raise" and the except has to mean it.
-        for path, body, what in (
-            ("/api/v1/graphql", {"query": MARKETPLACE_READBACK_QUERY}, "second read-back"),
-            ("/api/v1/village/resources", {}, "resource-bar refresh"),
-        ):
-            try:
-                await self.http_client.post_json(
-                    path,
-                    body,
-                    referer=self._marketplace_referer.get(village_id),
-                    # Genuinely the page's own chatter: in the capture these land
-                    # 0.0-0.1s after the write that caused them, because no human
-                    # decided on them. This is one of the few places where that
-                    # is true -- see the note above `_effective_gap`.
-                    consequential=True,
-                )
-            except Exception as exc:
-                logger.debug("%s skipped for village %s: %s", what, village_id, exc)
+        return
 
     async def refresh_marketplace(
         self, village_id: int, *, consequential: bool = False
@@ -834,6 +816,15 @@ class TradeRouteService:
         stated = parse_server_utc_offset_minutes(html)
         if stated is not None:
             self.server_utc_offset_minutes = stated
+            # The activity scheduler decides when this account sleeps, and it
+            # was deciding on HOST-local time. This read is the only place in
+            # the app that learns what time it is where the game is, so it hands
+            # it over. Best-effort: a scheduler that is absent or does not take
+            # it leaves the night window exactly where it was.
+            scheduler = getattr(self.http_client, "activity_scheduler", None)
+            setter = getattr(scheduler, "set_server_utc_offset_minutes", None)
+            if setter is not None:
+                setter(stated)
 
         try:
             got = read_marketplace(html, map_span)

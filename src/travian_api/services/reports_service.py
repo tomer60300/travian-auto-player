@@ -396,6 +396,13 @@ class ReportsService:
             resp = await self.client.post_json(
                 "/api/v1/map/tile-details",
                 {"x": x, "y": y},
+                # `xhr`, matching auto_scout and the oasis sweep. This call site
+                # was the only one sending the default `json` shape, so the same
+                # endpoint went out from this account with two different
+                # X-Requested-With / Sec-Fetch-Mode combinations depending on
+                # which feature asked -- a difference no browser produces, since
+                # the page's own code fires this one way.
+                request_type="xhr",
                 referer=map_viewport_referer(self.client, x, y),
             )
             html = resp.get("html", "")

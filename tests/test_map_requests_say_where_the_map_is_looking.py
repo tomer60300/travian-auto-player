@@ -102,22 +102,29 @@ class TestTheRefererFollowsTheViewport:
         assert nav.map_viewport_referer(12, 83) == f"{BASE}/karte.php"
 
 
-class TestTheFormIsPerAccountNotPerFleet:
-    """Both viewport URL forms are in the capture; picking one for everyone
-    would put an identical string on every map request every account makes."""
+class TestTheFormMakesNoClaimAboutZoom:
+    """The viewport URL used to be drawn per account, half the fleet emitting
+    `?zoom=1&x=..&y=..`.
 
-    def _form(self, identity: str) -> str:
-        nav = _navigator(identity)
-        nav.map_viewport_referer(1, 1)
-        return nav.map_viewport_referer(2, 2)
+    Removed. Our map reads send `zoomLevel: 3` in their bodies, and nothing
+    establishes that the address bar's `zoom` and the API's `zoomLevel` are the
+    same scale -- so half our accounts were stating a zoom level they were not
+    using. A fleet-uniform string that is TRUE beats a per-account one that may
+    not be, and the Referer still varies by coordinate, so it is nowhere near a
+    constant.
+    """
 
-    def test_it_is_stable_across_restarts(self):
-        assert self._form("acct-a") == self._form("acct-a")
+    def test_no_account_claims_a_zoom_level(self):
+        for identity in (f"acct-{i}" for i in range(20)):
+            nav = _navigator(identity)
+            nav.map_viewport_referer(1, 1)
+            assert "zoom" not in nav.map_viewport_referer(2, 2)
 
-    def test_the_population_writes_both_forms(self):
-        forms = {"zoom=1" in self._form(f"acct-{i}") for i in range(20)}
+    def test_the_referer_still_moves_with_the_sweep(self):
+        nav = _navigator()
+        walk = [nav.map_viewport_referer(x, 88) for x in range(20, 30)]
 
-        assert forms == {True, False}
+        assert len(set(walk)) == len(walk)
 
 
 class TestTheHelperAsksTheClientThatWillSend:

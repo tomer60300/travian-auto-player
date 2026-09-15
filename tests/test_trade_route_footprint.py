@@ -220,7 +220,7 @@ def _route(dest: int = 700) -> PlannedRoute:
     )
 
 
-class TestTheCanaryRunCostsSixRequests:
+class TestTheCanaryRunCostsFourRequests:
     """Read the village, create one route, then settle the way the page does.
 
     It was four until 2026-09-15, when a live session was recorded and the
@@ -257,18 +257,24 @@ class TestTheCanaryRunCostsSixRequests:
         assert client.calls == [("POST", "/api/v1/trade-routes")]
         assert client.waits, "a write with no pacing delay is a burst of one"
 
-    def test_a_confirmation_after_a_write_is_the_pages_whole_footprint(self):
-        # Refetching the model the open page runs on is not a navigation at all,
-        # so it must not walk to the page OR reload it. What changed is how many
-        # API calls the page makes once it is there.
+    def test_a_confirmation_is_one_graphql_call_and_no_page_load(self):
+        """Refetching the model the open page runs on is not a navigation, so it
+        must not walk to the page or reload it.
+
+        One call, not three. The page fires two more behind a write -- a second
+        GraphQL query and a resource-bar refresh -- and we sent both for a while.
+        We should not have: the second query is a DIFFERENT query whose text was
+        never recorded, so we re-sent the route-list one byte for byte and
+        produced two identical GraphQL bodies zero milliseconds apart, which no
+        client does; and the resource refresh went out with a `{}` body that was
+        a guess. An invented request is a positive anomaly and the cheapest
+        thing to alert on; a missing one is an absence. See
+        `settle_after_write`.
+        """
         service, client = _service([], [_readback(20003, _route_row(1, 700))])
         asyncio.run(service.confirm_routes(20003, after_write=True))
 
-        assert client.calls == [
-            ("POST", GRAPHQL),
-            ("POST", GRAPHQL),
-            ("POST", "/api/v1/village/resources"),
-        ]
+        assert client.calls == [("POST", GRAPHQL)]
         assert not any(m == "GET" for m, _ in client.calls), "no navigation"
 
     def test_a_confirmation_with_no_write_behind_it_is_one_request(self):
@@ -300,13 +306,11 @@ class TestTheCanaryRunCostsSixRequests:
             ("GET", MARKETPLACE_URL),
             ("POST", "/api/v1/trade-routes"),
             ("POST", GRAPHQL),
-            ("POST", GRAPHQL),
-            ("POST", "/api/v1/village/resources"),
         ]
-        assert len(client.calls) == 6
+        assert len(client.calls) == 4
         assert [r.route_id for r in confirmed] == [1]
 
-    def test_verifying_costs_exactly_three_requests_more_than_not_verifying(self):
+    def test_verifying_costs_exactly_one_request_more_than_not_verifying(self):
         # The price of not guessing, and of looking like the page while doing
         # it. One of the three is the verification; the other two are what the
         # client does afterwards whether anyone is checking or not.
@@ -317,7 +321,7 @@ class TestTheCanaryRunCostsSixRequests:
 
         asyncio.run(service.confirm_routes(20003, after_write=True))
 
-        assert len(client.calls) - before == 3
+        assert len(client.calls) - before == 1
 
 
 class TestTheReadBackIsTheQueryTheGameFires:

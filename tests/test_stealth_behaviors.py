@@ -831,13 +831,19 @@ def test_scheduler_circadian_is_persona_seeded_and_distinct():
     an identical wake-duration CDF — a cross-account clustering tell. seed_circadian
     binds them to the persona: stable per account, distinct across accounts,
     within sane bounds. Unseeded defaults preserve the legacy 23:00-06:00 window.
+
+    `_night_break_band` used to be asserted here too. It was written and never
+    read -- `next_break_duration` has delegated to `seconds_until_rest_ends`
+    since before this test was written -- so the assertions pinned a value that
+    could not affect anything. Dead state with a test on it is worse than dead
+    state: it reads as covered.
     """
     from travian_api.stealth.scheduler import ActivityScheduler
 
     def circadian(identity: str) -> tuple:
         s = ActivityScheduler(max_continuous_hours=6.0, max_daily_hours=16.0)
         s.seed_circadian(identity)
-        return (s._night_start_hour, s._night_end_hour, s._night_break_band)
+        return (s._night_start_hour, s._night_end_hour)
 
     a = "Chrome/133|en-US|https://ts2.x1.europe.travian.com|saltAAAA"
     b = "Chrome/131|de-DE|https://ts1.x1.travian.de|saltBBBB"
@@ -845,18 +851,14 @@ def test_scheduler_circadian_is_persona_seeded_and_distinct():
     assert circadian(a) == circadian(a)  # stable per account
     assert circadian(a) != circadian(b)  # distinct across accounts
 
-    start, end, (lo, hi, mode) = circadian(a)
+    start, end = circadian(a)
     assert 22.0 <= start < 24.0
     assert 5.0 <= end < 8.0
-    assert 5.5 <= lo <= 6.5
-    assert 8.5 <= hi <= 9.5
-    assert lo < mode < hi
 
-    # Unseeded default preserves legacy behavior (23:00-06:00, (6,9,7) band).
+    # Unseeded default preserves legacy behavior (23:00-06:00).
     fresh = ActivityScheduler(max_continuous_hours=6.0, max_daily_hours=16.0)
     assert fresh._night_start_hour == 23.0
     assert fresh._night_end_hour == 6.0
-    assert fresh._night_break_band == (6.0, 9.0, 7.0)
 
 
 def test_http_client_penalty_jitter_band():
@@ -878,3 +880,41 @@ def test_http_client_penalty_jitter_band():
         assert abs(sum(samples) / len(samples) - base) < base * 0.02
         # Actually varies (not a point mass).
         assert len(set(samples)) > 100
+
+
+def test_the_night_window_runs_on_the_games_clock_when_it_is_known():
+    """Sleeping is the one behaviour meant to be indistinguishable from a
+    person's, and it was running on the HOST's clock.
+
+    The host need not share a timezone with the server — this codebase's own #76
+    work established Europe 2 runs UTC+1 while stamping page epochs in UTC. A
+    host three hours out puts the account's night three hours out: quiet while
+    the server's day is busiest, working through the hours its neighbours sleep.
+    That is worse than having no night window at all, because an account awake
+    at 04:00 server time every single night is a pattern rather than an absence
+    of one.
+    """
+    from datetime import datetime
+
+    from travian_api.stealth.scheduler import ActivityScheduler
+
+    s = ActivityScheduler(max_continuous_hours=6.0, max_daily_hours=16.0)
+
+    # Default: host-local, which is the only honest answer before any page has
+    # stated the offset.
+    assert s._server_utc_offset_minutes is None
+    assert s._server_now().tzinfo is None
+
+    # A stated offset moves the clock the window is evaluated against.
+    s.set_server_utc_offset_minutes(60)
+    on_game_clock = s._server_now()
+    s.set_server_utc_offset_minutes(60 + 180)
+    three_hours_east = s._server_now()
+
+    assert 2.9 < (three_hours_east - on_game_clock).total_seconds() / 3600.0 < 3.1
+
+    # And the window follows it rather than the machine.
+    s.set_server_utc_offset_minutes(None)
+    midnight = datetime(2026, 9, 15, 23, 30)
+    assert s.is_rest_window(midnight) is True
+    assert s.is_rest_window(datetime(2026, 9, 15, 14, 0)) is False

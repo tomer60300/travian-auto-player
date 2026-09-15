@@ -505,21 +505,22 @@ def test_a_failed_availability_read_reports_nothing_available_not_unlimited():
     assert asyncio.run(svc.get_available_rewards()) == {}
 
 
-def test_the_production_boost_resource_parameter_is_the_unverified_piece():
-    """Marked rather than invented.
+def test_a_production_boost_is_refused_rather_than_guessed_at():
+    """Four of the nine reward types used to append `?resource=<name>`.
 
-    Both recorded opens were `buildingUpgrade` and `adventureDuration`, neither
-    of which names a resource. How a production boost says which resource it
-    wants has not been observed, so the query-string form carried over from the
-    previous implementation is a guess -- the only one left in this flow, and
-    labelled as one in the service.
+    Both recorded opens -- `buildingUpgrade` and `adventureDuration` -- carry no
+    body and no query at all, so that parameter is a shape nothing has been
+    observed producing. Sending it puts an invented query string on a real
+    endpoint, which is precisely what this service was rewritten to stop doing.
+
+    An unavailable feature costs a free bonus. An invented request costs the
+    account, and is the cheapest kind of anomaly to alert on. One captured
+    production-boost watch turns it back on.
     """
     svc, http = _service(_happy())
 
-    asyncio.run(svc.claim_reward("ironProductionBonus"))
+    result = asyncio.run(svc.claim_reward("ironProductionBonus"))
 
-    # Positionally first, not second: a production boost has no known offer
-    # page, so nothing is loaded before the open -- which is the other half of
-    # what is unverified here. Where a player clicks this from was not captured
-    # either, so the flow declines to invent a page rather than guess one.
-    assert _paths(http)[0] == "/api/v1/videofeature/open/productionBoost?resource=iron"
+    assert result.success is False
+    assert "never been observed" in result.message
+    assert http.calls == [], "nothing goes out on a shape we cannot quote"

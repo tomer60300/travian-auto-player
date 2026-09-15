@@ -6312,8 +6312,20 @@ def _row_minute(e: ExistingRoute) -> int:
     On a non-UTC account that replaces correct schedules and prunes the wrong
     rows.
 
-    Unknown is now unknown. `_offset_is_known` refuses the run before any
-    schedule-dependent write rather than letting -1 recreate a route on a guess.
+    Unknown is now unknown, and the guard that makes it so is a raise, not a
+    helper: `list_existing_routes` (trade_route_service) raises
+    `MarketplaceUnreadable` when a page states no clock while its rows state
+    departures, which stops the run before any schedule-dependent write. There
+    is no `_offset_is_known` function and there never was -- this docstring
+    named one for three weeks, which is worse than saying nothing, because a
+    reader who goes looking concludes the guard was deleted.
+
+    The asymmetry that remains is real and worth knowing: that raise lives on
+    the HTML read only. `confirm_routes` stamps `departure_minute` from the same
+    offset and neither learns it nor requires it, so a service instance whose
+    first read is a post-write confirmation yields None for every row and every
+    row then reconciles by recreation. The executor always reads the page first,
+    which is why this has never fired; nothing enforces that it must.
     """
     return -1 if e.departure_minute is None else e.departure_minute
 

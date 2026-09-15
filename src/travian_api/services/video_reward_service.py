@@ -1,4 +1,17 @@
-"""Video reward service — watches an ad the way the game's client watches one.
+"""Video reward service — the game's own ad-reward protocol, minus the video.
+
+**What this does not do**, said first because the first line used to claim
+otherwise: it never fetches the video. The ad response carries a
+``video_src_url`` and a ``tracking_url`` and neither is requested -- the flow
+asks for an ad, waits, and claims. Whether that is checkable server-side is
+unknown; that it differs from a browser is not.
+
+It stays that way for now because the recorder that captured everything else
+here filtered to documents and XHR/fetch, and a ``<video>`` element is neither.
+So there is no observation of how the real client requests those bytes -- how
+many range requests, what headers, whether the tracking URL is pinged -- and
+inventing that shape is the mistake this file was rewritten to stop making.
+Re-running the capture with media included would settle it.
 
 The whole flow, recorded live on 2026-09-15 with the operator watching two ads
 end to end (a building speed-up and a hero adventure), request and response
@@ -240,14 +253,29 @@ class VideoRewardService:
         try:
             referer = await self._stand_where_the_offer_is(reward_type, extra_params)
 
-            open_path = f"/api/v1/videofeature/open/{endpoint}"
             if resource:
-                # Carried over from the previous implementation and flagged as
-                # the one unverified piece of this flow: the two recorded opens
-                # were `buildingUpgrade` and `adventureDuration`, neither of
-                # which names a resource, so how a production boost says which
-                # resource it wants has not been observed.
-                open_path = f"{open_path}?resource={resource}"
+                # Refused rather than guessed. The previous implementation
+                # appended `?resource=<name>`, and the two recorded opens --
+                # `buildingUpgrade` and `adventureDuration` -- carry no body and
+                # no query at all, so that parameter is a shape nothing has been
+                # observed producing.
+                #
+                # Emitting it would put an invented query string on a real
+                # endpoint, which is the precise thing this service was rewritten
+                # to stop doing; four of the nine reward types routed through it.
+                # An unavailable feature costs a free bonus. An invented request
+                # costs the account, and it is the cheapest kind of anomaly to
+                # alert on.
+                #
+                # One captured production-boost watch turns this back on.
+                return VideoRewardResult(
+                    False,
+                    reward_type,
+                    "A production boost needs a parameter this client has never been "
+                    "observed sending. Refusing to invent it: record one production-boost "
+                    "ad watch and the real shape can be used instead.",
+                )
+            open_path = f"/api/v1/videofeature/open/{endpoint}"
             logger.info("Opening a video session for %s", reward_type)
             opened = await self.http_client.get_json(
                 open_path, referer=referer, skip_reauth=True, safe_to_retry=False

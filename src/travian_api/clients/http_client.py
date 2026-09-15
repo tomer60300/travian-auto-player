@@ -1702,7 +1702,15 @@ class HttpClient:
                     else await self.client.get(url, headers=headers, follow_redirects=True)
                 )
                 retry_url = str(response.url) if hasattr(response, "url") else url
-                if "login" in retry_url.lower():
+                # The SAME test the landing check uses, not a narrower one. A
+                # re-auth that lands on an `/auth`-shaped page would otherwise
+                # come back as a successful parse of the login HTML --
+                # `{"response_text": "<html>…"}` -- and the caller would report
+                # "the endpoint gave us nothing" for "the session is dead". That
+                # is the exact confusion the landing check exists to prevent.
+                if "login" in retry_url.lower() or (
+                    "auth" in retry_url.lower() and "code" not in retry_url
+                ):
                     raise SessionExpiredError(
                         f"Session expired and re-authentication failed: {retry_url}"
                     )

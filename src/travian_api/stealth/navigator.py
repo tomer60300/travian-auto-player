@@ -189,14 +189,13 @@ class PageNavigator:
         # opened and the address bar still says a bare /karte.php, which is
         # what the capture's first map XHR is referred from.
         self._map_viewport: Optional[tuple[int, int]] = None
-        # Which of the two observed viewport URL forms this account writes.
-        # Both appear in the capture -- `?x=19&y=88` and `?zoom=1&x=15&y=90` --
-        # because the browser rebuilds the address from the map's state, and
-        # whether a zoom level is in that state depends on what the player did.
-        # Picking one for the whole fleet would put an identical string on every
-        # map request every account ever makes; this at least splits it in two,
-        # stably per persona.
-        self._map_referer_zoomed = random.random() < 0.5
+        # The viewport form was drawn per account, half the fleet emitting
+        # `?zoom=1&x=..&y=..`. Removed: our map reads send `zoomLevel: 3` in
+        # their bodies, and nothing establishes that the address bar's `zoom=1`
+        # and the API's `zoomLevel` are the same scale -- so half our accounts
+        # were stating a zoom level they were not using. A fleet-uniform string
+        # that is TRUE beats a per-account one that may not be, and the Referer
+        # still varies by coordinate, so it is nowhere near constant.
         # (village_id, slot) -> gid, read off village views we load anyway so a
         # building can be addressed the way its own link addresses it.
         self._slot_gid: dict[tuple[int, int], int] = {}
@@ -249,8 +248,6 @@ class PageNavigator:
         if previous is None:
             return f"{base}/karte.php"
         px, py = previous
-        if self._map_referer_zoomed:
-            return f"{base}/karte.php?zoom=1&x={px}&y={py}"
         return f"{base}/karte.php?x={px}&y={py}"
 
     def _init_route_prefs(self, rng: "random.Random") -> None:
@@ -299,10 +296,6 @@ class PageNavigator:
     def seed_routes(self, identity: str) -> None:
         """Bind the warm-up transition matrix to a stable persona identity."""
         self._init_route_prefs(random.Random(identity))
-        # Same identity, separate stream: which viewport URL form this account
-        # writes must be stable across restarts (it is a per-account habit, not
-        # a per-session coin toss) without being derivable from the matrix.
-        self._map_referer_zoomed = random.Random(f"{identity}|map").random() < 0.5
 
     def _next_route_step(self, current: str) -> Optional[str]:
         """Sample the next warm-up page (or None=stop) from the global RNG."""
@@ -379,6 +372,17 @@ class PageNavigator:
     async def _visit(self, path: str, context: str = "") -> str:
         """Visit a page with delay and tracking."""
         await self._delay.wait(ActionType.PAGE_LOAD, context or f"visiting {path}")
+        # A fresh map document is a fresh address bar, so the viewport goes with
+        # it. This lives HERE rather than in `navigate_to_map` because
+        # `reports_service` loads /karte.php through `_visit` directly, and a
+        # reset that only happens on one of two paths is a reset that is missing
+        # on the other: the sweep before it would leave (10,80) behind, the
+        # freshly loaded page would satisfy the "am I on the map" gate, and the
+        # next tile XHR would claim a viewport the new page never had. Capture
+        # line 148 is the control -- the first XHR after a map load is referred
+        # from the bare page.
+        if path.split("?", 1)[0] == "/karte.php":
+            self._map_viewport = None
         # No separate bookkeeping: get_html updates the Referer's page field, and
         # `_current_page` reads that. One source of truth.
         return await self._http.get_html(path, skip_reauth=True)

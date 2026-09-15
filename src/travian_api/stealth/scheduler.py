@@ -19,7 +19,7 @@ import os
 import random
 import tempfile
 import time
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -82,7 +82,9 @@ class ActivityScheduler:
         # phase across accounts is the tell).
         self._night_start_hour = 23.0
         self._night_end_hour = 6.0
-        self._night_break_band = (6.0, 9.0, 7.0)
+        # Host-local until a page tells us otherwise; see
+        # `set_server_utc_offset_minutes`.
+        self._server_utc_offset_minutes: int | None = None
 
         # Effective caps: jittered at-or-below the configured hard ceilings so
         # the actual stop point varies instead of landing on the exact same
@@ -146,6 +148,35 @@ class ActivityScheduler:
     def _daily_cap_band(self) -> tuple[float, float]:
         return (self.max_daily_hours * self._DAILY_CAP_LO_FRAC, self.max_daily_hours)
 
+    def set_server_utc_offset_minutes(self, minutes: int | None) -> None:
+        """Tell the scheduler what time it is where the GAME is.
+
+        The night window decides when this account sleeps, which is the one
+        behaviour meant to be indistinguishable from a person's. It ran on
+        ``datetime.now()`` -- the HOST's clock -- and the host need not share a
+        timezone with the server: this codebase's own #76 work established that
+        Europe 2 runs UTC+1 while stamping its page epochs in UTC, and the
+        operator's machine has been on a third offset more than once.
+
+        A host three hours out puts the account's "night" three hours out, so it
+        goes quiet while the server's day is busiest and works through the hours
+        its neighbours are asleep. That is worse than having no night window:
+        an account awake at 04:00 server time every single night is a pattern,
+        not an absence of one.
+
+        Passing None leaves it on host-local time, which is the old behaviour
+        and the only honest answer before any page has stated the offset.
+        """
+        self._server_utc_offset_minutes = minutes
+
+    def _server_now(self) -> datetime:
+        """Now, on the game's clock when we know it and the host's when we do not."""
+        if self._server_utc_offset_minutes is None:
+            return datetime.now()
+        return datetime.now(UTC).replace(tzinfo=None) + timedelta(
+            minutes=self._server_utc_offset_minutes
+        )
+
     def seed_circadian(self, identity: str) -> None:
         """Bind night-rest phase + wake duration to a stable persona identity.
 
@@ -157,10 +188,11 @@ class ActivityScheduler:
         rng = random.Random(identity)
         self._night_start_hour = rng.uniform(22.0, 24.0)
         self._night_end_hour = rng.uniform(5.0, 8.0)
-        lo = rng.uniform(5.5, 6.5)
-        hi = rng.uniform(8.5, 9.5)
-        mode = rng.uniform(lo + 0.5, hi - 0.5)
-        self._night_break_band = (lo, hi, mode)
+        # Three further draws bounded `_night_break_band`, which nothing has
+        # read since `next_break_duration` started delegating to
+        # `seconds_until_rest_ends`. They were the last statements in this
+        # method, so nothing downstream depended on where they left the RNG and
+        # deleting them shifts no account's phase.
 
     def _sample_continuous_cap(self) -> float:
         """Effective continuous-session cap, jittered below the hard ceiling.
@@ -435,7 +467,7 @@ class ActivityScheduler:
         """
         if not self.enabled:
             return False
-        now = now or datetime.now()
+        now = now or self._server_now()
         # Second precision, matching seconds_until_rest_ends, so the two share
         # one boundary and can't disagree about the window edge.
         hour = now.hour + now.minute / 60.0 + now.second / 3600.0
@@ -463,7 +495,7 @@ class ActivityScheduler:
         # two straddle the window-end boundary: is_rest_window(now1) True, then
         # hour(now2) just past the end, so (end - hour) % 24 wraps to ~24h and
         # the account slept for a day. One instant closes that.
-        now = now or datetime.now()
+        now = now or self._server_now()
         if not self.is_rest_window(now):
             return 0.0
         hour = now.hour + now.minute / 60.0 + now.second / 3600.0
@@ -472,7 +504,11 @@ class ActivityScheduler:
             # Defensive net for the exact-boundary instant: resume, never a
             # full-day sleep.
             return 0.0
-        buffer_s = random.uniform(0.0, 2700.0)  # up to 45 min so wake isn't a constant
+        # Up to ~45 min so a wake is not a constant -- log-normal rather than
+        # uniform, for the reason `stealth/timing.py` opens with. A flat band
+        # here means every account in a fleet wakes with the same shaped delay,
+        # and a wake time is one of the few events an observer gets cleanly.
+        buffer_s = min(random.lognormvariate(math.log(600.0), 0.9), 2700.0)
         return remaining_h * 3600.0 + buffer_s
 
     def next_break_duration(self, now: datetime | None = None) -> float:

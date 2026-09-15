@@ -21,16 +21,11 @@ upgrades.
 Removing it cannot break a claim that works today -- the recorded watch was
 granted without it.
 
-Two divergences from that capture are deliberately NOT fixed, and this file
-does not pretend otherwise:
-
-* `videofeature/open` is a GET there and a POST here.
-* The ad provider moved to `/fallback/v1/*` + ih.adscale.de; this service still
-  talks to ATG's fc.php/xs.php.
-
-Both are shape-level findings. The request and response BODIES were not
-recorded, and rewriting a reward claim against guessed bodies is the risk this
-work exists to remove. The class docstring carries the detail.
+When this file was written, two further divergences were known and knowingly
+unfixed -- `videofeature/open` being a GET we sent as a POST, and an ad provider
+that had moved off ATG. A second capture, bodies included, closed both, and the
+service was rebuilt on the recorded protocol. The module docstring there carries
+it byte for byte.
 """
 
 import re
