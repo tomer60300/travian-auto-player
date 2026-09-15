@@ -468,13 +468,18 @@ class TradeRouteService:
         ``/build.php?id=<slot>&gid=17&t=3&newdid=<village>``. Three parts, and
         each earns its place:
 
-        * ``id`` is the building's SLOT, and the real client never omits it --
-          every marketplace load in the 2026-09-15 capture carries one. We
-          omitted it entirely, which made our URL one no in-game link produces:
-          the game's markup builds these hrefs from the slot, and ``gid`` alone
-          is the shape a script writes when it knows the building type but has
-          never looked at the village. It is dropped only while the slot is
-          genuinely unknown -- see :meth:`_learn_marketplace_slot`.
+        * ``id`` is the building's SLOT. Every marketplace load in the
+          2026-09-15 traffic capture carries one, and we carried none.
+
+          One qualification, recorded because the first version of this note
+          overstated the case: the sidebar quick-link is ``/build.php?gid=17&t=5``
+          -- no slot at all -- so the bare form IS something the markup
+          produces, and is not by itself a tell. What makes the slot right here
+          is the path we simulate: we arrive from the village view, as a player
+          clicking the building does, and that link is built from the slot.
+          Arriving that way and then addressing the building the way the
+          sidebar does would be the mismatch. The slot is dropped only while it
+          is genuinely unknown -- see :meth:`_learn_marketplace_slot`.
         * ``t=3`` is the trade-route tab. Without it we never load the tab the
           routes live on -- so the reconciler read a page that cannot contain
           them, and a server-side "did this session render the trade-route tab
