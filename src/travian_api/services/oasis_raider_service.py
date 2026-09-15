@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
 import re
 import time
@@ -18,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List
 
 from ..constants import TROOP_MAPPINGS, TribeType
+from ..stealth.navigator import PAGE_PATHS, map_viewport_referer
 from .recon_account import acquire_recon_client
 
 logger = logging.getLogger(__name__)
@@ -68,14 +70,15 @@ BREAK_DURATION_MAX = 90.0
 NOISY_SLEEP_SEGMENT_MIN = 15.0  # Seconds per sleep chunk
 NOISY_SLEEP_SEGMENT_MAX = 25.0
 
-# Pages a human might visit while idle / waiting for troops
-_NOISE_PAGES = [
-    "/dorf1.php",
-    "/dorf2.php",
-    "/report/all",
-    "/statistiken.php",
-    "/spieler.php",
-]
+# Pages a human might visit while idle / waiting for troops.
+#
+# Taken from the navigator's table rather than kept as a second list. It was a
+# second list, and it had drifted: `/report/all`, `/statistiken.php` and
+# `/spieler.php` are none of them URLs this gpack's client produces (see
+# `PAGE_PATHS`), so an idle sweep spent a third of its noise requests
+# announcing itself. One source of truth means the next correction reaches both
+# callers.
+_NOISE_PAGES = sorted(PAGE_PATHS.values())
 
 
 def _sample_burst_size() -> int:
@@ -793,7 +796,15 @@ class OasisRaiderService:
 
         Returns actual seconds elapsed.
         """
-        duration = random.uniform(BREAK_DURATION_MIN, BREAK_DURATION_MAX)
+        # Log-normal, not uniform: a flat 30-90s histogram is the shape
+        # `stealth/timing.py` opens by calling trivially detectable, and a
+        # micro-break is one of the few pauses long enough to be worth
+        # measuring. Clamped back into the configured band so the bounds still
+        # mean what they say.
+        duration = min(
+            max(random.lognormvariate(math.log(48.0), 0.45), BREAK_DURATION_MIN),
+            BREAK_DURATION_MAX,
+        )
         await send_log(
             "BREAK",
             "☕",
@@ -861,6 +872,7 @@ class OasisRaiderService:
             "/api/v1/map/tile-details",
             {"x": x, "y": y},
             request_type="xhr",
+            referer=map_viewport_referer(client, x, y),
         )
         html = resp.get("html", "")
 

@@ -16,6 +16,7 @@ The count did not change when it moved -- the shape did.
 """
 
 import asyncio
+import json
 import re
 from types import SimpleNamespace
 
@@ -24,6 +25,7 @@ import pytest
 from travian_api.exceptions import NetworkError
 from travian_api.services.distribution.allocation import Resource
 from travian_api.services.trade_route_service import (
+    MARKETPLACE_DESTINATIONS_QUERY,
     MARKETPLACE_READBACK_QUERY,
     PlannedRoute,
     TradeRouteService,
@@ -58,8 +60,39 @@ def empty_marketplace(village: int) -> str:
 
 EMPTY_MARKETPLACE = empty_marketplace(20003)
 
+# The slot this fixture's village keeps its marketplace on. Arbitrary, and
+# deliberately not 17: the slot is a per-village fact with no relationship to
+# the building's gid, and a fixture where the two coincide would let a bug that
+# confuses them pass.
+MARKETPLACE_SLOT = 30
+
+
+def village_view(slot: int = MARKETPLACE_SLOT) -> str:
+    """A dorf2 page in the markup ``parse_dorf2`` reads, with a marketplace.
+
+    This used to be another copy of the marketplace page, which parsed to no
+    buildings at all -- so every URL pinned below was the one we emit when the
+    village view is UNREADABLE, not the one a live run emits. The file's whole
+    claim is "this is exactly what goes on the wire", so the village view has to
+    be a village view.
+    """
+    return (
+        "<html><body><div id='village_map'>"
+        f"<a href='/build.php?id={slot}' class='level colorLayer gid17' "
+        "data-gid='17' title='Marketplace Level 5'></a>"
+        "<a href='/build.php?id=19' class='emptyBuildingSlot'></a>"
+        "</div></body></html>"
+    )
+
+
+VILLAGE_VIEW = village_view()
 
 GRAPHQL = "/api/v1/graphql"
+# The building, and then the tab on it. `t=3` is reached by clicking "Trade
+# routes" once the marketplace is open -- the village view links only the first
+# of these, so the second is referred from the first and never from dorf2.
+MARKETPLACE_DEFAULT_TAB = f"/build.php?id={MARKETPLACE_SLOT}&gid=17&newdid=20003"
+MARKETPLACE_URL = f"/build.php?id={MARKETPLACE_SLOT}&gid=17&t=3&newdid=20003"
 
 
 def _readback(village: int, *routes: dict) -> dict:
@@ -115,6 +148,9 @@ class _CountingClient:
         self.calls: list[tuple[str, str]] = []
         self.referers: list[tuple[str, str | None]] = []
         self.bodies: list[tuple[str, dict]] = []
+        # `post_json`'s default is "json", which stamps X-Version. Every
+        # /api/v1 call must opt out of it -- see the test class below.
+        self.request_types: list[tuple[str, str]] = []
         self._pages = list(pages)
         self._readbacks = list(readbacks)
         self.waits: list[str] = []
@@ -156,8 +192,16 @@ class _CountingClient:
         self.calls.append(("POST", path))
         self.referers.append((path, kw.get("referer")))
         self.bodies.append((path, payload))
+        self.request_types.append((path, kw.get("request_type", "json")))
         if path == GRAPHQL:
             assert self._readbacks, "queue a read-back payload for every confirm"
+            # A confirm after a write makes TWO graphql calls with different
+            # bodies -- the marketplace/destinations refresh and the route-list
+            # read-back (HAR, 2026-09-15). Only the second one's answer is used,
+            # so serving the last queued payload to both is faithful; popping for
+            # the first would make every test queue a throwaway to say nothing.
+            if len(self._readbacks) == 1:
+                return self._served(self._readbacks[0])
             return self._served(self._readbacks.pop(0))
         return {}
 
@@ -186,17 +230,45 @@ def _route(dest: int = 700) -> PlannedRoute:
     )
 
 
-class TestTheCanaryRunCostsFourRequests:
-    """Read the village, create one route, confirm it. Nothing else."""
+class TestTheCanaryRunCostsSixRequests:
+    """Read the village, create one route, then settle the way the page does.
 
-    def test_a_read_is_two_gets_in_the_human_order(self):
-        service, client = _service([EMPTY_MARKETPLACE, EMPTY_MARKETPLACE])
+    Four of these were settled long ago. The fifth took two captures. A
+    session-wide recording showed a marketplace write followed by two GraphQL
+    calls and (it was thought) a resource refresh, but recorded none of their
+    bodies -- so the count was known and the content was not, and the branch
+    deliberately sent ONE call rather than guess at three. An invented request is
+    a positive anomaly and the cheapest possible thing to alert on; a missing one
+    is an absence consistent with a dozen innocent causes.
+
+    A full HAR of a live create (2026-09-15) has the bodies, and the guess that
+    was avoided would have been wrong twice over::
+
+        POST /api/v1/trade-routes                    07:25:50.679  (201)
+          POST /api/v1/graphql  destinations 381 B   07:25:50.854
+          POST /api/v1/graphql  route list   452 B   07:25:50.855
+
+    The second call is not the read-back repeated -- it is the marketplace's own
+    model, the one the create dialog loads when it opens. And there is no
+    ``village/resources`` in the burst at all; a request from that same callback
+    would share the millisecond, and nothing does.
+
+    The sixth is the tab click -- ``t=3`` is a tab on the marketplace, not a page
+    the village view links, so a player loads the building first. See
+    :class:`TestEveryMarketplaceRequestStatesItsOwnReferer`.
+
+    So six, and every one of them quotable.
+    """
+
+    def test_a_read_is_three_gets_in_the_human_order(self):
+        service, client = _service([VILLAGE_VIEW, EMPTY_MARKETPLACE])
         asyncio.run(service.list_existing_routes(20003))
 
         assert client.calls == [
             ("GET", "/dorf2.php?newdid=20003"),
-            ("GET", "/build.php?gid=17&t=3&newdid=20003"),
-        ], "the village view must come first, or the marketplace Referer is a lie"
+            ("GET", MARKETPLACE_DEFAULT_TAB),
+            ("GET", MARKETPLACE_URL),
+        ], "village view, then the building, then the tab -- or a Referer is a lie"
 
     def test_a_create_is_one_post_and_it_waits_first(self):
         service, client = _service([])
@@ -205,44 +277,103 @@ class TestTheCanaryRunCostsFourRequests:
         assert client.calls == [("POST", "/api/v1/trade-routes")]
         assert client.waits, "a write with no pacing delay is a burst of one"
 
-    def test_a_confirmation_is_a_single_graphql_post_with_no_page_load(self):
-        # Refetching the model the open page runs on is not a navigation at all,
-        # so it must not walk to the page OR reload it. The game's own create
-        # handler fires one GraphQL query; so does this.
+    def test_a_confirmation_is_two_graphql_calls_and_no_page_load(self):
+        """Refetching the model the open page runs on is not a navigation, so it
+        must not walk to the page or reload it.
+
+        Two calls, because the page's success handler makes two -- and they are
+        DIFFERENT queries, which is the whole reason this stayed at one for so
+        long. Sending the route-list query twice would have put two identical
+        bodies on the wire a millisecond apart, which no client does.
+        """
+        service, client = _service([], [_readback(20003, _route_row(1, 700))])
+        asyncio.run(service.confirm_routes(20003, after_write=True))
+
+        assert client.calls == [("POST", GRAPHQL), ("POST", GRAPHQL)]
+        assert not any(m == "GET" for m, _ in client.calls), "no navigation"
+
+    def test_the_two_calls_after_a_write_say_different_things(self):
+        """The defect that kept this a no-op, pinned so it cannot come back."""
+        service, client = _service([], [_readback(20003, _route_row(1, 700))])
+        asyncio.run(service.confirm_routes(20003, after_write=True))
+
+        sent = [body["query"] for path, body in client.bodies if path == GRAPHQL]
+        assert len(sent) == 2
+        assert sent[0] != sent[1], "two identical GraphQL bodies 1ms apart is a tell"
+        # And in the capture's order: destinations first, route list second.
+        assert sent[0].startswith("{ownPlayer{village{marketplace{merchantsInfo")
+        assert sent[1].startswith("{ownPlayer{id currentVillageId")
+
+    def test_a_confirmation_with_no_write_behind_it_is_one_request(self):
+        """The stability re-reads are not read-backs.
+
+        `settle_after_write` sends the query the page fires WHEN A WRITE
+        SUCCEEDS -- the same one its create dialog loads on open. Firing that off
+        a standalone re-read puts a create-dialog request on the wire with no
+        create behind it, which is a request in a context the client never
+        produces it in: the defect the method exists to fix, inverted.
+        """
         service, client = _service([], [_readback(20003, _route_row(1, 700))])
         asyncio.run(service.confirm_routes(20003))
 
         assert client.calls == [("POST", GRAPHQL)]
+        sent = [body["query"] for path, body in client.bodies if path == GRAPHQL]
+        assert sent == [MARKETPLACE_READBACK_QUERY], "the read-back, not the dialog's query"
 
-    def test_the_whole_canary_is_four_requests_in_this_exact_order(self):
+    def test_the_verification_survives_the_refresh_failing(self):
+        """The refresh's answer is unused, so its failure must not be reported as
+        "what was created is unknown" -- those are different answers."""
         service, client = _service(
-            [EMPTY_MARKETPLACE, EMPTY_MARKETPLACE],
+            [],
+            [
+                NetworkError("the marketplace refresh fell over"),
+                _readback(20003, _route_row(1, 700)),
+            ],
+        )
+
+        confirmed = asyncio.run(service.confirm_routes(20003, after_write=True))
+
+        assert [r.route_id for r in confirmed] == [1]
+        assert client.calls == [("POST", GRAPHQL), ("POST", GRAPHQL)]
+
+    def test_the_whole_canary_is_six_requests_in_this_exact_order(self):
+        service, client = _service(
+            [VILLAGE_VIEW, EMPTY_MARKETPLACE],
             [_readback(20003, _route_row(1, 700))],
         )
         asyncio.run(service.list_existing_routes(20003))
         asyncio.run(service.create_route(_route()))
-        confirmed = asyncio.run(service.confirm_routes(20003))
+        confirmed = asyncio.run(service.confirm_routes(20003, after_write=True))
 
         assert client.calls == [
             ("GET", "/dorf2.php?newdid=20003"),
-            ("GET", "/build.php?gid=17&t=3&newdid=20003"),
+            ("GET", MARKETPLACE_DEFAULT_TAB),
+            ("GET", MARKETPLACE_URL),
             ("POST", "/api/v1/trade-routes"),
             ("POST", GRAPHQL),
+            ("POST", GRAPHQL),
         ]
-        assert len(client.calls) == 4
+        assert len(client.calls) == 6
         assert [r.route_id for r in confirmed] == [1]
 
     def test_verifying_costs_exactly_one_request_more_than_not_verifying(self):
-        # The price of not guessing. Worth stating precisely, because the
-        # alternative was reporting routes that may not exist.
-        service, client = _service([EMPTY_MARKETPLACE, EMPTY_MARKETPLACE], [_readback(20003)])
+        # The price of not guessing. TWO requests follow the write, but only one
+        # of them is the verification -- the other is what the page does after a
+        # create whether anyone is checking or not, so it is not charged to the
+        # decision to check.
+        service, client = _service([VILLAGE_VIEW, EMPTY_MARKETPLACE], [_readback(20003)])
         asyncio.run(service.list_existing_routes(20003))
         asyncio.run(service.create_route(_route()))
         before = len(client.calls)
 
-        asyncio.run(service.confirm_routes(20003))
+        asyncio.run(service.confirm_routes(20003, after_write=True))
+        after_write = len(client.calls) - before
 
-        assert len(client.calls) - before == 1
+        asyncio.run(service.confirm_routes(20003))
+        settling_only = after_write - (len(client.calls) - before - after_write)
+
+        assert after_write == 2
+        assert settling_only == 1, "the verification itself is one request"
 
 
 class TestTheReadBackIsTheQueryTheGameFires:
@@ -273,6 +404,36 @@ class TestTheReadBackIsTheQueryTheGameFires:
             " merchants ships useTradeShips}"
         )
 
+    def test_the_derived_query_is_what_the_browser_actually_sent(self):
+        """Both constants were DERIVED -- read out of the bundle and reassembled
+        by reasoning about graphql-js `print` and `stripIgnoredCharacters`. The
+        2026-09-15 HAR carries the real bodies, with their own content-lengths,
+        and the derivation was exact.
+
+        Serialised compactly, because that is what `JSON.stringify` emits and
+        what the capture's `content-length` counts.
+        """
+        assert len(json.dumps({"query": MARKETPLACE_READBACK_QUERY}, separators=(",", ":"))) == 452
+        assert (
+            len(json.dumps({"query": MARKETPLACE_DESTINATIONS_QUERY}, separators=(",", ":"))) == 381
+        )
+
+    def test_the_post_write_refresh_is_the_marketplaces_own_model(self):
+        """Byte for byte off the wire, 07:25:50.854.
+
+        The page loads this when the create dialog OPENS and again when the
+        create succeeds -- merchants, ship capacity and the destination list,
+        which is exactly the state a completed send changes.
+        """
+        assert MARKETPLACE_DESTINATIONS_QUERY == (
+            "{ownPlayer{village{marketplace{merchantsInfo{...MerchantsInfoFields}"
+            "tradeShipCapacity tradeShipsInfo{...MerchantsInfoFields}"
+            "destinations{...DestinationFields}}...HarbourFields}}}"
+            "fragment MerchantsInfoFields on MerchantsInfo{total capacity}"
+            "fragment DestinationFields on Destination{id name x y cropOnly player{id}}"
+            "fragment HarbourFields on OwnVillage{isShore hasHarbour}"
+        )
+
     def test_the_operation_carries_no_query_keyword(self):
         # graphql-js prints an anonymous operation with no variables and no
         # directives in short form, and the client prints before it sends. A
@@ -294,6 +455,54 @@ class TestTheReadBackIsTheQueryTheGameFires:
         assert self._confirm()["query"] == MARKETPLACE_READBACK_QUERY
 
 
+class TestNoApiCallCarriesAHeaderTheClientDoesNotSend:
+    """`/api/v1/*` takes no `X-Version`, and `post_json`'s default adds one.
+
+    Travian's fetch wrapper injects `X-Version` on its AJAX calls, so the
+    transport stamps it for `request_type="json"` and `"xhr"`. The 2026-09-15
+    HAR lists every header on four `/api/v1` requests -- two graphql, one
+    trade-routes POST, one PUT -- and none of them carries it. The writes here
+    already opted out with `request_type="fetch"`; the GraphQL read-back did
+    not, so from the day that read moved off a page load to GraphQL, every
+    confirmation sent a custom header on the endpoint this service touches most.
+
+    A missing request is an absence. A custom header on a request the real
+    client sends bare is a positive anomaly, and it is one string compare away
+    from being alerted on.
+    """
+
+    def test_the_read_back_does_not_stamp_x_version(self):
+        service, client = _service([], [_readback(20003)])
+        asyncio.run(service.confirm_routes(20003))
+
+        assert client.request_types == [(GRAPHQL, "fetch")]
+
+    def test_the_post_write_refresh_does_not_either(self):
+        service, client = _service([], [_readback(20003)])
+        asyncio.run(service.confirm_routes(20003, after_write=True))
+
+        assert client.request_types == [(GRAPHQL, "fetch"), (GRAPHQL, "fetch")]
+
+    def test_the_create_still_does_not(self):
+        service, client = _service([])
+        asyncio.run(service.create_route(_route()))
+
+        assert client.request_types == [("/api/v1/trade-routes", "fetch")]
+
+    def test_no_api_call_anywhere_in_a_run_uses_the_json_default(self):
+        service, client = _service(
+            [VILLAGE_VIEW, EMPTY_MARKETPLACE], [_readback(20003, _route_row(1, 700))]
+        )
+        asyncio.run(service.list_existing_routes(20003))
+        asyncio.run(service.create_route(_route()))
+        asyncio.run(service.confirm_routes(20003, after_write=True))
+
+        assert [t for path, t in client.request_types if path.startswith("/api/v1/")]
+        assert all(
+            t == "fetch" for path, t in client.request_types if path.startswith("/api/v1/")
+        ), f"an /api/v1 call is stamping X-Version: {client.request_types}"
+
+
 class TestEveryMarketplaceRequestStatesItsOwnReferer:
     """Not one of these may fall back to the account-wide "last page".
 
@@ -302,27 +511,32 @@ class TestEveryMarketplaceRequestStatesItsOwnReferer:
     farm loop or queue poll landing in the window takes the Referer with it.
     """
 
-    MARKETPLACE = "https://example.invalid/build.php?gid=17&t=3&newdid=20003"
+    MARKETPLACE = f"https://example.invalid{MARKETPLACE_URL}"
 
-    def test_the_marketplace_get_is_referred_from_the_village_view(self):
-        # The navigation stays a page load precisely so this Referer is truthful:
-        # dorf2 is the page a human clicks the marketplace from. Pinning it is
-        # what makes the claim survive a concurrent GET.
-        service, client = _service([EMPTY_MARKETPLACE, EMPTY_MARKETPLACE])
+    def test_each_hop_is_referred_from_the_page_that_links_it(self):
+        """dorf2 links the building; the building page has the tab.
+
+        The navigation stays a page load precisely so these Referers are
+        truthful, and each is pinned so the claim survives a concurrent GET.
+
+        `t=3` used to be referred from dorf2 -- which asserts a click on a link
+        the village view does not contain. A Referer naming a page that cannot
+        link to the URL it accompanies is a contradiction inside one request,
+        checkable without correlating anything to anything.
+        """
+        service, client = _service([VILLAGE_VIEW, EMPTY_MARKETPLACE])
         asyncio.run(service.list_existing_routes(20003))
 
         assert client.referers == [
             ("/dorf2.php?newdid=20003", None),
-            (
-                "/build.php?gid=17&t=3&newdid=20003",
-                "https://example.invalid/dorf2.php?newdid=20003",
-            ),
+            (MARKETPLACE_DEFAULT_TAB, "https://example.invalid/dorf2.php?newdid=20003"),
+            (MARKETPLACE_URL, f"https://example.invalid{MARKETPLACE_DEFAULT_TAB}"),
         ]
 
     def test_a_create_is_referred_from_the_page_that_has_the_form(self):
         # A POST to the trade-route endpoint referred from anywhere else is a
         # desync no browser produces: the form only exists on that tab.
-        service, client = _service([EMPTY_MARKETPLACE, EMPTY_MARKETPLACE])
+        service, client = _service([VILLAGE_VIEW, EMPTY_MARKETPLACE])
         asyncio.run(service.list_existing_routes(20003))
         asyncio.run(service.create_route(_route()))
 
@@ -332,14 +546,14 @@ class TestEveryMarketplaceRequestStatesItsOwnReferer:
         # An API request never advances page context, so the GraphQL read-back
         # cannot inherit a truthful Referer -- it has to be given one, and the
         # only page whose script fires this query is the trade-route tab.
-        service, client = _service([EMPTY_MARKETPLACE, EMPTY_MARKETPLACE], [_readback(20003)])
+        service, client = _service([VILLAGE_VIEW, EMPTY_MARKETPLACE], [_readback(20003)])
         asyncio.run(service.list_existing_routes(20003))
         asyncio.run(service.confirm_routes(20003))
 
         assert dict(client.referers)[GRAPHQL] == self.MARKETPLACE
 
     def test_the_navigation_still_establishes_the_pin_for_later_writes(self):
-        service, _ = _service([EMPTY_MARKETPLACE, EMPTY_MARKETPLACE])
+        service, _ = _service([VILLAGE_VIEW, EMPTY_MARKETPLACE])
         asyncio.run(service.list_existing_routes(20003))
 
         assert service._marketplace_referer[20003] == self.MARKETPLACE
@@ -401,7 +615,7 @@ class TestAFailedReadIsBilledToo:
     def test_a_marketplace_get_that_fails_after_the_village_view_bills_both(self):
         # Two requests went out, so two bills -- the one that answered and the
         # one that did not. Both spent a throttler gap.
-        service, client = _service([EMPTY_MARKETPLACE, NetworkError("HTTP 500: the game said no")])
+        service, client = _service([VILLAGE_VIEW, NetworkError("HTTP 500: the game said no")])
 
         with pytest.raises(NetworkError):
             asyncio.run(service.open_marketplace(20003))
@@ -431,11 +645,12 @@ class TestAFailedReadIsBilledToo:
         assert len(client.logged_activity) == 1
 
     def test_a_read_that_answers_is_billed_once_per_request(self):
-        # The regression anchor: open_marketplace is two GETs and two billings,
-        # refresh_marketplace is one POST and one more.
-        service, client = _service([EMPTY_MARKETPLACE, EMPTY_MARKETPLACE], [_readback(20003)])
+        # The regression anchor: open_marketplace is three GETs -- village view,
+        # building, tab -- and three billings; refresh_marketplace is one POST
+        # and one more.
+        service, client = _service([VILLAGE_VIEW, EMPTY_MARKETPLACE], [_readback(20003)])
         asyncio.run(service.list_existing_routes(20003))
-        assert len(client.logged_activity) == 2
+        assert len(client.logged_activity) == 3
 
         asyncio.run(service.refresh_marketplace(20003))
-        assert len(client.logged_activity) == 3
+        assert len(client.logged_activity) == 4

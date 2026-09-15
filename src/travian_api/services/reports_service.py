@@ -18,6 +18,24 @@ from ..parsers.report_parser import (
 logger = get_logger(__name__)
 
 
+def _report_page(page: int) -> str:
+    """The report list, addressed the way the game's own links address it.
+
+    This was `/report/all?page={page}` -- a path segment this gpack does not
+    produce. Read off the live page 2026-09-15: the report tabs are `/report`,
+    `/report/overview`, `/report/offensive`, `/report/defensive`,
+    `/report/scouting`, `/report/other`, `/report/archive` and
+    `/report/surrounding`, and the pagination link is a bare `?page=2`. There is
+    no `all`. `parse_report_list` reads `/report` unchanged -- verified against
+    the real page, ten rows, correct types -- so this is a URL correction and
+    nothing more.
+
+    Page one is the bare path, because that is the link a player clicks to get
+    here; `?page=1` is a URL you only reach by constructing it.
+    """
+    return "/report" if page <= 1 else f"/report?page={page}"
+
+
 class ReportsService:
     """Handles report-related operations."""
 
@@ -47,7 +65,7 @@ class ReportsService:
 
         for page in range(1, max_pages + 1):
             try:
-                html = await self.client.get_html(f"/report/all?page={page}")
+                html = await self.client.get_html(_report_page(page))
                 # BeautifulSoup over a full page is tens of milliseconds, and
                 # max_pages runs to 100. Off the loop, so a long list of pages
                 # cannot stall stealth-timed requests or WebSocket frames.
@@ -108,7 +126,7 @@ class ReportsService:
 
         for page in range(1, max_pages + 1):
             try:
-                html = await self.client.get_html(f"/report/all?page={page}")
+                html = await self.client.get_html(_report_page(page))
                 page_reports = parse_report_list(html)
                 pages_fetched += 1
 
@@ -364,6 +382,7 @@ class ReportsService:
             ``detail`` key with the full parsed report data.
         """
         from ..stealth.human_delay import ActionType
+        from ..stealth.navigator import map_viewport_referer
 
         try:
             # Stealth: navigate to the map first (like clicking "Map" in the menu)
@@ -374,7 +393,18 @@ class ReportsService:
                 await self.client.human_delay.wait(ActionType.CLICK, "clicking map tile")
 
             # The tile popup is loaded via the tile-details API (not karte.php HTML)
-            resp = await self.client.post_json("/api/v1/map/tile-details", {"x": x, "y": y})
+            resp = await self.client.post_json(
+                "/api/v1/map/tile-details",
+                {"x": x, "y": y},
+                # `xhr`, matching auto_scout and the oasis sweep. This call site
+                # was the only one sending the default `json` shape, so the same
+                # endpoint went out from this account with two different
+                # X-Requested-With / Sec-Fetch-Mode combinations depending on
+                # which feature asked -- a difference no browser produces, since
+                # the page's own code fires this one way.
+                request_type="xhr",
+                referer=map_viewport_referer(self.client, x, y),
+            )
             html = resp.get("html", "")
             if not html:
                 raise ReportError(f"Empty tile-details response for ({x}, {y})")

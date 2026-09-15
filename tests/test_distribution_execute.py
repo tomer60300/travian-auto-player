@@ -340,7 +340,15 @@ class _FakeLiveSvc:
                 raise ActivityBudgetExhausted("budget exhausted (test)")
             return True
 
-        self.http_client = SimpleNamespace(check_activity_budget=_check_budget)
+        # Both questions, because which one the handler asks now depends on
+        # `i_am_awake`. The fake answers them identically -- it models a QUOTA,
+        # and the difference between the two is the night window, which this
+        # fake has no notion of. A test that cares about that difference builds
+        # a real scheduler; see `TestTheAwakeOverrideReachesTheBudgetCheck`.
+        self.http_client = SimpleNamespace(
+            check_activity_budget=_check_budget,
+            check_activity_quota=_check_budget,
+        )
 
     def origin_lock(self, vid):
         @contextlib.asynccontextmanager
@@ -390,7 +398,7 @@ class _FakeLiveSvc:
             return RouteActionResult(vid, 0, 0, self._delete_status, "delete unconfirmed (test)")
         return RouteActionResult(vid, 0, 0, "deleted")
 
-    async def confirm_routes(self, vid, *, map_span=None):
+    async def confirm_routes(self, vid, *, map_span=None, after_write=False):
         self.confirmed.append(vid)
         if vid in self._confirm_raises:
             from travian_api.exceptions import NetworkError
@@ -2266,7 +2274,7 @@ class TestTheMarketplaceIsSteadyBeforeAnythingIsDeleted:
                 super().__init__(**kw)
                 self._lagged = False
 
-            async def confirm_routes(self, vid, *, map_span=None):
+            async def confirm_routes(self, vid, *, map_span=None, after_write=False):
                 rows = await super().confirm_routes(vid, map_span=map_span)
                 if not self._lagged:
                     self._lagged = True
@@ -2306,7 +2314,7 @@ class TestTheMarketplaceIsSteadyBeforeAnythingIsDeleted:
                 super().__init__(**kw)
                 self._reads = 0
 
-            async def confirm_routes(self, vid, *, map_span=None):
+            async def confirm_routes(self, vid, *, map_span=None, after_write=False):
                 rows = await super().confirm_routes(vid, map_span=map_span)
                 self._reads += 1
                 if self._reads % 2 == 0 and rows:
@@ -2328,7 +2336,7 @@ class TestTheMarketplaceIsSteadyBeforeAnythingIsDeleted:
                 super().__init__(**kw)
                 self._reads = 0
 
-            async def confirm_routes(self, vid, *, map_span=None):
+            async def confirm_routes(self, vid, *, map_span=None, after_write=False):
                 rows = await super().confirm_routes(vid, map_span=map_span)
                 self._reads += 1
                 if self._reads % 2 == 0 and rows:
@@ -2419,7 +2427,7 @@ class _UnsettledPage(_AnswerDies):
         super().__init__(dead=dead, **kw)
         self._reads = 0
 
-    async def confirm_routes(self, vid, *, map_span=None):
+    async def confirm_routes(self, vid, *, map_span=None, after_write=False):
         rows = await super().confirm_routes(vid, map_span=map_span)
         self._reads += 1
         if self._reads == 1:
@@ -2597,7 +2605,7 @@ class _UnsettledAtOneOrigin(_AnswerDies):
         self._unstable = unstable
         self._reads_here = 0
 
-    async def confirm_routes(self, vid, *, map_span=None):
+    async def confirm_routes(self, vid, *, map_span=None, after_write=False):
         rows = await super().confirm_routes(vid, map_span=map_span)
         if vid != self._unstable:
             return rows
@@ -2684,7 +2692,7 @@ class _OneRowNeverShows(_FakeLiveSvc):
         self._hide_dest = hide_dest
         self._hide_minute = hide_minute
 
-    async def confirm_routes(self, vid, *, map_span=None):
+    async def confirm_routes(self, vid, *, map_span=None, after_write=False):
         rows = await super().confirm_routes(vid, map_span=map_span)
         return [
             e
@@ -2858,7 +2866,7 @@ class TestARestoreIsCompensationNotForwardProgress:
                 super().__init__(**kw)
                 self._reads = 0
 
-            async def confirm_routes(self, vid, *, map_span=None):
+            async def confirm_routes(self, vid, *, map_span=None, after_write=False):
                 rows = await super().confirm_routes(vid, map_span=map_span)
                 self._reads += 1
                 return rows[:-1] if self._reads % 2 == 1 else rows
@@ -6112,7 +6120,7 @@ class TestARefusedReplacementPutsTheOldRoutesBack:
                 super().__init__(**kw)
                 self._reads = 0
 
-            async def confirm_routes(self, vid, *, map_span=None):
+            async def confirm_routes(self, vid, *, map_span=None, after_write=False):
                 rows = await super().confirm_routes(vid, map_span=map_span)
                 self._reads += 1
                 if self._reads % 2 == 1:
@@ -6333,3 +6341,207 @@ class TestTheDisableRecordSaysWhatHappenedToEachRow:
         kinds = [e["kind"] for e in _trace_events(res.trace_path)]
         order = [kinds.index(k) for k in ("replacement_started", "rows_disabled", "created")]
         assert order == sorted(order), kinds
+
+
+class TestTheAccountSleeps:
+    """A live run is refused during this account's night-rest window.
+
+    `ActivityScheduler` has drawn every account a per-account sleep window since
+    it was written, and `http_client.rest_pause_seconds()` exposes it. Nothing
+    in the project has ever called either -- `is_rest_window` and
+    `seconds_until_rest_ends` have exactly one reference between them, the
+    helper itself. Every automation loop here runs straight through the night.
+
+    Its own docstring names the stake: "activity that respects no sleep window
+    is the most reliable machine-vs-human signal there is." Per-request pacing,
+    TLS impersonation and drifting session tempo are all defeated by one fact
+    about the account -- that it writes trade routes at 04:00 and never rests.
+
+    Refused rather than slept through: this is a request/response endpoint, and
+    pausing until morning would hang the caller for hours.
+    """
+
+    def _svc(self, seconds):
+        svc = _FakeLiveSvc(existing={20011: []})
+        svc.http_client.rest_pause_seconds = lambda: seconds
+        return svc
+
+    def test_a_live_run_inside_the_window_is_refused(self):
+        with pytest.raises(HTTPException) as exc:
+            _run_live(self._svc(3 * 3600 + 25 * 60), _one_origin_account())
+
+        assert exc.value.status_code == 409
+        assert "night-rest" in exc.value.detail
+
+    def test_the_refusal_says_when_it_reopens(self):
+        """A refusal the operator cannot act on is an outage, not a guard."""
+        with pytest.raises(HTTPException) as exc:
+            _run_live(self._svc(3 * 3600 + 25 * 60), _one_origin_account())
+
+        assert "3h25m" in exc.value.detail
+
+    def test_outside_the_window_the_run_proceeds(self):
+        res = _run_live(self._svc(0.0), _one_origin_account())
+
+        assert res.dry_run is False
+
+    def test_a_preview_is_never_refused(self):
+        """It issues no game request, so there is nothing to observe -- and
+        refusing one would stop the operator planning tomorrow's work tonight."""
+        svc = self._svc(3 * 3600)
+        res = _execute(_exec_body(), svc=svc)
+
+        assert res.dry_run is True
+
+    def test_a_scheduler_that_cannot_answer_does_not_take_the_run_down(self):
+        """Stealth is advisory here. The budget and captcha gates are the ones
+        that refuse on their own failure; this one defers to them."""
+
+        def _boom():
+            raise RuntimeError("no scheduler")
+
+        svc = _FakeLiveSvc(existing={20011: []})
+        svc.http_client.rest_pause_seconds = _boom
+
+        assert _run_live(svc, _one_origin_account()).dry_run is False
+
+
+class TestAnOperatorAtTheKeyboardMayRunLate:
+    """The night guard stops a PATTERN, not an evening.
+
+    Someone who opens the game at 23:30 and sorts out their trade routes is an
+    ordinary Tuesday. What gives an account away is an unattended run at 04:00
+    every night, and the difference between the two is whether a person is
+    there -- which the server cannot see and the request can state.
+
+    Off by default, so a scheduler that never sets it can never drift into the
+    pattern; available, so the guard does not become a reason to disable the
+    guard.
+    """
+
+    def _svc(self):
+        svc = _FakeLiveSvc(existing={20011: []})
+        svc.http_client.rest_pause_seconds = lambda: 4 * 3600
+        return svc
+
+    def test_without_it_the_run_is_refused(self):
+        with pytest.raises(HTTPException) as exc:
+            _run_live(self._svc(), _one_origin_account())
+
+        assert exc.value.status_code == 409
+
+    def test_with_it_the_run_proceeds(self):
+        res = _run_live(self._svc(), _one_origin_account(), i_am_awake=True)
+
+        assert res.dry_run is False
+
+    def test_the_refusal_names_the_way_out(self):
+        """A refusal nobody can act on is an outage."""
+        with pytest.raises(HTTPException) as exc:
+            _run_live(self._svc(), _one_origin_account())
+
+        assert "i_am_awake" in exc.value.detail
+
+    def test_it_does_not_bypass_anything_else(self):
+        """It answers one question -- is a person here -- and no other. The
+        activity budget is not about presence and is unmoved by it."""
+        svc = _FakeLiveSvc(existing={20011: []}, budget_ok=False)
+        svc.http_client.rest_pause_seconds = lambda: 4 * 3600
+
+        res = _run_live(svc, _one_origin_account(), i_am_awake=True)
+        assert res.stopped_early is True
+
+
+class TestTheAwakeOverrideReachesTheBudgetCheck:
+    """The override has to survive the check two lines after the one it clears.
+
+    Every test above stubs `check_activity_budget` with an independent fake, so
+    none of them could see what a real one does: `ActivityScheduler.can_continue`
+    answers "have I worked too long" AND "is it 4am" with one boolean, and
+    `check_activity_budget` raises on either. So `i_am_awake` waved the night
+    check through at the 409 and met it again immediately, wearing a quota's
+    name -- the run stopped with "Activity budget exhausted" against untouched
+    quotas and deferred every route.
+
+    The 409's own text offers `i_am_awake` as the way out. It had never worked.
+
+    These build a REAL scheduler and a REAL HttpClient budget check, pinned
+    inside the rest window with nothing spent, which is the only arrangement
+    that can tell the two questions apart.
+    """
+
+    @staticmethod
+    def _client_in_the_night(*, spent_hours: float = 0.0):
+        """A real budget check whose scheduler is mid-night and barely used."""
+        from travian_api.clients.http_client import HttpClient
+        from travian_api.stealth.scheduler import ActivityScheduler
+
+        sched = ActivityScheduler(enabled=True)
+        # 02:00-05:00 is unambiguously inside; pinned rather than seeded so the
+        # test does not depend on this account's drawn circadian phase.
+        sched._night_start_hour = 2.0
+        sched._night_end_hour = 5.0
+        sched.is_rest_window = lambda now=None: True
+        sched._rolling_24h_seconds = lambda: spent_hours * 3600.0
+
+        client = SimpleNamespace(_stealth_enabled=True, _activity_scheduler=sched)
+        client.check_activity_budget = HttpClient.check_activity_budget.__get__(client)
+        client.check_activity_quota = HttpClient.check_activity_quota.__get__(client)
+        client._budget_exhausted = HttpClient._budget_exhausted.__get__(client)
+        return client, sched
+
+    def _svc_in_the_night(self, *, spent_hours: float = 0.0):
+        svc = _FakeLiveSvc(existing={20011: []})
+        client, sched = self._client_in_the_night(spent_hours=spent_hours)
+        svc.http_client.check_activity_budget = client.check_activity_budget
+        svc.http_client.check_activity_quota = client.check_activity_quota
+        svc.http_client.rest_pause_seconds = lambda: 3 * 3600
+        return svc
+
+    def test_the_night_alone_stops_a_run_that_did_not_claim_presence(self):
+        """The guard still guards -- this is the behaviour being protected."""
+        with pytest.raises(HTTPException) as exc:
+            _run_live(self._svc_in_the_night(), _one_origin_account())
+
+        assert exc.value.status_code == 409
+
+    def test_an_awake_run_is_not_stopped_by_the_night_wearing_a_quotas_name(self):
+        res = _run_live(self._svc_in_the_night(), _one_origin_account(), i_am_awake=True)
+
+        assert res.stopped_early is False, (
+            "the night window stopped an awake run through the budget check"
+        )
+        assert res.remaining == 0, "every route was deferred by a quota that is untouched"
+
+    def test_the_caps_still_bind_an_awake_run(self):
+        """`i_am_awake` waives a SCHEDULE. It does not waive a quota, and an
+        operator being present is not a reason to work a 30-hour day."""
+        svc = self._svc_in_the_night(spent_hours=999.0)
+
+        res = _run_live(svc, _one_origin_account(), i_am_awake=True)
+
+        assert res.stopped_early is True
+
+    def test_a_rest_window_stop_says_it_is_the_clock_not_a_quota(self):
+        """The message used to read "rolling 24h 0.0h / 8h, session 0.0h / 3h"
+        -- every number under its cap, offered as the reason nothing ran. It
+        sent the reader to look at quotas that were fine."""
+        from travian_api.exceptions import ActivityBudgetExhausted
+
+        client, _ = self._client_in_the_night()
+
+        with pytest.raises(ActivityBudgetExhausted) as exc:
+            client.check_activity_budget()
+
+        assert "night-rest window" in str(exc.value)
+
+    def test_the_quota_check_ignores_the_clock_and_nothing_else(self):
+        client, sched = self._client_in_the_night()
+
+        assert client.check_activity_quota() is True, "the clock must not stop it"
+
+        sched._rolling_24h_seconds = lambda: 999.0 * 3600.0
+        from travian_api.exceptions import ActivityBudgetExhausted
+
+        with pytest.raises(ActivityBudgetExhausted):
+            client.check_activity_quota()

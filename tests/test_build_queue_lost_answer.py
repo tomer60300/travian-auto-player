@@ -326,3 +326,114 @@ def test_builds_within_a_minute_of_each_other_are_staggered(monkeypatch):
 
     asyncio.run(bq._stagger_account_build(client))
     assert slept == [45.0], "the second, moments later, does"
+
+
+# ── B7: waking from a break is the moment to ask again ─────────────────────
+
+
+class _RefusesThenRelents:
+    """Refuses `refusals` times, then allows. Records what it was asked for."""
+
+    def __init__(self, refusals: int, duration: float = 600.0):
+        self._left = refusals
+        self._duration = duration
+        self.asked: list[bool] = []
+        self.durations_served = 0
+        self.sessions_started = 0
+        self.bills: list[float] = []
+
+    def can_continue(self) -> bool:
+        allowed = self._left <= 0
+        self.asked.append(allowed)
+        if not allowed:
+            self._left -= 1
+        return allowed
+
+    def next_break_duration(self) -> float:
+        self.durations_served += 1
+        return self._duration
+
+    def start_session(self) -> None:
+        self.sessions_started += 1
+
+    def log_activity(self, seconds: float) -> None:
+        self.bills.append(seconds)
+
+
+def _http_with(scheduler):
+    http = _Http()
+    http.activity_scheduler = scheduler
+    return http
+
+
+def test_a_break_that_ends_while_still_refused_is_taken_again(monkeypatch):
+    """`if not can_continue()` slept once and fell straight through to the work.
+
+    So anything that let the refusal outlast the sleep -- a rolling cap still
+    over after a 1-3h break, an offset learned mid-sleep that moved the night
+    window -- put the account back to building inside the very window the break
+    was taken for. The check exists to prevent exactly that.
+    """
+    from travian_api.services import build_queue_service as bq
+
+    slept: list[float] = []
+
+    async def _record(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(bq.asyncio, "sleep", _record)
+    sched = _RefusesThenRelents(refusals=3)
+
+    svc = BuildQueueService(_http_with(sched))
+    svc.building_service = _Game([])
+    asyncio.run(svc.execute_plan_continuous(_plan(), poll_interval_s=1))
+
+    assert sched.durations_served >= 3, (
+        f"woke and resumed after {sched.durations_served} break(s) while still refused"
+    )
+    assert slept[:3] == [600.0, 600.0, 600.0]
+
+
+def test_it_asks_again_after_each_sleep_rather_than_once(monkeypatch):
+    from travian_api.services import build_queue_service as bq
+
+    async def _noop(seconds):
+        return None
+
+    monkeypatch.setattr(bq.asyncio, "sleep", _noop)
+    sched = _RefusesThenRelents(refusals=2)
+
+    svc = BuildQueueService(_http_with(sched))
+    svc.building_service = _Game([])
+    asyncio.run(svc.execute_plan_continuous(_plan(), poll_interval_s=1))
+
+    # Three answers for one gate: refused, refused, allowed.
+    assert sched.asked[:3] == [False, False, True]
+
+
+def test_a_refusal_with_nothing_to_wait_for_does_not_spin(monkeypatch):
+    """No branch produces it today, and a busy loop here would hammer the game,
+    so the loop leaves rather than trusting that to stay true."""
+    from travian_api.services import build_queue_service as bq
+
+    slept: list[float] = []
+
+    async def _record(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(bq.asyncio, "sleep", _record)
+    # Never relents, and always offers a zero-length break.
+    sched = _RefusesThenRelents(refusals=10**9, duration=0.0)
+
+    svc = BuildQueueService(_http_with(sched))
+    svc.building_service = _Game([])
+    asyncio.run(svc.execute_plan_continuous(_plan(), poll_interval_s=1))
+
+    assert sched.durations_served < 10, (
+        f"spun {sched.durations_served} times on a zero-length break"
+    )
+    # `start_session()` happens only after a break is actually slept, so this
+    # says "the break was not taken" without depending on `slept`, which also
+    # collects the loop's own poll sleeps and cannot tell a 0 from a 0.
+    assert sched.sessions_started == 0, "a zero-length break must not be taken"
+    assert slept.count(600.0) == 0

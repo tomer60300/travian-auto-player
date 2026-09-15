@@ -536,7 +536,7 @@ class TestTheRefusalReachesCallersAsTheErrorTheyHandle:
             http_client=SimpleNamespace(settings=SimpleNamespace(base_url="x", username="y"))
         )
 
-        async def _refresh(_village_id):
+        async def _refresh(_village_id, *, consequential=False):
             return view
 
         service.refresh_marketplace = _refresh

@@ -19,7 +19,7 @@ import os
 import random
 import tempfile
 import time
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,15 @@ class ActivityScheduler:
         scheduler = ActivityScheduler(max_daily_hours=16.0)
 
         while running:
-            if not scheduler.can_continue():
+            # `while`, not `if`. `next_break_duration()` answers for the moment
+            # it is asked, and waking is a new moment: the window may still be
+            # open (a short draw, a deadline-trimmed sleep, an interruption), or
+            # the rolling cap may still be over. An `if` falls straight through
+            # to the work below without asking again, so the one case the break
+            # exists to prevent -- working inside the window -- is the one it
+            # lets through. Bounded: every duration is positive while the
+            # scheduler refuses, and it stops refusing once the window closes.
+            while not scheduler.can_continue():
                 break_s = scheduler.next_break_duration()
                 await asyncio.sleep(break_s)
                 scheduler.start_session()
@@ -82,7 +90,9 @@ class ActivityScheduler:
         # phase across accounts is the tell).
         self._night_start_hour = 23.0
         self._night_end_hour = 6.0
-        self._night_break_band = (6.0, 9.0, 7.0)
+        # Host-local until a page tells us otherwise; see
+        # `set_server_utc_offset_minutes`.
+        self._server_utc_offset_minutes: int | None = None
 
         # Effective caps: jittered at-or-below the configured hard ceilings so
         # the actual stop point varies instead of landing on the exact same
@@ -146,6 +156,35 @@ class ActivityScheduler:
     def _daily_cap_band(self) -> tuple[float, float]:
         return (self.max_daily_hours * self._DAILY_CAP_LO_FRAC, self.max_daily_hours)
 
+    def set_server_utc_offset_minutes(self, minutes: int | None) -> None:
+        """Tell the scheduler what time it is where the GAME is.
+
+        The night window decides when this account sleeps, which is the one
+        behaviour meant to be indistinguishable from a person's. It ran on
+        ``datetime.now()`` -- the HOST's clock -- and the host need not share a
+        timezone with the server: this codebase's own #76 work established that
+        Europe 2 runs UTC+1 while stamping its page epochs in UTC, and the
+        operator's machine has been on a third offset more than once.
+
+        A host three hours out puts the account's "night" three hours out, so it
+        goes quiet while the server's day is busiest and works through the hours
+        its neighbours are asleep. That is worse than having no night window:
+        an account awake at 04:00 server time every single night is a pattern,
+        not an absence of one.
+
+        Passing None leaves it on host-local time, which is the old behaviour
+        and the only honest answer before any page has stated the offset.
+        """
+        self._server_utc_offset_minutes = minutes
+
+    def _server_now(self) -> datetime:
+        """Now, on the game's clock when we know it and the host's when we do not."""
+        if self._server_utc_offset_minutes is None:
+            return datetime.now()
+        return datetime.now(UTC).replace(tzinfo=None) + timedelta(
+            minutes=self._server_utc_offset_minutes
+        )
+
     def seed_circadian(self, identity: str) -> None:
         """Bind night-rest phase + wake duration to a stable persona identity.
 
@@ -157,10 +196,11 @@ class ActivityScheduler:
         rng = random.Random(identity)
         self._night_start_hour = rng.uniform(22.0, 24.0)
         self._night_end_hour = rng.uniform(5.0, 8.0)
-        lo = rng.uniform(5.5, 6.5)
-        hi = rng.uniform(8.5, 9.5)
-        mode = rng.uniform(lo + 0.5, hi - 0.5)
-        self._night_break_band = (lo, hi, mode)
+        # Three further draws bounded `_night_break_band`, which nothing has
+        # read since `next_break_duration` started delegating to
+        # `seconds_until_rest_ends`. They were the last statements in this
+        # method, so nothing downstream depended on where they left the RNG and
+        # deleting them shifts no account's phase.
 
     def _sample_continuous_cap(self) -> float:
         """Effective continuous-session cap, jittered below the hard ceiling.
@@ -209,6 +249,33 @@ class ActivityScheduler:
         if not math.isfinite(value) or not (low <= value <= high):
             return None
         return value
+
+    @property
+    def seconds_idle(self) -> float:
+        """How long since this account last did anything.
+
+        The same quantity :meth:`_auto_reset_session_if_idle` compares against
+        ``min_break_minutes`` to decide a new logical session has begun, exposed
+        so a caller can ask the question WITHOUT the side effect of answering it
+        -- reading it must not reset the counter it is reading.
+
+        A caller that has been away this long is arriving, not continuing, and
+        should arrive the way a person does: on a landing page, not on the form
+        it came for.
+        """
+        return time.monotonic() - self._last_activity_time
+
+    @property
+    def is_new_session(self) -> bool:
+        """True when the idle gap is long enough to count as arriving afresh.
+
+        Shares `min_break_minutes` with the auto-reset above rather than picking
+        its own threshold, so "the scheduler thinks this is a new session" and
+        "the navigator thinks this is an arrival" can never disagree.
+        """
+        if not self.enabled:
+            return False
+        return self.seconds_idle >= self.min_break_minutes * 60
 
     def _auto_reset_session_if_idle(self) -> None:
         """Auto-reset session counter if enough idle time has passed."""
@@ -336,11 +403,20 @@ class ActivityScheduler:
 
     # ── Public API ───────────────────────────────────────────────────
 
-    def can_continue(self) -> bool:
-        """Check if we're within rolling-24h and continuous limits.
+    def quota_allows(self) -> bool:
+        """The CAPS only: rolling-24h and continuous session. Not the clock.
 
-        Returns:
-            True if we can keep working, False if break needed.
+        Split out from :meth:`can_continue` because the two questions have
+        different answers to one particular caller. "Have I worked too long"
+        is a quota and nobody may override it. "Is it 4am" is a schedule, and
+        an operator sitting at the keyboard at 4am is the one person entitled
+        to say it does not apply to them -- which the execute endpoint's
+        ``i_am_awake`` offers in so many words.
+
+        With one predicate the override could not work: the endpoint waved the
+        night check through at the door and then hit it again, wearing a
+        quota's name, at the budget check two lines later. See
+        :meth:`can_continue` for who should still ask the combined question.
         """
         if not self.enabled:
             return True
@@ -373,6 +449,43 @@ class ActivityScheduler:
 
         return True
 
+    def can_continue(self) -> bool:
+        """Quota AND schedule: what a loop running unattended should ask.
+
+        Every loop in the app goes through here, which is why the night window
+        is checked here. Before that, `next_break_duration` had a correct night
+        branch that slept 6-9h and nothing could reach it: the trigger never
+        fired at night, so the only way in was for the daily budget to run out
+        during the window by coincidence. The machinery was written, tested and
+        unreachable, and every loop ran straight through to morning.
+
+        Which is the signal the rest of the stealth layer cannot cover for.
+        Impersonated TLS, log-normal delays, a drifting session tempo and
+        truthful Referers all describe how a single request looks; none of them
+        says anything about an account that has never once been idle at 4am.
+
+        The one caller that should ask :meth:`quota_allows` instead is a run
+        whose operator has stated they are present -- and only that run, because
+        this is per-account state shared with every concurrent loop. Choosing
+        the narrower question at the call site keeps the override scoped to the
+        operation that was granted it, rather than switching something off
+        account-wide for as long as the run lasts.
+        """
+        if not self.quota_allows():
+            return False
+
+        # The account's night. This is a SCHEDULE, not a quota -- the caps ask
+        # "have I worked too long", this asks "is it 4am".
+        if self.is_rest_window():
+            logger.info(
+                "Night-rest window (%.1f -> %.1f): pausing until it closes",
+                self._night_start_hour,
+                self._night_end_hour,
+            )
+            return False
+
+        return True
+
     def is_rest_window(self, now: datetime | None = None) -> bool:
         """True during this account's night-rest window (wrap-aware).
 
@@ -385,7 +498,7 @@ class ActivityScheduler:
         """
         if not self.enabled:
             return False
-        now = now or datetime.now()
+        now = now or self._server_now()
         # Second precision, matching seconds_until_rest_ends, so the two share
         # one boundary and can't disagree about the window edge.
         hour = now.hour + now.minute / 60.0 + now.second / 3600.0
@@ -413,7 +526,7 @@ class ActivityScheduler:
         # two straddle the window-end boundary: is_rest_window(now1) True, then
         # hour(now2) just past the end, so (end - hour) % 24 wraps to ~24h and
         # the account slept for a day. One instant closes that.
-        now = now or datetime.now()
+        now = now or self._server_now()
         if not self.is_rest_window(now):
             return 0.0
         hour = now.hour + now.minute / 60.0 + now.second / 3600.0
@@ -422,20 +535,39 @@ class ActivityScheduler:
             # Defensive net for the exact-boundary instant: resume, never a
             # full-day sleep.
             return 0.0
-        buffer_s = random.uniform(0.0, 2700.0)  # up to 45 min so wake isn't a constant
+        # Up to ~45 min so a wake is not a constant -- log-normal rather than
+        # uniform, for the reason `stealth/timing.py` opens with. A flat band
+        # here means every account in a fleet wakes with the same shaped delay,
+        # and a wake time is one of the few events an observer gets cleanly.
+        buffer_s = min(random.lognormvariate(math.log(600.0), 0.9), 2700.0)
         return remaining_h * 3600.0 + buffer_s
 
-    def next_break_duration(self) -> float:
+    def next_break_duration(self, now: datetime | None = None) -> float:
         """How long to break (in seconds).
 
-        Short break (mid-session): min_break_minutes + random jitter
+        Night break: to the end of the rest window (see seconds_until_rest_ends)
         Long break (rolling limit near): 1-3 hours
-        Night break (if past 11pm local): 6-9 hours
+        Short break (mid-session): min_break_minutes + random jitter
+
+        *now* is injectable for the same reason :meth:`is_rest_window` and
+        :meth:`seconds_until_rest_ends` take it: all three have to agree about
+        where the window is, and a method that reads the clock itself can only
+        be tested by monkeypatching time -- which is how two of them would come
+        to disagree about the edge without anything failing.
         """
         if not self.enabled:
             return 0.0
 
-        now = datetime.now()
+        # The GAME's clock, like `is_rest_window` and `seconds_until_rest_ends`
+        # -- and this method resolves `now` for both of them, so getting it from
+        # `datetime.now()` here overrode their own correct defaults rather than
+        # merely differing from them. With the host three hours ahead of the
+        # server, `can_continue` read 04:00 and refused to work while this read
+        # 07:00, found no rest window, and handed back a ten-minute daytime
+        # break with two hours of night still to run. The caller slept it and
+        # carried on. The docstring above already required all three to agree
+        # about where the window is; this is the line that did not.
+        now = now or self._server_now()
         rolling_hours = self._rolling_24h_seconds() / 3600.0
 
         # Triangular (not uniform) so the duration histogram tapers to zero at
@@ -448,10 +580,21 @@ class ActivityScheduler:
         # start hour of 24.0) so this duration path can never disagree with the
         # detection path about where the window is.
         if self.is_rest_window(now):
-            lo, hi, mode = self._night_break_band
-            duration_h = random.triangular(lo, hi, mode)
-            logger.info("Night break: sleeping %.1fh", duration_h)
-            return duration_h * 3600.0
+            # Delegated, not re-derived. `seconds_until_rest_ends` already sleeps
+            # to the END of the window plus a one-sided buffer, and already
+            # carries the reasoning for it: a 6-9h draw measured from wherever
+            # the loop happens to be standing could land short -- waking it back
+            # INSIDE its own night to fire a burst, which is worse than not
+            # sleeping, because now there is activity at 4am AND a gap that looks
+            # deliberate -- or land hours past morning and waste the day.
+            #
+            # This branch used to make that 6-9h draw itself. Adding a second
+            # jitter here would not have been belt and braces, it would have been
+            # two independent samples of the same decision, which is how a pause
+            # comes to disagree with the window it was computed from.
+            duration_s = self.seconds_until_rest_ends(now)
+            logger.info("Night break: sleeping %.1fh to the end of the window", duration_s / 3600.0)
+            return duration_s
 
         # Rolling limit approaching (>85% used): longer break
         if rolling_hours >= self.max_daily_hours * 0.85:

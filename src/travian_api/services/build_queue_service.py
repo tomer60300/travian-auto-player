@@ -792,8 +792,24 @@ class BuildQueueService:
             # Stealth: activity scheduling — check if we need a break
             try:
                 scheduler = self.http_client.activity_scheduler
-                if not scheduler.can_continue():
+                # `while`, not `if`: waking is the moment to ask again.
+                #
+                # `next_break_duration()` answers for the instant it is called,
+                # and this loop then slept it and went straight back to building.
+                # Anything that made the sleep end early or the refusal outlast
+                # it -- a rolling cap still over after a 1-3h break, an offset
+                # learned mid-sleep that moved the window -- resumed the account
+                # inside the very window the break was taken for. Re-asking costs
+                # one predicate and cannot spin: every duration is positive while
+                # the scheduler refuses, and `seconds_until_rest_ends` returns 0
+                # the moment the window closes.
+                while not scheduler.can_continue():
                     break_s = scheduler.next_break_duration()
+                    if break_s <= 0:
+                        # Refusing with nothing to wait for is a contradiction no
+                        # branch produces today. Leave rather than spin on it --
+                        # a busy loop here would hammer the game.
+                        break
                     self._report(
                         f"Activity limit reached. Taking a break for {break_s / 60:.0f} minutes..."
                     )

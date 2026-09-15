@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from pathlib import Path
 
@@ -159,8 +160,22 @@ def test_throttler_gap_is_right_skewed_not_uniform():
     # Floor preserved: a gap is never below the configured minimum, so no
     # spike piles up below min_gap_s.
     assert min(samples) >= 1.0
-    # Tail soft-capped so a single draw can't stall a loop.
-    assert max(samples) <= 2.5 * 3.0
+    # Tail soft-capped so a single draw can't stall a loop -- but the cap is now
+    # the DISTRACTION ceiling, not `max_gap_s * 3`. A recorded human session's
+    # longest gap was 380.7s, mid-session with the tab still open, and the old
+    # bound made that impossible to emit: our traffic was continuous purposeful
+    # activity from the first request to the last. See
+    # test_throttler_is_bimodal.py.
+    assert max(samples) <= 1.0 + 600.0
+    # The BODY of the distribution is still inside the configured band, and the
+    # only draws that escape it are distractions -- at this account's own rate,
+    # not more. Asserting a fixed percentile instead made this test depend on
+    # where that per-account rate happened to land.
+    escaped = sum(1 for s in samples if s > 2.5 * 3.0) / n
+    assert escaped <= throttler.distraction_chance * 1.4, (
+        f"{escaped:.4f} of draws left the band, against a distraction rate of "
+        f"{throttler.distraction_chance:.4f}"
+    )
     # Right-skewed: a uniform distribution has mean == median; ours does not.
     assert mean > median + 0.02
     # Body stays in the lower half of the configured band (median fraction is
@@ -376,9 +391,9 @@ def test_warmup_route_is_varied_bounded_and_coherent():
     import random
 
     from travian_api.stealth.human_delay import HumanDelay
-    from travian_api.stealth.navigator import _WARMUP_MAX_STEPS, PageNavigator
+    from travian_api.stealth.navigator import _WARMUP_MAX_STEPS, PAGE_PATHS, PageNavigator
 
-    allowed = {"/dorf1.php", "/dorf2.php", "/statistiken.php", "/spieler.php", "/karte.php"}
+    allowed = set(PAGE_PATHS.values())
 
     random.seed(2024)
     sequences = []
@@ -398,7 +413,10 @@ def test_warmup_route_is_varied_bounded_and_coherent():
         assert 1 <= len(seq) <= 1 + _WARMUP_MAX_STEPS
         # Every visited page is a coherent top-level page (no impossible jump).
         for url in seq:
-            assert url.split("?")[0] in allowed
+            # Only the village selector is stripped. The troop overview IS its
+            # query string, so splitting on "?" would accept any /build.php at
+            # all -- a marketplace, a rally point, someone's building page.
+            assert re.sub(r"[?&]newdid=\d+", "", url) in allowed
         if any(u.startswith("/dorf2.php") for u in seq):
             dorf2_present += 1
 
@@ -676,9 +694,9 @@ def test_idle_browse_is_persona_weighted_not_uniform():
     from collections import Counter
 
     from travian_api.stealth.human_delay import HumanDelay
-    from travian_api.stealth.navigator import PageNavigator
+    from travian_api.stealth.navigator import PAGE_PATHS, PageNavigator
 
-    allowed = {"/dorf1.php", "/dorf2.php", "/statistiken.php", "/spieler.php", "/karte.php"}
+    allowed = set(PAGE_PATHS.values())
 
     def freqs(identity: str) -> Counter:
         http = _RecordingHttp()
@@ -696,7 +714,7 @@ def test_idle_browse_is_persona_weighted_not_uniform():
 
         asyncio.run(draw())
         for url in http.urls:
-            assert url.split("?")[0] in allowed  # no impossible page
+            assert re.sub(r"[?&]newdid=\d+", "", url) in allowed  # no impossible page
         return Counter(u.split("?")[0] for u in http.urls)
 
     a = "Chrome/133|en-US|https://ts2.x1.europe.travian.com|saltAAAA"
@@ -780,8 +798,12 @@ def test_idle_browse_uses_markov_transition_from_current_page():
 
     # _page_key maps paths back to page names (or None for non-top-level pages).
     assert nav._page_key("/dorf1.php?newdid=5") == "dorf1"
-    assert nav._page_key("/statistiken.php") == "statistiken"
+    assert nav._page_key("/statistics") == "statistics"
+    assert nav._page_key("/build.php?gid=19") == "troops"
     assert nav._page_key("/build.php?id=12") is None
+    # The troop overview is the one page whose query string is its identity, so
+    # every OTHER /build.php must stay unrecognised rather than inheriting it.
+    assert nav._page_key("/build.php?id=30&gid=17&t=3") is None
     assert nav._page_key(None) is None
 
     # _next_idle_page is a pure transition over pages (never returns stop/None),
@@ -790,13 +812,13 @@ def test_idle_browse_uses_markov_transition_from_current_page():
     from collections import Counter
 
     after_dorf1 = Counter(nav._next_idle_page("dorf1") for _ in range(4000))
-    after_spieler = Counter(nav._next_idle_page("spieler") for _ in range(4000))
+    after_report = Counter(nav._next_idle_page("report") for _ in range(4000))
     assert None not in after_dorf1
     assert set(after_dorf1) <= set(_WARMUP_PAGES)
     # dorf1 never self-loops to a *guaranteed* page; just assert the two
     # source pages induce different next-page distributions (Markov structure).
     da = {p: after_dorf1[p] / 4000 for p in _WARMUP_PAGES}
-    ds = {p: after_spieler[p] / 4000 for p in _WARMUP_PAGES}
+    ds = {p: after_report[p] / 4000 for p in _WARMUP_PAGES}
     l1 = sum(abs(da[p] - ds[p]) for p in _WARMUP_PAGES)
     assert l1 > 0.05
 
@@ -809,13 +831,19 @@ def test_scheduler_circadian_is_persona_seeded_and_distinct():
     an identical wake-duration CDF — a cross-account clustering tell. seed_circadian
     binds them to the persona: stable per account, distinct across accounts,
     within sane bounds. Unseeded defaults preserve the legacy 23:00-06:00 window.
+
+    `_night_break_band` used to be asserted here too. It was written and never
+    read -- `next_break_duration` has delegated to `seconds_until_rest_ends`
+    since before this test was written -- so the assertions pinned a value that
+    could not affect anything. Dead state with a test on it is worse than dead
+    state: it reads as covered.
     """
     from travian_api.stealth.scheduler import ActivityScheduler
 
     def circadian(identity: str) -> tuple:
         s = ActivityScheduler(max_continuous_hours=6.0, max_daily_hours=16.0)
         s.seed_circadian(identity)
-        return (s._night_start_hour, s._night_end_hour, s._night_break_band)
+        return (s._night_start_hour, s._night_end_hour)
 
     a = "Chrome/133|en-US|https://ts2.x1.europe.travian.com|saltAAAA"
     b = "Chrome/131|de-DE|https://ts1.x1.travian.de|saltBBBB"
@@ -823,18 +851,14 @@ def test_scheduler_circadian_is_persona_seeded_and_distinct():
     assert circadian(a) == circadian(a)  # stable per account
     assert circadian(a) != circadian(b)  # distinct across accounts
 
-    start, end, (lo, hi, mode) = circadian(a)
+    start, end = circadian(a)
     assert 22.0 <= start < 24.0
     assert 5.0 <= end < 8.0
-    assert 5.5 <= lo <= 6.5
-    assert 8.5 <= hi <= 9.5
-    assert lo < mode < hi
 
-    # Unseeded default preserves legacy behavior (23:00-06:00, (6,9,7) band).
+    # Unseeded default preserves legacy behavior (23:00-06:00).
     fresh = ActivityScheduler(max_continuous_hours=6.0, max_daily_hours=16.0)
     assert fresh._night_start_hour == 23.0
     assert fresh._night_end_hour == 6.0
-    assert fresh._night_break_band == (6.0, 9.0, 7.0)
 
 
 def test_http_client_penalty_jitter_band():
@@ -856,3 +880,41 @@ def test_http_client_penalty_jitter_band():
         assert abs(sum(samples) / len(samples) - base) < base * 0.02
         # Actually varies (not a point mass).
         assert len(set(samples)) > 100
+
+
+def test_the_night_window_runs_on_the_games_clock_when_it_is_known():
+    """Sleeping is the one behaviour meant to be indistinguishable from a
+    person's, and it was running on the HOST's clock.
+
+    The host need not share a timezone with the server — this codebase's own #76
+    work established Europe 2 runs UTC+1 while stamping page epochs in UTC. A
+    host three hours out puts the account's night three hours out: quiet while
+    the server's day is busiest, working through the hours its neighbours sleep.
+    That is worse than having no night window at all, because an account awake
+    at 04:00 server time every single night is a pattern rather than an absence
+    of one.
+    """
+    from datetime import datetime
+
+    from travian_api.stealth.scheduler import ActivityScheduler
+
+    s = ActivityScheduler(max_continuous_hours=6.0, max_daily_hours=16.0)
+
+    # Default: host-local, which is the only honest answer before any page has
+    # stated the offset.
+    assert s._server_utc_offset_minutes is None
+    assert s._server_now().tzinfo is None
+
+    # A stated offset moves the clock the window is evaluated against.
+    s.set_server_utc_offset_minutes(60)
+    on_game_clock = s._server_now()
+    s.set_server_utc_offset_minutes(60 + 180)
+    three_hours_east = s._server_now()
+
+    assert 2.9 < (three_hours_east - on_game_clock).total_seconds() / 3600.0 < 3.1
+
+    # And the window follows it rather than the machine.
+    s.set_server_utc_offset_minutes(None)
+    midnight = datetime(2026, 9, 15, 23, 30)
+    assert s.is_rest_window(midnight) is True
+    assert s.is_rest_window(datetime(2026, 9, 15, 14, 0)) is False

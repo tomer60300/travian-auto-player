@@ -352,9 +352,13 @@ class BuildingService:
             # canonical case. `tt=0` pins the request to the Management tab
             # where the upgrade URL/checksum always lives. Single-tab
             # buildings and resource fields ignore the parameter.
+            # `newdid` goes LAST, never first -- see the note in
+            # `stealth/navigator.py`. The game appends the village selector to
+            # the link it was already rendering; leading with it is a shape its
+            # own markup never produces.
             url = f"/build.php?id={slot_id}&tt=0"
             if village_id:
-                url = f"/build.php?newdid={village_id}&id={slot_id}&tt=0"
+                url = f"/build.php?id={slot_id}&tt=0&newdid={village_id}"
             build_html = await self.http_client.get_html(url)
             detail = parse_build_page(build_html, slot_id=slot_id)
             if not detail.checksum:
@@ -578,7 +582,7 @@ class BuildingService:
         """
         url = f"/build.php?id={slot_id}"
         if village_id:
-            url = f"/build.php?newdid={village_id}&id={slot_id}"
+            url = f"/build.php?id={slot_id}&newdid={village_id}"
         html = await self.http_client.get_html(url)
         return parse_empty_slot_buildings(html, slot_id=slot_id)
 
@@ -777,10 +781,13 @@ class BuildingService:
         Note:
             This is a TODO - video reward flow needs implementation
         """
-        # TODO: Implement video reward flow
-        # POST /api/v1/videofeature/open/buildingUpgrade -> {vrid, videoIframeUrl}
-        # POST /api/v1/videofeature/start -> {vrid}
-        # POST /api/v1/videofeature/ends -> {vrid, hash}
+        # TODO: Implement video reward flow. VideoRewardService already does
+        # this; see its class docstring for the shape recorded from a real
+        # watch, which is NOT what the comment here used to describe:
+        #   GET  /api/v1/videofeature/open/buildingUpgrade
+        #   GET  /fallback/v1/request-ad?game_id=<uuid>   (ih.adscale.de iframe)
+        #   POST /fallback/v1/reward                      (~34s later)
+        #   POST /api/v1/videofeature/ends
 
         raise NotImplementedError("Video reward flow not yet implemented")
 
