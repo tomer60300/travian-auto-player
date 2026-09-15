@@ -127,6 +127,41 @@ MARKETPLACE_READBACK_QUERY = (
     _MARKETPLACE_OPERATION + _TRADE_ROUTE_FIELDS_FRAGMENT + _ROUTE_FIELDS_FRAGMENT
 )
 
+# ── The second query the same success handler fires ───────────────────────────
+#
+# Both of the above were DERIVED: read out of the bundle and reassembled by
+# reasoning about what graphql-js `print` and `stripIgnoredCharacters` would do
+# to them. A full HAR of a live route create (Europe 2, gpack 624.6, 2026-09-15)
+# has since been taken, and the derivation was exactly right -- the 452-byte
+# body on the wire is `MARKETPLACE_READBACK_QUERY` character for character. The
+# constant is now observation rather than inference, which is the standard this
+# module holds every URL and body to.
+#
+# The same capture settled what the second call after a write is, which was the
+# open question that made `settle_after_write` a no-op. It is NOT the route list
+# again -- it is the marketplace's own model: merchants, capacity, and the
+# destination list. The create dialog fires it when it opens (07:25:13.391,
+# alongside the popup frame's images) and the create's success handler fires it
+# again (07:25:50.854, 1ms before the route-list read-back), both from
+# `main.js`'s `Y`. Reassembled below and checked against the capture's declared
+# `content-length: 381`, which it matches to the byte.
+_MERCHANTS_INFO_FRAGMENT = "fragment MerchantsInfoFields on MerchantsInfo{total capacity}"
+_DESTINATION_FIELDS_FRAGMENT = (
+    "fragment DestinationFields on Destination{id name x y cropOnly player{id}}"
+)
+_HARBOUR_FIELDS_FRAGMENT = "fragment HarbourFields on OwnVillage{isShore hasHarbour}"
+_DESTINATIONS_OPERATION = (
+    "{ownPlayer{village{marketplace{merchantsInfo{...MerchantsInfoFields}"
+    "tradeShipCapacity tradeShipsInfo{...MerchantsInfoFields}"
+    "destinations{...DestinationFields}}...HarbourFields}}}"
+)
+MARKETPLACE_DESTINATIONS_QUERY = (
+    _DESTINATIONS_OPERATION
+    + _MERCHANTS_INFO_FRAGMENT
+    + _DESTINATION_FIELDS_FRAGMENT
+    + _HARBOUR_FIELDS_FRAGMENT
+)
+
 # Gold Club rejection marker, matched case-insensitively (as FarmListService does).
 _GOLDCLUB_MARKERS = ("goldclub", "gold club", "plus.error")
 
@@ -627,42 +662,48 @@ class TradeRouteService:
         return html
 
     async def settle_after_write(self, village_id: int) -> None:
-        """Deliberately does nothing, and the reason is worth keeping.
+        """The marketplace re-read the page does alongside the route read-back.
 
-        The capture shows the page firing two more requests after a marketplace
-        write::
+        This was a documented no-op for three weeks, because the capture that
+        raised the question recorded the REQUEST but not its BODY, and a GraphQL
+        POST whose query we had to guess at is worse than an absent one: an
+        invented request is a positive anomaly and the cheapest possible thing
+        to alert on, while a missing one is an absence consistent with a dozen
+        innocent causes. The guess in question was that the second call repeats
+        the route-list query -- which would have put two identical GraphQL
+        bodies on the wire a millisecond apart, something no client does.
 
-            POST /api/v1/trade-routes
-              +0.1s  POST /api/v1/graphql      <- the read-back we do
-              +0.0s  POST /api/v1/graphql      <- a SECOND one
-              +0.0s  POST /api/v1/village/resources
+        A full HAR of a live route create (2026-09-15) says it is a different
+        query, and the guess would have been wrong. The write's success handler
+        fires two calls, one millisecond apart::
 
-        This method used to send both. It should not have, because we do not
-        know what either one SAYS.
+            POST /api/v1/trade-routes                       07:25:50.679  (201)
+              POST /api/v1/graphql  destinations, 381 B     07:25:50.854
+              POST /api/v1/graphql  route list,   452 B     07:25:50.855
 
-        The second GraphQL call is a different query -- the capture's own note
-        is that it "reloads the surrounding view", which the route-list query is
-        not. We re-sent the route-list query byte for byte, so every write
-        produced two identical GraphQL bodies zero milliseconds apart. No client
-        does that. It is not a missing request, it is a present and distinctive
-        one, and distinctive is the expensive kind.
+        The first is :data:`MARKETPLACE_DESTINATIONS_QUERY` -- merchants, ship
+        capacity, and the destination list, the state a completed send changes
+        and the form's own next render needs. The second is the read-back
+        :meth:`refresh_marketplace` already did. So the real footprint after a
+        write is two GraphQL calls with DIFFERENT bodies, and we now send that.
 
-        The resource refresh had the same problem one level down: the recorder
-        captured the request but not its body, and we sent ``{}`` on a guess.
-
-        So the choice was between emitting three requests of which two are
-        invented, and emitting one that is verbatim. An invented request is a
-        POSITIVE anomaly -- something on the wire that should not be there, and
-        the cheapest possible thing to alert on. A missing one is an absence,
-        which is weaker evidence and consistent with a dozen innocent causes.
-        Fewer beats distinctive.
-
-        Restoring this needs one thing: a capture of a marketplace write with
-        GraphQL bodies recorded, which is the same recorder that settled the
-        video flow, pointed at a route create. Until then the honest footprint
-        is the one we can quote.
+        The capture also closes the third request this docstring used to promise:
+        there is no ``POST /api/v1/village/resources`` in the burst. That URL was
+        observed once in an earlier session-wide recording and attributed here on
+        the strength of "it appeared near a write". It is not in this success
+        handler -- a request from the same callback would share the millisecond,
+        and nothing does. Nothing invented, so nothing to restore.
         """
-        return
+        await self.http_client.post_json(
+            "/api/v1/graphql",
+            # One key, for the same reason the read-back has one: the client
+            # passes no variables and JSON.stringify drops an undefined value.
+            {"query": MARKETPLACE_DESTINATIONS_QUERY},
+            referer=self._marketplace_referer.get(village_id),
+            # Fired off the back of a write the page just made, in the same
+            # callback -- the capture times both calls inside one millisecond.
+            consequential=True,
+        )
 
     async def refresh_marketplace(
         self, village_id: int, *, consequential: bool = False
@@ -751,19 +792,30 @@ class TradeRouteService:
         because "I could not check" and "nothing was created" are different
         answers and must not collapse into one.
         """
-        view = await self.refresh_marketplace(village_id, consequential=after_write)
         if after_write:
-            # The rest of what the page does after a write. Fired AFTER the read
-            # we actually use, so the answer this method returns is unaffected
-            # by it and a failure there cannot cost us the verification.
+            # The other half of what the page's success handler does, and it goes
+            # FIRST because that is the order the capture shows: destinations at
+            # …50.854, the route list at …50.855.
             #
-            # Gated on there having BEEN a write. This used to fire on every
-            # confirmation, including the pure stability re-reads -- so a
-            # resource-bar refresh went out with nothing to have moved the
-            # resources, which is a request in a context the client does not
-            # produce it in. That is the defect this method exists to fix,
-            # inverted.
-            await self.settle_after_write(village_id)
+            # Gated on there having BEEN a write. A standalone stability re-read
+            # is not a read-back, and firing a create-dialog's query with no
+            # create behind it is a request in a context the client never
+            # produces it in -- the defect this method exists to fix, inverted.
+            #
+            # Its answer is unused, so a failure here must not cost us the
+            # verification below: "the route was not created" and "the noise
+            # request 502'd" are answers a caller must never see collapsed.
+            try:
+                await self.settle_after_write(village_id)
+            except TravianError as exc:
+                logger.warning(
+                    "village %s: the post-write marketplace refresh failed (%s); "
+                    "continuing to the read-back, which is what actually verifies "
+                    "the write",
+                    village_id,
+                    exc,
+                )
+        view = await self.refresh_marketplace(village_id, consequential=after_write)
         from ..parsers.html_parser import MarketplaceModelInvalid, read_trade_routes_from_view
 
         try:

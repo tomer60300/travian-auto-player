@@ -16,6 +16,7 @@ The count did not change when it moved -- the shape did.
 """
 
 import asyncio
+import json
 import re
 from types import SimpleNamespace
 
@@ -24,6 +25,7 @@ import pytest
 from travian_api.exceptions import NetworkError
 from travian_api.services.distribution.allocation import Resource
 from travian_api.services.trade_route_service import (
+    MARKETPLACE_DESTINATIONS_QUERY,
     MARKETPLACE_READBACK_QUERY,
     PlannedRoute,
     TradeRouteService,
@@ -185,11 +187,11 @@ class _CountingClient:
         self.bodies.append((path, payload))
         if path == GRAPHQL:
             assert self._readbacks, "queue a read-back payload for every confirm"
-            # The page fires this query TWICE after a write -- recorded from a
-            # live session 2026-09-15 -- so a confirm consumes one queued
-            # answer and then re-reads. The second is the same query against
-            # the same state, so serving the same payload is faithful; popping
-            # it would make every test queue a duplicate to say nothing.
+            # A confirm after a write makes TWO graphql calls with different
+            # bodies -- the marketplace/destinations refresh and the route-list
+            # read-back (HAR, 2026-09-15). Only the second one's answer is used,
+            # so serving the last queued payload to both is faithful; popping for
+            # the first would make every test queue a throwaway to say nothing.
             if len(self._readbacks) == 1:
                 return self._served(self._readbacks[0])
             return self._served(self._readbacks.pop(0))
@@ -220,25 +222,30 @@ def _route(dest: int = 700) -> PlannedRoute:
     )
 
 
-class TestTheCanaryRunCostsFourRequests:
+class TestTheCanaryRunCostsFiveRequests:
     """Read the village, create one route, then settle the way the page does.
 
-    It was four until 2026-09-15, when a live session was recorded and the
-    page's own footprint turned out to be longer. After a marketplace write the
-    client fires the read-back query TWICE and then refreshes the resource bar::
+    Four of these were settled long ago. The fifth took two captures. A
+    session-wide recording showed a marketplace write followed by two GraphQL
+    calls and (it was thought) a resource refresh, but recorded none of their
+    bodies -- so the count was known and the content was not, and the branch
+    deliberately sent ONE call rather than guess at three. An invented request is
+    a positive anomaly and the cheapest possible thing to alert on; a missing one
+    is an absence consistent with a dozen innocent causes.
 
-        POST /api/v1/trade-routes
-          +0.1s  POST /api/v1/graphql
-          +0.0s  POST /api/v1/graphql
-          +0.0s  POST /api/v1/village/resources
+    A full HAR of a live create (2026-09-15) has the bodies, and the guess that
+    was avoided would have been wrong twice over::
 
-    We did one read-back and never asked for the resource bar at all -- on any
-    write, ever. Which made the account one whose stock apparently never moves
-    when it ships, and whose per-write request count never varied.
+        POST /api/v1/trade-routes                    07:25:50.679  (201)
+          POST /api/v1/graphql  destinations 381 B   07:25:50.854
+          POST /api/v1/graphql  route list   452 B   07:25:50.855
 
-    Four was the RIGHT number for "the fewest requests that prove the write
-    landed". It was the wrong number for "what this page does", and this file is
-    about the second.
+    The second call is not the read-back repeated -- it is the marketplace's own
+    model, the one the create dialog loads when it opens. And there is no
+    ``village/resources`` in the burst at all; a request from that same callback
+    would share the millisecond, and nothing does.
+
+    So five, and every one of them quotable.
     """
 
     def test_a_read_is_two_gets_in_the_human_order(self):
@@ -257,42 +264,66 @@ class TestTheCanaryRunCostsFourRequests:
         assert client.calls == [("POST", "/api/v1/trade-routes")]
         assert client.waits, "a write with no pacing delay is a burst of one"
 
-    def test_a_confirmation_is_one_graphql_call_and_no_page_load(self):
+    def test_a_confirmation_is_two_graphql_calls_and_no_page_load(self):
         """Refetching the model the open page runs on is not a navigation, so it
         must not walk to the page or reload it.
 
-        One call, not three. The page fires two more behind a write -- a second
-        GraphQL query and a resource-bar refresh -- and we sent both for a while.
-        We should not have: the second query is a DIFFERENT query whose text was
-        never recorded, so we re-sent the route-list one byte for byte and
-        produced two identical GraphQL bodies zero milliseconds apart, which no
-        client does; and the resource refresh went out with a `{}` body that was
-        a guess. An invented request is a positive anomaly and the cheapest
-        thing to alert on; a missing one is an absence. See
-        `settle_after_write`.
+        Two calls, because the page's success handler makes two -- and they are
+        DIFFERENT queries, which is the whole reason this stayed at one for so
+        long. Sending the route-list query twice would have put two identical
+        bodies on the wire a millisecond apart, which no client does.
         """
         service, client = _service([], [_readback(20003, _route_row(1, 700))])
         asyncio.run(service.confirm_routes(20003, after_write=True))
 
-        assert client.calls == [("POST", GRAPHQL)]
+        assert client.calls == [("POST", GRAPHQL), ("POST", GRAPHQL)]
         assert not any(m == "GET" for m, _ in client.calls), "no navigation"
+
+    def test_the_two_calls_after_a_write_say_different_things(self):
+        """The defect that kept this a no-op, pinned so it cannot come back."""
+        service, client = _service([], [_readback(20003, _route_row(1, 700))])
+        asyncio.run(service.confirm_routes(20003, after_write=True))
+
+        sent = [body["query"] for path, body in client.bodies if path == GRAPHQL]
+        assert len(sent) == 2
+        assert sent[0] != sent[1], "two identical GraphQL bodies 1ms apart is a tell"
+        # And in the capture's order: destinations first, route list second.
+        assert sent[0].startswith("{ownPlayer{village{marketplace{merchantsInfo")
+        assert sent[1].startswith("{ownPlayer{id currentVillageId")
 
     def test_a_confirmation_with_no_write_behind_it_is_one_request(self):
         """The stability re-reads are not read-backs.
 
-        `settle_after_write` mimics what the page does AFTER A WRITE -- the
-        second read-back, and a resource-bar refresh because the write moved
-        resources. Firing it on a standalone re-read sends a resource refresh
-        with nothing to have moved the resources, which is a request in a
-        context the client does not produce it in: the defect the method exists
-        to fix, inverted. It used to fire on every confirmation.
+        `settle_after_write` sends the query the page fires WHEN A WRITE
+        SUCCEEDS -- the same one its create dialog loads on open. Firing that off
+        a standalone re-read puts a create-dialog request on the wire with no
+        create behind it, which is a request in a context the client never
+        produces it in: the defect the method exists to fix, inverted.
         """
         service, client = _service([], [_readback(20003, _route_row(1, 700))])
         asyncio.run(service.confirm_routes(20003))
 
         assert client.calls == [("POST", GRAPHQL)]
+        sent = [body["query"] for path, body in client.bodies if path == GRAPHQL]
+        assert sent == [MARKETPLACE_READBACK_QUERY], "the read-back, not the dialog's query"
 
-    def test_the_whole_canary_is_six_requests_in_this_exact_order(self):
+    def test_the_verification_survives_the_refresh_failing(self):
+        """The refresh's answer is unused, so its failure must not be reported as
+        "what was created is unknown" -- those are different answers."""
+        service, client = _service(
+            [],
+            [
+                NetworkError("the marketplace refresh fell over"),
+                _readback(20003, _route_row(1, 700)),
+            ],
+        )
+
+        confirmed = asyncio.run(service.confirm_routes(20003, after_write=True))
+
+        assert [r.route_id for r in confirmed] == [1]
+        assert client.calls == [("POST", GRAPHQL), ("POST", GRAPHQL)]
+
+    def test_the_whole_canary_is_five_requests_in_this_exact_order(self):
         service, client = _service(
             [VILLAGE_VIEW, EMPTY_MARKETPLACE],
             [_readback(20003, _route_row(1, 700))],
@@ -306,22 +337,29 @@ class TestTheCanaryRunCostsFourRequests:
             ("GET", MARKETPLACE_URL),
             ("POST", "/api/v1/trade-routes"),
             ("POST", GRAPHQL),
+            ("POST", GRAPHQL),
         ]
-        assert len(client.calls) == 4
+        assert len(client.calls) == 5
         assert [r.route_id for r in confirmed] == [1]
 
     def test_verifying_costs_exactly_one_request_more_than_not_verifying(self):
-        # The price of not guessing, and of looking like the page while doing
-        # it. One of the three is the verification; the other two are what the
-        # client does afterwards whether anyone is checking or not.
+        # The price of not guessing. TWO requests follow the write, but only one
+        # of them is the verification -- the other is what the page does after a
+        # create whether anyone is checking or not, so it is not charged to the
+        # decision to check.
         service, client = _service([VILLAGE_VIEW, EMPTY_MARKETPLACE], [_readback(20003)])
         asyncio.run(service.list_existing_routes(20003))
         asyncio.run(service.create_route(_route()))
         before = len(client.calls)
 
         asyncio.run(service.confirm_routes(20003, after_write=True))
+        after_write = len(client.calls) - before
 
-        assert len(client.calls) - before == 1
+        asyncio.run(service.confirm_routes(20003))
+        settling_only = after_write - (len(client.calls) - before - after_write)
+
+        assert after_write == 2
+        assert settling_only == 1, "the verification itself is one request"
 
 
 class TestTheReadBackIsTheQueryTheGameFires:
@@ -350,6 +388,36 @@ class TestTheReadBackIsTheQueryTheGameFires:
             "fragment RouteFields on TradeRoute{id enabled sendOnce"
             " carriedResources{lumber clay iron crop}departureAt arrivalAt repeat"
             " merchants ships useTradeShips}"
+        )
+
+    def test_the_derived_query_is_what_the_browser_actually_sent(self):
+        """Both constants were DERIVED -- read out of the bundle and reassembled
+        by reasoning about graphql-js `print` and `stripIgnoredCharacters`. The
+        2026-09-15 HAR carries the real bodies, with their own content-lengths,
+        and the derivation was exact.
+
+        Serialised compactly, because that is what `JSON.stringify` emits and
+        what the capture's `content-length` counts.
+        """
+        assert len(json.dumps({"query": MARKETPLACE_READBACK_QUERY}, separators=(",", ":"))) == 452
+        assert (
+            len(json.dumps({"query": MARKETPLACE_DESTINATIONS_QUERY}, separators=(",", ":"))) == 381
+        )
+
+    def test_the_post_write_refresh_is_the_marketplaces_own_model(self):
+        """Byte for byte off the wire, 07:25:50.854.
+
+        The page loads this when the create dialog OPENS and again when the
+        create succeeds -- merchants, ship capacity and the destination list,
+        which is exactly the state a completed send changes.
+        """
+        assert MARKETPLACE_DESTINATIONS_QUERY == (
+            "{ownPlayer{village{marketplace{merchantsInfo{...MerchantsInfoFields}"
+            "tradeShipCapacity tradeShipsInfo{...MerchantsInfoFields}"
+            "destinations{...DestinationFields}}...HarbourFields}}}"
+            "fragment MerchantsInfoFields on MerchantsInfo{total capacity}"
+            "fragment DestinationFields on Destination{id name x y cropOnly player{id}}"
+            "fragment HarbourFields on OwnVillage{isShore hasHarbour}"
         )
 
     def test_the_operation_carries_no_query_keyword(self):
