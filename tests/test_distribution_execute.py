@@ -390,7 +390,7 @@ class _FakeLiveSvc:
             return RouteActionResult(vid, 0, 0, self._delete_status, "delete unconfirmed (test)")
         return RouteActionResult(vid, 0, 0, "deleted")
 
-    async def confirm_routes(self, vid, *, map_span=None):
+    async def confirm_routes(self, vid, *, map_span=None, after_write=False):
         self.confirmed.append(vid)
         if vid in self._confirm_raises:
             from travian_api.exceptions import NetworkError
@@ -2266,7 +2266,7 @@ class TestTheMarketplaceIsSteadyBeforeAnythingIsDeleted:
                 super().__init__(**kw)
                 self._lagged = False
 
-            async def confirm_routes(self, vid, *, map_span=None):
+            async def confirm_routes(self, vid, *, map_span=None, after_write=False):
                 rows = await super().confirm_routes(vid, map_span=map_span)
                 if not self._lagged:
                     self._lagged = True
@@ -2306,7 +2306,7 @@ class TestTheMarketplaceIsSteadyBeforeAnythingIsDeleted:
                 super().__init__(**kw)
                 self._reads = 0
 
-            async def confirm_routes(self, vid, *, map_span=None):
+            async def confirm_routes(self, vid, *, map_span=None, after_write=False):
                 rows = await super().confirm_routes(vid, map_span=map_span)
                 self._reads += 1
                 if self._reads % 2 == 0 and rows:
@@ -2328,7 +2328,7 @@ class TestTheMarketplaceIsSteadyBeforeAnythingIsDeleted:
                 super().__init__(**kw)
                 self._reads = 0
 
-            async def confirm_routes(self, vid, *, map_span=None):
+            async def confirm_routes(self, vid, *, map_span=None, after_write=False):
                 rows = await super().confirm_routes(vid, map_span=map_span)
                 self._reads += 1
                 if self._reads % 2 == 0 and rows:
@@ -2419,7 +2419,7 @@ class _UnsettledPage(_AnswerDies):
         super().__init__(dead=dead, **kw)
         self._reads = 0
 
-    async def confirm_routes(self, vid, *, map_span=None):
+    async def confirm_routes(self, vid, *, map_span=None, after_write=False):
         rows = await super().confirm_routes(vid, map_span=map_span)
         self._reads += 1
         if self._reads == 1:
@@ -2597,7 +2597,7 @@ class _UnsettledAtOneOrigin(_AnswerDies):
         self._unstable = unstable
         self._reads_here = 0
 
-    async def confirm_routes(self, vid, *, map_span=None):
+    async def confirm_routes(self, vid, *, map_span=None, after_write=False):
         rows = await super().confirm_routes(vid, map_span=map_span)
         if vid != self._unstable:
             return rows
@@ -2684,7 +2684,7 @@ class _OneRowNeverShows(_FakeLiveSvc):
         self._hide_dest = hide_dest
         self._hide_minute = hide_minute
 
-    async def confirm_routes(self, vid, *, map_span=None):
+    async def confirm_routes(self, vid, *, map_span=None, after_write=False):
         rows = await super().confirm_routes(vid, map_span=map_span)
         return [
             e
@@ -2858,7 +2858,7 @@ class TestARestoreIsCompensationNotForwardProgress:
                 super().__init__(**kw)
                 self._reads = 0
 
-            async def confirm_routes(self, vid, *, map_span=None):
+            async def confirm_routes(self, vid, *, map_span=None, after_write=False):
                 rows = await super().confirm_routes(vid, map_span=map_span)
                 self._reads += 1
                 return rows[:-1] if self._reads % 2 == 1 else rows
@@ -6112,7 +6112,7 @@ class TestARefusedReplacementPutsTheOldRoutesBack:
                 super().__init__(**kw)
                 self._reads = 0
 
-            async def confirm_routes(self, vid, *, map_span=None):
+            async def confirm_routes(self, vid, *, map_span=None, after_write=False):
                 rows = await super().confirm_routes(vid, map_span=map_span)
                 self._reads += 1
                 if self._reads % 2 == 1:

@@ -5971,8 +5971,16 @@ async def post_revert_plan(
                     # naming a rejection -- stays in the else: there is nothing to
                     # look at, and looking would cost a request for no information.
                     try:
-                        after = await svc.confirm_routes(origin, map_span=body.map_span)
-                        requests_used += 1
+                        after = await svc.confirm_routes(
+                            origin, map_span=body.map_span, after_write=True
+                        )
+                        # Three, not one. A post-write confirmation is the
+                        # read-back plus the two requests the page fires behind
+                        # it (`settle_after_write`), and this figure is spent
+                        # against a daily activity ceiling shared with the farm
+                        # and oasis loops -- so under-counting here quietly
+                        # licenses THOSE to overspend.
+                        requests_used += 3
                     except (NetworkError, MarketplaceUnreadable) as exc:
                         problems.append(
                             f"village {origin}: disabled {len(plan.disable_ids)} route(s) "
@@ -6047,8 +6055,10 @@ async def post_revert_plan(
                 # is the same class of false outcome as an unverified create, and
                 # this endpoint exists to make an undo trustworthy.
                 try:
-                    left = await svc.confirm_routes(origin, map_span=body.map_span)
-                    requests_used += 1
+                    left = await svc.confirm_routes(
+                        origin, map_span=body.map_span, after_write=True
+                    )
+                    requests_used += 3  # read-back + the two the page fires behind it
                 except (NetworkError, MarketplaceUnreadable) as exc:
                     problems.append(
                         f"village {origin}: deleted the route(s) but could not re-read "
@@ -8180,7 +8190,7 @@ async def post_execute(
                             if disabled.status == "unverified":
                                 try:
                                     checked = await svc.confirm_routes(
-                                        origin, map_span=body.map_span
+                                        origin, map_span=body.map_span, after_write=True
                                     )
                                 except (NetworkError, MarketplaceUnreadable) as exc:
                                     read_back_error = str(exc)
@@ -8989,7 +8999,9 @@ async def post_execute(
                         or unverified_updates
                     ):
                         try:
-                            after = await svc.confirm_routes(origin, map_span=body.map_span)
+                            after = await svc.confirm_routes(
+                                origin, map_span=body.map_span, after_write=True
+                            )
                         except (NetworkError, MarketplaceUnreadable) as exc:
                             # "I could not check" is NOT "it failed". Say exactly
                             # that, and leave the routes reported as created --
@@ -10114,7 +10126,7 @@ async def post_execute(
                                 # an accepted create that produced nothing.
                                 try:
                                     _checked = await svc.confirm_routes(
-                                        origin, map_span=body.map_span
+                                        origin, map_span=body.map_span, after_write=True
                                     )
                                 except (NetworkError, MarketplaceUnreadable) as exc:
                                     trace.event(

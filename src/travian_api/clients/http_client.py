@@ -619,7 +619,12 @@ class HttpClient:
                 pass
 
     async def _stealth_pre_request(
-        self, url: str, request_type: str = "page", *, referer: str | None = None
+        self,
+        url: str,
+        request_type: str = "page",
+        *,
+        referer: str | None = None,
+        consequential: bool = False,
     ) -> Dict[str, str]:
         """Run stealth pre-request checks and return appropriate headers.
 
@@ -663,12 +668,13 @@ class HttpClient:
                 headers["X-Version"] = x_version
             return headers
 
-        # Throttle
-        # The class goes to the throttler as well as to the headers. It was
-        # resolved here already and kept to itself, so every request -- a page
-        # the operator navigates to and a read-back the page fires off the back
-        # of a write alike -- was paced as a human decision.
-        await self._throttler.wait(context=url, request_type=request_type)
+        # Throttle. Pacing follows the CALLER's stated intent, not the header
+        # shape -- see the note above `RequestThrottler._effective_gap`. Header
+        # shape and pacing answer different questions, and conflating them put
+        # every `/api/v1/*` call on a read-back's timing.
+        await self._throttler.wait(
+            context=url, request_type=request_type, consequential=consequential
+        )
 
         # Get browser-appropriate headers
         if request_type == "fetch":
@@ -1121,6 +1127,7 @@ class HttpClient:
         safe_to_retry: bool = True,
         request_type: str = "json",
         referer: str | None = None,
+        consequential: bool = False,
         _retry: int = 0,
     ) -> Dict[str, Any]:
         """Make a POST request with JSON data.
@@ -1150,7 +1157,9 @@ class HttpClient:
         # does not get one here: the transport sets it for a `json=` body, and
         # for_fetch's contract is that the caller owns that header.
         rt = request_type if request_type in ("xhr", "fetch") else "json"
-        headers = await self._stealth_pre_request(url, rt, referer=referer)
+        headers = await self._stealth_pre_request(
+            url, rt, referer=referer, consequential=consequential
+        )
         # The non-stealth header path returns Content-Type="" which would
         # bypass the `not in` form of this guard. `not headers.get(...)`
         # treats both "missing" and "empty string" identically.
@@ -1273,6 +1282,7 @@ class HttpClient:
         safe_to_retry: bool = True,
         request_type: str = "json",
         referer: str | None = None,
+        consequential: bool = False,
     ) -> Dict[str, Any]:
         """Make a DELETE request (JSON response expected).
 
@@ -1284,7 +1294,9 @@ class HttpClient:
             url = urljoin(self.base_url, url.lstrip("/"))
 
         rt = request_type if request_type in ("xhr", "fetch") else "json"
-        headers = await self._stealth_pre_request(url, rt, referer=referer)
+        headers = await self._stealth_pre_request(
+            url, rt, referer=referer, consequential=consequential
+        )
         # Set for BOTH shapes, not just xhr. The game's own API helper is a
         # single fetch() used for every verb, and it always sends
         # "application/json; charset=UTF-8". Leaving the fetch path to the
@@ -1385,6 +1397,7 @@ class HttpClient:
         safe_to_retry: bool = True,
         request_type: str = "json",
         referer: str | None = None,
+        consequential: bool = False,
     ) -> Dict[str, Any]:
         """Make a PUT request with a JSON body (JSON response expected).
 
@@ -1406,7 +1419,9 @@ class HttpClient:
             url = urljoin(self.base_url, url.lstrip("/"))
 
         rt = request_type if request_type in ("xhr", "fetch") else "json"
-        headers = await self._stealth_pre_request(url, rt, referer=referer)
+        headers = await self._stealth_pre_request(
+            url, rt, referer=referer, consequential=consequential
+        )
         # Set for BOTH shapes, not just xhr. The game's own API helper is a
         # single fetch() used for every verb, and it always sends
         # "application/json; charset=UTF-8". Leaving the fetch path to the
@@ -1626,6 +1641,7 @@ class HttpClient:
         skip_reauth: bool = False,
         safe_to_retry: bool = True,
         referer: str | None = None,
+        consequential: bool = False,
         request_type: str = "fetch",
     ) -> Dict[str, Any]:
         """A GET the page's own script would make, parsed as JSON.
@@ -1653,7 +1669,9 @@ class HttpClient:
         if not url.startswith("http"):
             url = urljoin(self.base_url, url.lstrip("/"))
 
-        headers = await self._stealth_pre_request(url, request_type, referer=referer)
+        headers = await self._stealth_pre_request(
+            url, request_type, referer=referer, consequential=consequential
+        )
 
         try:
             logger.debug(f"GET(json) {url}")
@@ -1737,6 +1755,7 @@ class HttpClient:
         skip_reauth: bool = False,
         safe_to_retry: bool = True,
         referer: str | None = None,
+        consequential: bool = False,
     ) -> str:
         """Make a GET request and return HTML.
 
@@ -1752,7 +1771,9 @@ class HttpClient:
         if not url.startswith("http"):
             url = urljoin(self.base_url, url.lstrip("/"))
 
-        headers = await self._stealth_pre_request(url, "page", referer=referer)
+        headers = await self._stealth_pre_request(
+            url, "page", referer=referer, consequential=consequential
+        )
 
         try:
             logger.debug(f"GET {url}")

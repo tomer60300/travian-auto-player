@@ -56,7 +56,7 @@ class TestXVersionPlacement:
         # Mirrors the real signature: the throttler now takes the request
         # class too, because it paces a page navigation and a read-back
         # differently (#stealth bimodality).
-        async def _no_throttle(context="", request_type="page"):
+        async def _no_throttle(context="", request_type="page", **kwargs):
             return 0.0
 
         client._throttler.wait = _no_throttle

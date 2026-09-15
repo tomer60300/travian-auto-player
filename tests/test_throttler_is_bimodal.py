@@ -39,56 +39,53 @@ def _throttler(**kw) -> RequestThrottler:
     return RequestThrottler(**kw)
 
 
-def _draws(t: RequestThrottler, request_type: str, n: int = 4000) -> list[float]:
-    return [t._effective_gap(request_type) for _ in range(n)]
+def _draws(t: RequestThrottler, consequential: bool, n: int = 4000) -> list[float]:
+    return [t._effective_gap(consequential) for _ in range(n)]
 
 
 class TestConsequentialRequestsAreNotDecisions:
-    """A page firing its own read-back does not stop to think first."""
+    """A page firing its own read-back does not stop to think first.
+
+    Which requests those ARE is the caller's to say. It used to be inferred
+    from the header shape -- json/xhr/fetch -- and `post_json` defaults to
+    "json", so every `/api/v1/*` call in this app was paced as page chatter: a
+    map pan, a tile click, a farm-list send, a trade-route create. See
+    `TestPacingFollowsIntentNotTransport`.
+    """
 
     def test_they_are_not_held_to_the_deliberate_floor(self):
         t = _throttler(min_gap_s=1.5)
-        below = [g for g in _draws(t, "fetch") if g < 1.5]
+        below = [g for g in _draws(t, True) if g < 1.5]
 
         assert len(below) > 3900, "almost every one should be under the old floor"
 
     def test_their_median_matches_the_recording(self):
-        """Recorded p50 for all traffic is 0.00s, p75 is 0.10s."""
+        """0.0-0.1s is where the capture puts a read-back after its write."""
         t = _throttler()
-        median = statistics.median(_draws(t, "fetch"))
+        median = statistics.median(_draws(t, True))
 
         assert 0.01 < median < 0.20, median
-
-    def test_every_consequential_class_is_treated_alike(self):
-        t = _throttler()
-        for kind in ("fetch", "xhr", "json"):
-            assert statistics.median(_draws(t, kind)) < 0.25, kind
 
     def test_they_are_never_exactly_zero(self):
         """Two requests sharing a timestamp to the microsecond is its own tell,
         and a hard zero would also defeat the ordering the caller relies on."""
-        assert all(g > 0.0 for g in _draws(_throttler(), "fetch"))
+        assert all(g > 0.0 for g in _draws(_throttler(), True))
 
 
 class TestDeliberateRequestsStillCostHumanTime:
     """The narrowing must not turn into "everything is fast now"."""
 
-    def test_a_page_navigation_still_respects_the_floor(self):
+    def test_a_navigation_still_respects_the_floor(self):
         t = _throttler(min_gap_s=1.5)
 
-        assert all(g >= 1.5 for g in _draws(t, "page"))
+        assert all(g >= 1.5 for g in _draws(t, False))
 
-    def test_a_form_submit_is_deliberate_too(self):
+    def test_the_default_is_deliberate(self):
+        """The safe default: pacing something too slowly costs time, pacing a
+        human decision at 0.06s costs the account."""
         t = _throttler(min_gap_s=1.5)
 
-        assert all(g >= 1.5 for g in _draws(t, "form"))
-
-    def test_an_unknown_class_is_treated_as_deliberate(self):
-        """The safe default: pacing something too slowly is survivable, pacing
-        a human decision at 0.06s is not."""
-        t = _throttler(min_gap_s=1.5)
-
-        assert all(g >= 1.5 for g in _draws(t, "something-new"))
+        assert all(t._effective_gap() >= 1.5 for _ in range(2000))
 
 
 class TestTheAccountIsSometimesDistracted:
@@ -115,7 +112,7 @@ class TestTheAccountIsSometimesDistracted:
         tail.
         """
         t = _throttler(distraction_chance=1.0)
-        draws = _draws(t, "page", n=400)
+        draws = _draws(t, False, n=400)
 
         assert 10.0 < statistics.median(draws) < 30.0
         assert max(draws) > 60.0, "the tail has to reach minutes, not just tens"
@@ -123,20 +120,20 @@ class TestTheAccountIsSometimesDistracted:
     def test_it_is_rare_enough_not_to_dominate_a_short_run(self):
         random.seed(20260915)
         t = _throttler()
-        long_ones = [g for g in _draws(t, "page", n=4000) if g > 20.0]
+        long_ones = [g for g in _draws(t, False, n=4000) if g > 20.0]
 
         assert 10 < len(long_ones) < 200, len(long_ones)
 
     def test_it_can_be_switched_off_entirely(self):
         t = _throttler(distraction_chance=0.0, max_gap_s=3.0)
 
-        assert all(g < 30.0 for g in _draws(t, "page"))
+        assert all(g < 30.0 for g in _draws(t, False))
 
     def test_consequential_requests_are_never_distracted(self):
         """The page's own chatter does not wander off; only the person does."""
         t = _throttler(distraction_chance=1.0)
 
-        assert all(g < 5.0 for g in _draws(t, "fetch"))
+        assert all(g < 5.0 for g in _draws(t, True))
 
 
 class TestTheBurstCapNoLongerFlagsAHuman:
@@ -278,3 +275,57 @@ class TestTheDistractionTailIsPerAccountToo:
         rates = [self._shape(f"account-{i}")[0] for i in range(200)]
 
         assert min(rates) < 0.022 < max(rates)
+
+
+class TestPacingFollowsIntentNotTransport:
+    """The regression this class exists for, and it was a bad one.
+
+    `_CONSEQUENTIAL` used to be `{"fetch", "xhr", "json"}` and the mode was read
+    off the header shape. `HttpClient.post_json` defaults to
+    `request_type="json"`, so EVERY `/api/v1/*` call in this app was paced as
+    the page's own chatter -- `map/position`, `map/tile-details`,
+    `farm-list/send`, `trade-routes`. A map pan and a tile click are decisions;
+    they are the class where a 0.06-second median is least defensible.
+
+    The evidence was misread in a specific and checkable way. The recording has
+    two columns: `all requests` (p50 0.00s) and `documents + API` (p50 0.90s).
+    The consequential branch cited the first. But `all requests` is carried by
+    1,265 locale bundles -- 84% of the capture, and requests this app
+    deliberately makes none of. Strip them: 1,631 - 1,265 = 366, which is the
+    documents-and-API column, p50 0.90s. Fifteen times what was being applied.
+
+    The same file's distraction analysis had it right the whole time, calling
+    the 364 documents-and-API requests "DELIBERATE".
+    """
+
+    def test_an_api_call_is_deliberate_unless_the_caller_says_otherwise(self):
+        """post_json's default request_type is "json"; that must not fast-path it."""
+        t = _throttler(min_gap_s=1.5)
+
+        assert all(t._effective_gap() >= 1.5 for _ in range(2000))
+
+    def test_the_gap_no_longer_depends_on_the_header_shape(self):
+        """Header shape and pacing answer different questions. Conflating them
+        is what let a default argument decide how fast we hit the game."""
+        import inspect
+
+        source = inspect.getsource(RequestThrottler._effective_gap)
+
+        assert "request_type" not in source
+
+    def test_a_scan_loop_cannot_outrun_a_human(self):
+        """The aggregate nobody was measuring.
+
+        `auto_scout_service` and `scout_ws` loop map/position with NO other
+        pacing layer -- no human_delay, no think delay. The throttler was the
+        only thing between requests, so its classification WAS the scan's
+        emitted rate. Under the old behaviour a 25-region scan fell from ~40s
+        to ~2s.
+
+        This asserts the sustained rate the way an observer would measure it:
+        total time for a run of requests, divided by the count.
+        """
+        t = _throttler(min_gap_s=1.5, max_gap_s=3.0, distraction_chance=0.0)
+        total = sum(t._effective_gap() for _ in range(200))
+
+        assert total / 200 >= 1.5, "a sweep must not sustain more than ~0.66 req/s"

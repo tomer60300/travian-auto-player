@@ -32,9 +32,22 @@ logger = logging.getLogger(__name__)
 # emits. 94% of that session's gaps fell BELOW this module's 1.5s minimum, and
 # its median for documents-and-API was 0.90s: our floor sat above their typical.
 #
-# `HttpClient` has always known which class a request is -- it picks the headers
-# from it -- and never told us.
-_CONSEQUENTIAL = frozenset({"fetch", "xhr", "json"})
+# Which mode a request is in is the CALLER's to state, not something to infer
+# from its header shape. Inferring it was wrong, and wrong in the dangerous
+# direction: `post_json` defaults to `request_type="json"`, so classifying
+# json/xhr/fetch as consequential put every `/api/v1/*` call in this app on a
+# 0.06-second median -- a map pan, a tile click, a farm-list send, a trade-route
+# create. Those are decisions. The percentile table above says so itself: its
+# consequential column is `all requests`, whose p50 of 0.00s is carried by the
+# 1,265 locale bundles that are 84% of the capture and that this app fetches
+# none of. Strip them and 1,631 - 1,265 = 366 remain, which is the
+# documents-and-API column -- p50 0.90s, fifteen times the median that was
+# being applied.
+#
+# So the default is DELIBERATE, and a caller opts a request into the fast lane
+# by passing `consequential=True`. That way forgetting to mark something paces
+# it too slowly, which costs time; the old default paced it too fast, which
+# costs the account.
 
 # Ceiling on a distraction pause. Above the 380.7s the recording's longest gap
 # measured, so the shape is not clipped where the evidence lives, and far below
@@ -206,16 +219,20 @@ class RequestThrottler:
         self._distraction_median_s = rng.uniform(12.0, 22.0)
         self._distraction_sigma = rng.uniform(1.0, 1.4)
 
-    async def wait(self, context: str = "", request_type: str = "page") -> float:
+    async def wait(
+        self, context: str = "", request_type: str = "page", *, consequential: bool = False
+    ) -> float:
         """Wait until it's safe to make the next request.
 
         Args:
             context: Optional description for logging (e.g., "upgrade building")
-            request_type: "page", "form", "json", "xhr" or "fetch" -- the class
-                the caller already resolved to choose its headers. Consequential
-                classes (see `_CONSEQUENTIAL`) are paced on a near-zero floor,
-                because the browser fires them off the back of something else
-                rather than deciding to.
+            request_type: "page", "form", "json", "xhr" or "fetch". Kept for
+                logging and for callers that pass it through; pacing no longer
+                reads it -- see the note above `_effective_gap`.
+            consequential: this request is the page's own chatter, fired off the
+                back of something else rather than decided on. Paced on a
+                near-zero floor. Defaults to False, because a request paced too
+                slowly costs time and one paced too fast costs the account.
 
         Returns:
             Actual seconds waited
@@ -265,7 +282,7 @@ class RequestThrottler:
             # correlated, not iid) but never below the hard floor.
             if self._last_request_time > 0:
                 elapsed = now - self._last_request_time
-                target_gap = self._effective_gap(request_type)
+                target_gap = self._effective_gap(consequential)
                 if elapsed < target_gap:
                     gap_wait = target_gap - elapsed
                     # A pause long enough for the operator to notice is a pause
@@ -295,7 +312,7 @@ class RequestThrottler:
 
             return waited
 
-    def _effective_gap(self, request_type: str = "page") -> float:
+    def _effective_gap(self, consequential: bool = False) -> float:
         """The target inter-request gap after session-tempo scaling.
 
         Tempo scales only the INCREMENT above the floor, never the whole gap:
@@ -305,12 +322,14 @@ class RequestThrottler:
         increment is non-negative and tempo is positive, so the result is never
         below the floor and the density there stays zero.
         """
-        if request_type in _CONSEQUENTIAL:
-            # The page's own chatter. Recorded p50 0.00s, p75 0.10s, so this is
-            # a small positive draw rather than a floor: enough that two
+        if consequential:
+            # The page's own chatter: a read-back fired off the back of a write,
+            # a resource bar refreshed because a write moved resources. In the
+            # capture these land 0.0-0.1s after the request that caused them.
+            # A small positive draw rather than a floor -- enough that two
             # requests never share a timestamp exactly, not enough to read as a
-            # decision. Tempo is not applied -- a browser firing a read-back
-            # does not get tired.
+            # decision. Tempo is not applied: a browser firing a read-back does
+            # not get tired.
             return random.lognormvariate(math.log(0.06), 0.9)
         target_gap = self._sample_gap()
         if self._tempo is not None:

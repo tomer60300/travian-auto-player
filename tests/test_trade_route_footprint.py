@@ -257,12 +257,12 @@ class TestTheCanaryRunCostsSixRequests:
         assert client.calls == [("POST", "/api/v1/trade-routes")]
         assert client.waits, "a write with no pacing delay is a burst of one"
 
-    def test_a_confirmation_is_graphql_only_with_no_page_load(self):
+    def test_a_confirmation_after_a_write_is_the_pages_whole_footprint(self):
         # Refetching the model the open page runs on is not a navigation at all,
-        # so it must not walk to the page OR reload it. Still true -- what
-        # changed is how many API calls the page makes once it is there.
+        # so it must not walk to the page OR reload it. What changed is how many
+        # API calls the page makes once it is there.
         service, client = _service([], [_readback(20003, _route_row(1, 700))])
-        asyncio.run(service.confirm_routes(20003))
+        asyncio.run(service.confirm_routes(20003, after_write=True))
 
         assert client.calls == [
             ("POST", GRAPHQL),
@@ -271,6 +271,21 @@ class TestTheCanaryRunCostsSixRequests:
         ]
         assert not any(m == "GET" for m, _ in client.calls), "no navigation"
 
+    def test_a_confirmation_with_no_write_behind_it_is_one_request(self):
+        """The stability re-reads are not read-backs.
+
+        `settle_after_write` mimics what the page does AFTER A WRITE -- the
+        second read-back, and a resource-bar refresh because the write moved
+        resources. Firing it on a standalone re-read sends a resource refresh
+        with nothing to have moved the resources, which is a request in a
+        context the client does not produce it in: the defect the method exists
+        to fix, inverted. It used to fire on every confirmation.
+        """
+        service, client = _service([], [_readback(20003, _route_row(1, 700))])
+        asyncio.run(service.confirm_routes(20003))
+
+        assert client.calls == [("POST", GRAPHQL)]
+
     def test_the_whole_canary_is_six_requests_in_this_exact_order(self):
         service, client = _service(
             [VILLAGE_VIEW, EMPTY_MARKETPLACE],
@@ -278,7 +293,7 @@ class TestTheCanaryRunCostsSixRequests:
         )
         asyncio.run(service.list_existing_routes(20003))
         asyncio.run(service.create_route(_route()))
-        confirmed = asyncio.run(service.confirm_routes(20003))
+        confirmed = asyncio.run(service.confirm_routes(20003, after_write=True))
 
         assert client.calls == [
             ("GET", "/dorf2.php?newdid=20003"),
@@ -300,7 +315,7 @@ class TestTheCanaryRunCostsSixRequests:
         asyncio.run(service.create_route(_route()))
         before = len(client.calls)
 
-        asyncio.run(service.confirm_routes(20003))
+        asyncio.run(service.confirm_routes(20003, after_write=True))
 
         assert len(client.calls) - before == 3
 

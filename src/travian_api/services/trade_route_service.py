@@ -655,12 +655,21 @@ class TradeRouteService:
         ):
             try:
                 await self.http_client.post_json(
-                    path, body, referer=self._marketplace_referer.get(village_id)
+                    path,
+                    body,
+                    referer=self._marketplace_referer.get(village_id),
+                    # Genuinely the page's own chatter: in the capture these land
+                    # 0.0-0.1s after the write that caused them, because no human
+                    # decided on them. This is one of the few places where that
+                    # is true -- see the note above `_effective_gap`.
+                    consequential=True,
                 )
             except Exception as exc:
                 logger.debug("%s skipped for village %s: %s", what, village_id, exc)
 
-    async def refresh_marketplace(self, village_id: int) -> dict[str, Any]:
+    async def refresh_marketplace(
+        self, village_id: int, *, consequential: bool = False
+    ) -> dict[str, Any]:
         """Re-read the route list the way the game's own client does. ONE request.
 
         Deliberately a separate method rather than a flag on open_marketplace:
@@ -696,6 +705,11 @@ class TradeRouteService:
             # account-wide last page would send it referred from whatever a
             # concurrent loop touched during the write's 3-20s pacing delay.
             referer=self._marketplace_referer.get(village_id),
+            # Consequential only when it IS a read-back -- fired off the back of
+            # a write the page just made, which the capture times at +0.1s. The
+            # same query issued as a standalone stability re-read is a decision
+            # somebody made, and is paced like one.
+            consequential=consequential,
         )
         view = response.get("data") if isinstance(response, dict) else None
         if not isinstance(view, dict):
@@ -717,7 +731,11 @@ class TradeRouteService:
         return view
 
     async def confirm_routes(
-        self, village_id: int, *, map_span: int = DEFAULT_MAP_SPAN
+        self,
+        village_id: int,
+        *,
+        map_span: int = DEFAULT_MAP_SPAN,
+        after_write: bool = False,
     ) -> list[ExistingRoute]:
         """What is REALLY on the marketplace now, read back after writing to it.
 
@@ -736,11 +754,19 @@ class TradeRouteService:
         because "I could not check" and "nothing was created" are different
         answers and must not collapse into one.
         """
-        view = await self.refresh_marketplace(village_id)
-        # The rest of what the page does after a write. Fired AFTER the read we
-        # actually use, so the answer this method returns is unaffected by it
-        # and a failure there cannot cost us the verification.
-        await self.settle_after_write(village_id)
+        view = await self.refresh_marketplace(village_id, consequential=after_write)
+        if after_write:
+            # The rest of what the page does after a write. Fired AFTER the read
+            # we actually use, so the answer this method returns is unaffected
+            # by it and a failure there cannot cost us the verification.
+            #
+            # Gated on there having BEEN a write. This used to fire on every
+            # confirmation, including the pure stability re-reads -- so a
+            # resource-bar refresh went out with nothing to have moved the
+            # resources, which is a request in a context the client does not
+            # produce it in. That is the defect this method exists to fix,
+            # inverted.
+            await self.settle_after_write(village_id)
         from ..parsers.html_parser import MarketplaceModelInvalid, read_trade_routes_from_view
 
         try:
