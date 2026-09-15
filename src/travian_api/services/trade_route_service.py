@@ -818,6 +818,15 @@ class TradeRouteService:
             # the whole plan on top of what is already running.
             raise MarketplaceUnreadable(f"village {village_id}: {exc}") from exc
         if got is None:
+            # Forget the slot before raising. A cached slot goes stale if the
+            # marketplace is ever demolished and rebuilt elsewhere, and the
+            # direct village switch -- which skips the village view -- is the
+            # one path that never re-learns it. So a stale slot would address
+            # the wrong building, fail to parse, and keep failing on exactly
+            # the same wrong URL forever. Dropping it here costs one village
+            # view on the retry and makes the failure self-correcting instead
+            # of permanent.
+            self._marketplace_slot.pop(village_id, None)
             # A soft block page, a login redirect or a gpack that moved the
             # model all land here. Any of them would otherwise read as "this
             # village has no routes".

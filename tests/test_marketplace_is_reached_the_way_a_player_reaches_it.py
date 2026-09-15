@@ -303,3 +303,63 @@ class TestTheStaleSlotLoadIsReplayedButNotAlways:
         from travian_api.services.trade_route_service import _STALE_SLOT_CHANCE
 
         assert 0.0 < _STALE_SLOT_CHANCE < 1.0
+
+
+class TestAStaleSlotDoesNotFailForever:
+    """The direct switch skips the village view, so it never re-learns a slot.
+
+    Which is fine until the slot is wrong. A marketplace demolished and rebuilt
+    on another slot leaves the cache pointing at whatever now stands there; the
+    read then addresses the wrong building, finds no trade-route model, and
+    fails closed -- correctly. But it would fail closed on exactly the same
+    wrong URL on every retry, forever, because the only code that refreshes the
+    cache is the path the cache lets us skip.
+    """
+
+    def test_an_unreadable_page_forgets_the_slot(self):
+        from travian_api.services.trade_route_service import MarketplaceUnreadable
+
+        service, client = _service({20003: 26})
+        _read(service, 20003)
+        assert service._marketplace_slot[20003] == 26
+
+        async def _no_model(path, **kw):
+            client.calls.append(path)
+            client.browser_headers.last_page_path = path
+            return "<html><body>not the marketplace</body></html>"
+
+        client.get_html = _no_model
+        try:
+            _read(service, 20003)
+        except MarketplaceUnreadable:
+            pass
+        else:  # pragma: no cover - the read must fail closed
+            raise AssertionError("an unreadable marketplace must raise")
+
+        assert 20003 not in service._marketplace_slot
+
+    def test_the_next_attempt_walks_the_village_view_again(self):
+        from travian_api.services.trade_route_service import MarketplaceUnreadable
+
+        service, client = _service({20003: 26})
+        _read(service, 20003)
+        real = client.get_html
+
+        async def _no_model(path, **kw):
+            client.calls.append(path)
+            client.browser_headers.last_page_path = path
+            return "<html><body>not the marketplace</body></html>"
+
+        client.get_html = _no_model
+        try:
+            _read(service, 20003)
+        except MarketplaceUnreadable:
+            pass
+
+        client.get_html = real
+        before = len(client.calls)
+        _read(service, 20003)
+
+        assert client.calls[before] == "/dorf2.php?newdid=20003", (
+            "the retry has to re-learn the slot, or it repeats the same wrong URL"
+        )
