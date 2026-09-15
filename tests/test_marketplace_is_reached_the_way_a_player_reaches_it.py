@@ -410,20 +410,32 @@ class TestReopeningTheSameMarketplaceIsAReload:
 
         assert client.calls[before:] == ["/build.php?id=26&gid=17&t=3&newdid=20003"]
 
-    def test_a_real_switch_still_refers_from_the_other_marketplace(self):
+    def test_a_real_switch_still_refers_from_the_other_marketplace(self, monkeypatch):
+        """`monkeypatch`, not a hand-rolled save/restore, and the reason is a bug
+        this test actually shipped.
+
+        It used to patch `mod.random.random` directly and restore it in a
+        `finally` that read the original back out of a fresh
+        ``import random as _r``. But `mod.random` IS the stdlib module, so the
+        patch was process-global, and by restore time `_r.random` was the lambda
+        that had just been installed. The restore assigned the lambda to itself
+        and `random.random()` returned 1.0 for the rest of the process.
+
+        Nothing here failed. The damage landed on whatever ran next in the same
+        interpreter -- `test_oasis_burst_size_is_right_skewed_and_bounded` saw
+        every draw take its top branch -- and only in SERIAL runs, because under
+        `-n 8` the two files land on different workers. Local runs are `-n 8`;
+        CI is serial, and CI is what caught it.
+        """
         import travian_api.services.trade_route_service as mod
 
         service, client = _service({20003: 26, 20004: 31})
         _read(service, 20004)
         _read(service, 20003)
         before = len(client.calls)
-        mod.random.random = lambda: 1.0  # stale load off
-        try:
-            _read(service, 20004)
-        finally:
-            import random as _r
+        monkeypatch.setattr(mod.random, "random", lambda: 1.0)  # stale load off
 
-            mod.random.random = _r.random
+        _read(service, 20004)
 
         assert client.referers[before] == (
             "https://example.invalid/build.php?id=26&gid=17&t=3&newdid=20003"
