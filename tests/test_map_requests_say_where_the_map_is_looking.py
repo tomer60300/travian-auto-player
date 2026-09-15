@@ -30,8 +30,14 @@ BASE = "https://example.invalid"
 VIEWPORT = re.compile(r"^https://example\.invalid/karte\.php(\?(zoom=1&)?x=-?\d+&y=-?\d+)?$")
 
 
-def _navigator(identity: str = "acct-a") -> PageNavigator:
-    nav = PageNavigator(SimpleNamespace(base_url=BASE), HumanDelay(enabled=False), enabled=True)
+def _navigator(identity: str = "acct-a", on: str = "/karte.php") -> PageNavigator:
+    """A navigator whose session is ON the map, which is the precondition for a
+    map Referer to be true at all -- see `TestItWillNotClaimAPageWeAreNotOn`."""
+    nav = PageNavigator(
+        SimpleNamespace(base_url=BASE, browser_headers=SimpleNamespace(last_page_path=on)),
+        HumanDelay(enabled=False),
+        enabled=True,
+    )
     nav.seed_routes(identity)
     return nav
 
@@ -162,3 +168,54 @@ class TestEveryMapCallSiteIsPinned:
                     line = text[: call.start()].count("\n") + 1
                     unpinned.append(f"{path.relative_to(src)}:{line}")
         assert not unpinned, "map XHRs with no viewport Referer:\n" + "\n".join(unpinned)
+
+
+class TestItWillNotClaimAPageWeAreNotOn:
+    """The pin has to be TRUE, which is the whole argument for pinning at all.
+
+    Not every caller of the tile APIs opens the map first. `target_resolver`
+    resolves a coordinate straight from wherever the session happens to be --
+    a village overview, a rally point, a report. Pinning `/karte.php?x=..&y=..`
+    there would state that the request came from a page this session never
+    loaded, which is a worse lie than the constant `/karte.php` it replaced,
+    and a self-inflicted one.
+
+    None means "inherit", and what gets inherited is the page we are actually
+    on.
+    """
+
+    def test_a_session_that_never_opened_the_map_pins_nothing(self):
+        nav = _navigator(on="/dorf1.php")
+
+        assert nav.map_viewport_referer(10, 81) is None
+
+    def test_a_session_that_has_not_loaded_anything_pins_nothing(self):
+        nav = _navigator(on=None)
+
+        assert nav.map_viewport_referer(10, 81) is None
+
+    def test_navigating_away_mid_sweep_stops_the_claim(self):
+        """A farm loop taking a page load during our pacing delay moves the
+        session off the map. The next tile request must notice."""
+        nav = _navigator()
+        nav.map_viewport_referer(10, 81)
+        nav._http.browser_headers.last_page_path = "/dorf2.php"
+
+        assert nav.map_viewport_referer(11, 82) is None
+
+    def test_coming_back_to_the_map_starts_the_walk_over(self):
+        """The viewport was dropped when we left, so the first request after
+        returning is referred from the bare page -- which is exactly what the
+        capture's first map XHR does."""
+        nav = _navigator()
+        nav.map_viewport_referer(10, 81)
+        nav._http.browser_headers.last_page_path = "/dorf2.php"
+        nav.map_viewport_referer(11, 82)
+        nav._http.browser_headers.last_page_path = "/karte.php"
+
+        assert nav.map_viewport_referer(12, 83) == f"{BASE}/karte.php"
+
+    def test_a_map_page_with_a_viewport_already_on_it_counts(self):
+        nav = _navigator(on="/karte.php?x=19&y=88")
+
+        assert nav.map_viewport_referer(10, 81) == f"{BASE}/karte.php"

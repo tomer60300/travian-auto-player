@@ -151,3 +151,72 @@ class TestUnknownStaysUnknown:
         asyncio.run(nav.navigate_to_resource_field(5, village_id=7))
 
         assert http.urls[-1] == "/build.php?id=5&newdid=7"
+
+
+class TestTheCacheCannotMixVillagesUp:
+    """`village_id=None` means "whichever village the session is on".
+
+    Which village that is changes -- every `?newdid=` GET anywhere in the app
+    moves it, and one HttpClient is shared by every service. So a cache keyed
+    `(None, slot)` holds one village's town hall and hands it to another
+    village's request for the same slot number, and the URL then names a
+    building that is not there.
+
+    Nothing fails visibly when it happens: the server resolves the page from
+    the slot and ignores the mismatched type, so the only symptom is a URL no
+    in-game link could have produced -- the exact defect this whole file exists
+    to prevent, reintroduced by the fix for it.
+    """
+
+    def test_a_village_less_visit_does_not_poison_the_next_one(self):
+        nav, http = _nav()
+        asyncio.run(nav.navigate_to_building(22, village_id=None))
+        assert http.urls[-1] == "/build.php?id=22&gid=24"
+
+        # A different village, whose slot 22 is something else entirely. The
+        # page says so; the cache must not overrule it.
+        http.page = (
+            "<html><body><div id='village_map'>"
+            "<a href='/build.php?id=22' class='level gid16' data-gid='16'></a>"
+            "</div></body></html>"
+        )
+        asyncio.run(nav.navigate_to_building(22, village_id=None))
+
+        assert http.urls[-1] == "/build.php?id=22&gid=16"
+
+    def test_a_named_village_is_still_remembered(self):
+        """The cache is not thrown away -- only the key that cannot be trusted."""
+        nav, http = _nav()
+        asyncio.run(nav.navigate_to_building(22, village_id=7))
+        http.browser_headers.last_page_path = "/dorf2.php?newdid=7"
+        before = len(http.urls)
+
+        asyncio.run(nav.navigate_to_building(36, village_id=7))
+
+        assert http.urls[before:] == ["/build.php?id=36&gid=20&newdid=7"]
+
+    def test_one_villages_layout_is_never_served_to_another(self):
+        nav, http = _nav()
+        asyncio.run(nav.navigate_to_building(22, village_id=7))
+
+        # Village 9's slot 22 is a different building. Its own page is read.
+        http.page = (
+            "<html><body><div id='village_map'>"
+            "<a href='/build.php?id=22' class='level gid16' data-gid='16'></a>"
+            "</div></body></html>"
+        )
+        asyncio.run(nav.navigate_to_building(22, village_id=9))
+
+        assert http.urls[-1] == "/build.php?id=22&gid=16&newdid=9"
+
+    def test_an_unnamed_village_never_reads_a_stale_type(self):
+        """Already on dorf2, so no fresh parse, and no village id to key on.
+        Bare is the only honest answer."""
+        nav, http = _nav()
+        asyncio.run(nav.navigate_to_building(22, village_id=7))
+        http.browser_headers.last_page_path = "/dorf2.php"
+        before = len(http.urls)
+
+        asyncio.run(nav.navigate_to_building(22, village_id=None))
+
+        assert http.urls[before:] == ["/build.php?id=22"]

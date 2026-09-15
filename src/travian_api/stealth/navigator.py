@@ -138,6 +138,24 @@ _WARMUP_STOP_BASE = 0.9
 _WARMUP_MAX_STEPS = 7
 
 
+def _slot_types(village_view_html: str) -> dict[int, int]:
+    """slot -> gid, read off a village view. Empty when the page does not parse.
+
+    Silent on failure by design: an unreadable village view is a problem for
+    whoever needs the building list, not for a navigation that has a
+    correct-if-plainer URL to fall back to.
+    """
+    try:
+        from ..parsers.html_parser import parse_dorf2
+
+        return {
+            int(b["slot_id"]): int(b["gid"]) for b in parse_dorf2(village_view_html) if b.get("gid")
+        }
+    except Exception as exc:  # pragma: no cover - parser robustness
+        logger.debug("Could not read slot types from the village view: %s", exc)
+        return {}
+
+
 class PageNavigator:
     """Simulates realistic page navigation patterns.
 
@@ -181,9 +199,9 @@ class PageNavigator:
         self._map_referer_zoomed = random.random() < 0.5
         # (village_id, slot) -> gid, read off village views we load anyway so a
         # building can be addressed the way its own link addresses it.
-        self._slot_gid: dict[tuple[Optional[int], int], int] = {}
+        self._slot_gid: dict[tuple[int, int], int] = {}
 
-    def map_viewport_referer(self, x: int, y: int) -> str:
+    def map_viewport_referer(self, x: int, y: int) -> Optional[str]:
         """The Referer for a map XHR about ``(x, y)``, then move the map there.
 
         A tile popup and a pan are fired by the map page's own JS, so their
@@ -208,10 +226,26 @@ class PageNavigator:
         because of the request, not before it. So the first XHR after opening
         the map is referred from the bare page, and every one after that names
         the previous tile, walking as the sweep walks.
+
+        **Returns None when the session is not on the map at all.** Not every
+        caller of the tile APIs opens karte.php first -- ``target_resolver``
+        resolves a coordinate straight from wherever the session happens to be
+        -- and pinning a map Referer there would state that the request came
+        from a page this session never loaded. That is a worse lie than the
+        constant it replaced, and a self-inflicted one: the whole argument for
+        pinning is that the Referer should be TRUE, so it cannot be pinned to
+        something untrue for tidiness. None means "inherit", and what is
+        inherited is whatever page we are actually on.
         """
+        base = self._http.base_url.rstrip("/")
+        here = self._http.browser_headers.last_page_path
+        if not here or not here.startswith("/karte.php"):
+            # Not on the map: no viewport to report, and nothing to move.
+            self._map_viewport = None
+            return None
+
         previous = self._map_viewport
         self._map_viewport = (x, y)
-        base = self._http.base_url.rstrip("/")
         if previous is None:
             return f"{base}/karte.php"
         px, py = previous
@@ -445,11 +479,23 @@ class PageNavigator:
         newdid = f"?newdid={village_id}" if village_id else ""
 
         # Visit dorf2 first (building overview)
+        just_read: dict[int, int] = {}
         if self._current_page != f"/dorf2.php{newdid}":
             html = await self._visit(f"/dorf2.php{newdid}", "viewing village buildings")
-            self._learn_slot_types(village_id, html)
+            just_read = _slot_types(html)
+            # Cached ONLY under a village we were actually told the id of.
+            # `village_id=None` means "whichever village the session is on",
+            # which changes -- so a `(None, slot)` key would hold village A's
+            # town hall and hand it to village B's request for slot 22. The
+            # page in hand is still used for this call; it is remembering it
+            # across calls that cannot be made safe.
+            if village_id is not None:
+                for slot, building_gid in just_read.items():
+                    self._slot_gid[(village_id, slot)] = building_gid
 
         if gid is None:
+            gid = just_read.get(slot_id)
+        if gid is None and village_id is not None:
             gid = self._slot_gid.get((village_id, slot_id))
 
         # Small click delay
@@ -463,23 +509,6 @@ class PageNavigator:
         if village_id:
             build_url = f"{build_url}&newdid={village_id}"
         await self._visit(build_url, f"opening building slot {slot_id}")
-
-    def _learn_slot_types(self, village_id: Optional[int], village_view_html: str) -> None:
-        """Cache slot -> gid from a village view we already loaded.
-
-        Free, and silent when the page does not parse: an unreadable village
-        view is a problem for whoever needs the buildings, not for a navigation
-        that has a correct-if-plainer URL to fall back to.
-        """
-        try:
-            from ..parsers.html_parser import parse_dorf2
-
-            for building in parse_dorf2(village_view_html):
-                gid = building.get("gid")
-                if gid:
-                    self._slot_gid[(village_id, int(building["slot_id"]))] = int(gid)
-        except Exception as exc:  # pragma: no cover - parser robustness
-            logger.debug("Could not read slot types from the village view: %s", exc)
 
     async def navigate_to_rally_point(self, village_id: Optional[int] = None) -> None:
         """Navigate to rally point as a human would.
