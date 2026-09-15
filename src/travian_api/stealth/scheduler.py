@@ -36,7 +36,15 @@ class ActivityScheduler:
         scheduler = ActivityScheduler(max_daily_hours=16.0)
 
         while running:
-            if not scheduler.can_continue():
+            # `while`, not `if`. `next_break_duration()` answers for the moment
+            # it is asked, and waking is a new moment: the window may still be
+            # open (a short draw, a deadline-trimmed sleep, an interruption), or
+            # the rolling cap may still be over. An `if` falls straight through
+            # to the work below without asking again, so the one case the break
+            # exists to prevent -- working inside the window -- is the one it
+            # lets through. Bounded: every duration is positive while the
+            # scheduler refuses, and it stops refusing once the window closes.
+            while not scheduler.can_continue():
                 break_s = scheduler.next_break_duration()
                 await asyncio.sleep(break_s)
                 scheduler.start_session()
