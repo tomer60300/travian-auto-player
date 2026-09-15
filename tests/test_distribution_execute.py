@@ -340,7 +340,15 @@ class _FakeLiveSvc:
                 raise ActivityBudgetExhausted("budget exhausted (test)")
             return True
 
-        self.http_client = SimpleNamespace(check_activity_budget=_check_budget)
+        # Both questions, because which one the handler asks now depends on
+        # `i_am_awake`. The fake answers them identically -- it models a QUOTA,
+        # and the difference between the two is the night window, which this
+        # fake has no notion of. A test that cares about that difference builds
+        # a real scheduler; see `TestTheAwakeOverrideReachesTheBudgetCheck`.
+        self.http_client = SimpleNamespace(
+            check_activity_budget=_check_budget,
+            check_activity_quota=_check_budget,
+        )
 
     def origin_lock(self, vid):
         @contextlib.asynccontextmanager
@@ -6442,3 +6450,98 @@ class TestAnOperatorAtTheKeyboardMayRunLate:
 
         res = _run_live(svc, _one_origin_account(), i_am_awake=True)
         assert res.stopped_early is True
+
+
+class TestTheAwakeOverrideReachesTheBudgetCheck:
+    """The override has to survive the check two lines after the one it clears.
+
+    Every test above stubs `check_activity_budget` with an independent fake, so
+    none of them could see what a real one does: `ActivityScheduler.can_continue`
+    answers "have I worked too long" AND "is it 4am" with one boolean, and
+    `check_activity_budget` raises on either. So `i_am_awake` waved the night
+    check through at the 409 and met it again immediately, wearing a quota's
+    name -- the run stopped with "Activity budget exhausted" against untouched
+    quotas and deferred every route.
+
+    The 409's own text offers `i_am_awake` as the way out. It had never worked.
+
+    These build a REAL scheduler and a REAL HttpClient budget check, pinned
+    inside the rest window with nothing spent, which is the only arrangement
+    that can tell the two questions apart.
+    """
+
+    @staticmethod
+    def _client_in_the_night(*, spent_hours: float = 0.0):
+        """A real budget check whose scheduler is mid-night and barely used."""
+        from travian_api.clients.http_client import HttpClient
+        from travian_api.stealth.scheduler import ActivityScheduler
+
+        sched = ActivityScheduler(enabled=True)
+        # 02:00-05:00 is unambiguously inside; pinned rather than seeded so the
+        # test does not depend on this account's drawn circadian phase.
+        sched._night_start_hour = 2.0
+        sched._night_end_hour = 5.0
+        sched.is_rest_window = lambda now=None: True
+        sched._rolling_24h_seconds = lambda: spent_hours * 3600.0
+
+        client = SimpleNamespace(_stealth_enabled=True, _activity_scheduler=sched)
+        client.check_activity_budget = HttpClient.check_activity_budget.__get__(client)
+        client.check_activity_quota = HttpClient.check_activity_quota.__get__(client)
+        client._budget_exhausted = HttpClient._budget_exhausted.__get__(client)
+        return client, sched
+
+    def _svc_in_the_night(self, *, spent_hours: float = 0.0):
+        svc = _FakeLiveSvc(existing={20011: []})
+        client, sched = self._client_in_the_night(spent_hours=spent_hours)
+        svc.http_client.check_activity_budget = client.check_activity_budget
+        svc.http_client.check_activity_quota = client.check_activity_quota
+        svc.http_client.rest_pause_seconds = lambda: 3 * 3600
+        return svc
+
+    def test_the_night_alone_stops_a_run_that_did_not_claim_presence(self):
+        """The guard still guards -- this is the behaviour being protected."""
+        with pytest.raises(HTTPException) as exc:
+            _run_live(self._svc_in_the_night(), _one_origin_account())
+
+        assert exc.value.status_code == 409
+
+    def test_an_awake_run_is_not_stopped_by_the_night_wearing_a_quotas_name(self):
+        res = _run_live(self._svc_in_the_night(), _one_origin_account(), i_am_awake=True)
+
+        assert res.stopped_early is False, (
+            "the night window stopped an awake run through the budget check"
+        )
+        assert res.remaining == 0, "every route was deferred by a quota that is untouched"
+
+    def test_the_caps_still_bind_an_awake_run(self):
+        """`i_am_awake` waives a SCHEDULE. It does not waive a quota, and an
+        operator being present is not a reason to work a 30-hour day."""
+        svc = self._svc_in_the_night(spent_hours=999.0)
+
+        res = _run_live(svc, _one_origin_account(), i_am_awake=True)
+
+        assert res.stopped_early is True
+
+    def test_a_rest_window_stop_says_it_is_the_clock_not_a_quota(self):
+        """The message used to read "rolling 24h 0.0h / 8h, session 0.0h / 3h"
+        -- every number under its cap, offered as the reason nothing ran. It
+        sent the reader to look at quotas that were fine."""
+        from travian_api.exceptions import ActivityBudgetExhausted
+
+        client, _ = self._client_in_the_night()
+
+        with pytest.raises(ActivityBudgetExhausted) as exc:
+            client.check_activity_budget()
+
+        assert "night-rest window" in str(exc.value)
+
+    def test_the_quota_check_ignores_the_clock_and_nothing_else(self):
+        client, sched = self._client_in_the_night()
+
+        assert client.check_activity_quota() is True, "the clock must not stop it"
+
+        sched._rolling_24h_seconds = lambda: 999.0 * 3600.0
+        from travian_api.exceptions import ActivityBudgetExhausted
+
+        with pytest.raises(ActivityBudgetExhausted):
+            client.check_activity_quota()

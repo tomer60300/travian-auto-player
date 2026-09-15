@@ -233,3 +233,80 @@ class TestTheNightPauseCoversTheWholeWindow:
         s = self._sched()
 
         assert s.next_break_duration(_at(14.0)) < 3600.0
+
+
+class TestTheBreakIsMeasuredOnTheSameClockThatRefusedTheWork:
+    """`next_break_duration()` resolved its own default `now` from the HOST.
+
+    Every other method here moved to `_server_now()` when the scheduler learned
+    what time it is where the GAME is. This one kept `datetime.now()` -- and
+    because it then passes that value INTO `is_rest_window(now)`, it did not
+    merely disagree with that method, it overrode it.
+
+    With the host three hours ahead of a server at 04:00 and a 23:00-06:00
+    window, `can_continue()` read the server clock, found the night and refused
+    to work, while this read 07:00, found no window, and returned a ten-minute
+    daytime break with two hours of night still to run. `BuildQueueService`
+    sleeps whatever it is handed and resumes, so the account woke up inside its
+    own night and carried on.
+
+    Its own docstring already required all three to agree about where the
+    window is. This is the line that did not.
+    """
+
+    WINDOW = (23.0, 6.0)
+
+    def _sched(self, *, server_offset_minutes: int) -> ActivityScheduler:
+        s = ActivityScheduler(enabled=True)
+        s._night_start_hour, s._night_end_hour = self.WINDOW
+        s.set_server_utc_offset_minutes(server_offset_minutes)
+        return s
+
+    @staticmethod
+    def _pin_server_clock(s: ActivityScheduler, hour: float) -> None:
+        """Pin `_server_now`, leaving the host clock wherever it really is.
+
+        The point of the test is that the two differ, so the host side is
+        deliberately left as the real `datetime.now()` -- whatever the machine
+        running the suite happens to say. The bug reproduces for every host time
+        outside the window, which is most of the day.
+        """
+        s._server_now = lambda: _at(hour)
+
+    def test_a_night_on_the_server_gets_a_night_length_break(self):
+        s = self._sched(server_offset_minutes=60)
+        self._pin_server_clock(s, 4.0)
+
+        # 04:00 server, window ends 06:00 -> about two hours, plus the wake
+        # buffer. A short break here is the bug: ten to twenty minutes.
+        duration = s.next_break_duration()
+
+        assert duration >= 2.0 * 3600.0, (
+            f"got {duration / 60:.0f}min with two hours of night left -- "
+            f"the break was measured on the host clock"
+        )
+
+    def test_it_agrees_with_the_method_that_refuses_the_work(self):
+        """`can_continue` and `next_break_duration` must not split: one saying
+        stop and the other handing back a daytime break is how a loop resumes
+        mid-window."""
+        s = self._sched(server_offset_minutes=60)
+        self._pin_server_clock(s, 4.0)
+
+        assert s.can_continue() is False
+        assert s.next_break_duration() >= 3600.0
+
+    def test_an_explicit_now_is_still_honoured(self):
+        """The parameter exists so all three can be driven from one instant."""
+        s = self._sched(server_offset_minutes=60)
+        self._pin_server_clock(s, 4.0)
+
+        assert s.next_break_duration(_at(14.0)) < 3600.0
+
+    def test_with_no_offset_known_it_is_the_host_clock_exactly_as_before(self):
+        """`_server_now` falls back to `datetime.now()` when no page has stated
+        the offset, so this change is inert until one has."""
+        s = self._sched(server_offset_minutes=None)
+
+        assert s._server_now is not None
+        assert s.next_break_duration(_at(14.0)) < 3600.0

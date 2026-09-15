@@ -530,6 +530,37 @@ class HttpClient:
             return True
         if self._activity_scheduler.can_continue():
             return True
+        raise self._budget_exhausted()
+
+    def check_activity_quota(self) -> bool:
+        """The CAPS only -- for a run whose operator has said they are present.
+
+        Same contract and same exception as :meth:`check_activity_budget`, minus
+        the night-rest window. Deliberately a separate method rather than a flag
+        on that one: which question gets asked is a property of the CALLER, and
+        a call site reading `check_activity_quota()` says why it is entitled to
+        the narrower one, where `check_activity_budget(ignore_rest=True)` would
+        only say that it does.
+
+        Scoped by being chosen at the call site. The scheduler is per-account
+        and shared with every other loop, so suppressing its night window as
+        mutable state for the duration of a run would take the farm and build
+        loops out of their night as well -- an override granted to one operation
+        quietly applying to three.
+        """
+        if not self._stealth_enabled:
+            return True
+        if self._activity_scheduler.quota_allows():
+            return True
+        raise self._budget_exhausted()
+
+    def _budget_exhausted(self) -> ActivityBudgetExhausted:
+        """Build the exception naming the limit that actually stopped us.
+
+        Returns it rather than raising it, so both callers end in a visible
+        `raise` and neither reads as though it could fall off the end of a
+        function declared `-> bool`.
+        """
         sched = self._activity_scheduler
         rolling_h = sched.daily_hours_used
         session_h = sched.session_hours
@@ -548,9 +579,17 @@ class HttpClient:
                 f"continuous session limit reached ({session_h:.1f}h / {sched.max_continuous_hours}h)"
                 f" — take a {sched.min_break_minutes:.0f}min break"
             )
+        elif sched.is_rest_window():
+            # Not a budget at all. This branch used to fall through to the
+            # catch-all below and report "rolling 24h 0.0h / 8h, session
+            # 0.0h / 3h" -- every number under its cap, presented as the reason
+            # nothing could run. An operator reading that goes looking at quotas
+            # that are untouched, and the one fact that would explain it, that
+            # the account is in its night window, appears nowhere.
+            reason = "night-rest window is open; this is a schedule, not a quota"
         else:
             reason = f"rolling 24h {rolling_h:.1f}h / {sched.max_daily_hours}h, session {session_h:.1f}h / {sched.max_continuous_hours}h"
-        raise ActivityBudgetExhausted(f"Activity budget exhausted: {reason}")
+        return ActivityBudgetExhausted(f"Activity budget exhausted: {reason}")
 
     def rest_pause_seconds(self) -> float:
         """Seconds to sleep NOW if the account is in its night-rest window.

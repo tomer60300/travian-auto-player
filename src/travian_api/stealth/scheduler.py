@@ -395,11 +395,20 @@ class ActivityScheduler:
 
     # ── Public API ───────────────────────────────────────────────────
 
-    def can_continue(self) -> bool:
-        """Check if we're within rolling-24h and continuous limits.
+    def quota_allows(self) -> bool:
+        """The CAPS only: rolling-24h and continuous session. Not the clock.
 
-        Returns:
-            True if we can keep working, False if break needed.
+        Split out from :meth:`can_continue` because the two questions have
+        different answers to one particular caller. "Have I worked too long"
+        is a quota and nobody may override it. "Is it 4am" is a schedule, and
+        an operator sitting at the keyboard at 4am is the one person entitled
+        to say it does not apply to them -- which the execute endpoint's
+        ``i_am_awake`` offers in so many words.
+
+        With one predicate the override could not work: the endpoint waved the
+        night check through at the door and then hit it again, wearing a
+        quota's name, at the budget check two lines later. See
+        :meth:`can_continue` for who should still ask the combined question.
         """
         if not self.enabled:
             return True
@@ -430,21 +439,35 @@ class ActivityScheduler:
             )
             return False
 
-        # The account's night. This is a SCHEDULE, not a quota -- the two above
-        # ask "have I worked too long", this asks "is it 4am" -- but every caller
-        # already means the same thing by False, which is "stop working now".
-        #
-        # It belongs here because here is the one place all three loops pass
-        # through. Before this, `next_break_duration` had a correct night branch
-        # that slept 6-9h, and nothing could reach it: the trigger never fired at
-        # night, so the only way into it was for the daily budget to run out
-        # during the window by coincidence. The machinery was written, tested and
-        # unreachable, and every loop ran straight through to morning.
-        #
-        # Which is the signal the rest of the stealth layer cannot cover for.
-        # Impersonated TLS, log-normal delays, a drifting session tempo and
-        # truthful Referers all describe how a single request looks; none of them
-        # says anything about an account that has never once been idle at 4am.
+        return True
+
+    def can_continue(self) -> bool:
+        """Quota AND schedule: what a loop running unattended should ask.
+
+        Every loop in the app goes through here, which is why the night window
+        is checked here. Before that, `next_break_duration` had a correct night
+        branch that slept 6-9h and nothing could reach it: the trigger never
+        fired at night, so the only way in was for the daily budget to run out
+        during the window by coincidence. The machinery was written, tested and
+        unreachable, and every loop ran straight through to morning.
+
+        Which is the signal the rest of the stealth layer cannot cover for.
+        Impersonated TLS, log-normal delays, a drifting session tempo and
+        truthful Referers all describe how a single request looks; none of them
+        says anything about an account that has never once been idle at 4am.
+
+        The one caller that should ask :meth:`quota_allows` instead is a run
+        whose operator has stated they are present -- and only that run, because
+        this is per-account state shared with every concurrent loop. Choosing
+        the narrower question at the call site keeps the override scoped to the
+        operation that was granted it, rather than switching something off
+        account-wide for as long as the run lasts.
+        """
+        if not self.quota_allows():
+            return False
+
+        # The account's night. This is a SCHEDULE, not a quota -- the caps ask
+        # "have I worked too long", this asks "is it 4am".
         if self.is_rest_window():
             logger.info(
                 "Night-rest window (%.1f -> %.1f): pausing until it closes",
@@ -527,7 +550,16 @@ class ActivityScheduler:
         if not self.enabled:
             return 0.0
 
-        now = now or datetime.now()
+        # The GAME's clock, like `is_rest_window` and `seconds_until_rest_ends`
+        # -- and this method resolves `now` for both of them, so getting it from
+        # `datetime.now()` here overrode their own correct defaults rather than
+        # merely differing from them. With the host three hours ahead of the
+        # server, `can_continue` read 04:00 and refused to work while this read
+        # 07:00, found no rest window, and handed back a ten-minute daytime
+        # break with two hours of night still to run. The caller slept it and
+        # carried on. The docstring above already required all three to agree
+        # about where the window is; this is the line that did not.
+        now = now or self._server_now()
         rolling_hours = self._rolling_24h_seconds() / 3600.0
 
         # Triangular (not uniform) so the duration histogram tapers to zero at

@@ -7499,6 +7499,27 @@ async def post_execute(
     # in `finally`. `started_at` lets the captcha-stop signal target only this run.
     started_at = time.monotonic()
 
+    # Which budget question this run is entitled to ask, resolved ONCE and used
+    # by every check below.
+    #
+    # `i_am_awake` waives the night-rest window at the door (the 409 above) --
+    # and used to be waived straight back in here, because `can_continue()`
+    # answers "have I worked too long" and "is it 4am" with one boolean. So the
+    # override cleared the 409 and the run then stopped at the first budget
+    # check with "Activity budget exhausted" against completely untouched
+    # quotas, deferring every route. The recovery the 409 offers in its own
+    # error message could not once have worked.
+    #
+    # The caps are NOT waived: `check_activity_quota` still enforces the rolling
+    # 24h and continuous-session limits, and the captcha stop below is
+    # untouched. Only the schedule is set aside, by the only person who can
+    # honestly set it aside.
+    _check_budget = (
+        svc.http_client.check_activity_quota
+        if body.i_am_awake
+        else svc.http_client.check_activity_budget
+    )
+
     def _stop_reason() -> str | None:
         """Why the run must stop right now, or None. Checked before EVERY mutation
         (create/disable/enable) and again inside the service after its pacing wait
@@ -7507,7 +7528,7 @@ async def post_execute(
         if captcha_stop.should_stop(user.id, started_after=started_at):
             return "captcha resolved — execution stopped"
         try:
-            svc.http_client.check_activity_budget()
+            _check_budget()
         except ActivityBudgetExhausted as exc:
             return f"activity budget exhausted: {exc}"
         return None
@@ -7542,7 +7563,7 @@ async def post_execute(
             # does -- the HttpClient bills nothing, and believing otherwise is
             # how the reads went uncounted for a while.
             try:
-                svc.http_client.check_activity_budget()
+                _check_budget()
             except ActivityBudgetExhausted as exc:
                 problems.append(f"Activity budget exhausted; no routes were created: {exc}")
                 deferred.extend(items)
