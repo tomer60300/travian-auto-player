@@ -699,6 +699,8 @@ class TradeRouteService:
             # One key, for the same reason the read-back has one: the client
             # passes no variables and JSON.stringify drops an undefined value.
             {"query": MARKETPLACE_DESTINATIONS_QUERY},
+            # `fetch`, not the `json` default -- see `refresh_marketplace`.
+            request_type="fetch",
             referer=self._marketplace_referer.get(village_id),
             # Fired off the back of a write the page just made, in the same
             # callback -- the capture times both calls inside one millisecond.
@@ -737,6 +739,17 @@ class TradeRouteService:
             # JSON.stringify drops an undefined value, so the real body has this
             # one key. An extra key is a fingerprint like any other.
             {"query": MARKETPLACE_READBACK_QUERY},
+            # `fetch`, not `post_json`'s `json` default, and the difference is a
+            # custom header: the `json` shape stamps `X-Version`, which Travian's
+            # own fetch wrapper injects on its AJAX calls but which the 2026-09-15
+            # HAR shows is absent from every `/api/v1/*` request -- graphql and
+            # trade-routes alike. The writes on this class already said `fetch`
+            # for exactly this reason; the read-back did not, so every
+            # confirmation since it moved to GraphQL carried a header the real
+            # client does not send on that endpoint. A custom header is a
+            # fingerprint wherever it appears, and it appears here on the one
+            # request class this service makes most.
+            request_type="fetch",
             # An API request never advances page context, so this one must state
             # where it is issued from: the marketplace tab, which is the only
             # page whose script fires this query. Falling back to the

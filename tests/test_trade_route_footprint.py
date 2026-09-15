@@ -144,6 +144,9 @@ class _CountingClient:
         self.calls: list[tuple[str, str]] = []
         self.referers: list[tuple[str, str | None]] = []
         self.bodies: list[tuple[str, dict]] = []
+        # `post_json`'s default is "json", which stamps X-Version. Every
+        # /api/v1 call must opt out of it -- see the test class below.
+        self.request_types: list[tuple[str, str]] = []
         self._pages = list(pages)
         self._readbacks = list(readbacks)
         self.waits: list[str] = []
@@ -185,6 +188,7 @@ class _CountingClient:
         self.calls.append(("POST", path))
         self.referers.append((path, kw.get("referer")))
         self.bodies.append((path, payload))
+        self.request_types.append((path, kw.get("request_type", "json")))
         if path == GRAPHQL:
             assert self._readbacks, "queue a read-back payload for every confirm"
             # A confirm after a write makes TWO graphql calls with different
@@ -439,6 +443,54 @@ class TestTheReadBackIsTheQueryTheGameFires:
 
     def test_the_constant_is_what_is_sent(self):
         assert self._confirm()["query"] == MARKETPLACE_READBACK_QUERY
+
+
+class TestNoApiCallCarriesAHeaderTheClientDoesNotSend:
+    """`/api/v1/*` takes no `X-Version`, and `post_json`'s default adds one.
+
+    Travian's fetch wrapper injects `X-Version` on its AJAX calls, so the
+    transport stamps it for `request_type="json"` and `"xhr"`. The 2026-09-15
+    HAR lists every header on four `/api/v1` requests -- two graphql, one
+    trade-routes POST, one PUT -- and none of them carries it. The writes here
+    already opted out with `request_type="fetch"`; the GraphQL read-back did
+    not, so from the day that read moved off a page load to GraphQL, every
+    confirmation sent a custom header on the endpoint this service touches most.
+
+    A missing request is an absence. A custom header on a request the real
+    client sends bare is a positive anomaly, and it is one string compare away
+    from being alerted on.
+    """
+
+    def test_the_read_back_does_not_stamp_x_version(self):
+        service, client = _service([], [_readback(20003)])
+        asyncio.run(service.confirm_routes(20003))
+
+        assert client.request_types == [(GRAPHQL, "fetch")]
+
+    def test_the_post_write_refresh_does_not_either(self):
+        service, client = _service([], [_readback(20003)])
+        asyncio.run(service.confirm_routes(20003, after_write=True))
+
+        assert client.request_types == [(GRAPHQL, "fetch"), (GRAPHQL, "fetch")]
+
+    def test_the_create_still_does_not(self):
+        service, client = _service([])
+        asyncio.run(service.create_route(_route()))
+
+        assert client.request_types == [("/api/v1/trade-routes", "fetch")]
+
+    def test_no_api_call_anywhere_in_a_run_uses_the_json_default(self):
+        service, client = _service(
+            [VILLAGE_VIEW, EMPTY_MARKETPLACE], [_readback(20003, _route_row(1, 700))]
+        )
+        asyncio.run(service.list_existing_routes(20003))
+        asyncio.run(service.create_route(_route()))
+        asyncio.run(service.confirm_routes(20003, after_write=True))
+
+        assert [t for path, t in client.request_types if path.startswith("/api/v1/")]
+        assert all(
+            t == "fetch" for path, t in client.request_types if path.startswith("/api/v1/")
+        ), f"an /api/v1 call is stamping X-Version: {client.request_types}"
 
 
 class TestEveryMarketplaceRequestStatesItsOwnReferer:
