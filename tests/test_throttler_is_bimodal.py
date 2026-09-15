@@ -144,11 +144,28 @@ class TestTheBurstCapNoLongerFlagsAHuman:
     0.5s apart. Three ordinary page loads inside a minute is 39. The cap was 20.
     """
 
-    def test_the_default_clears_three_page_loads_in_a_minute(self):
-        assert RequestThrottler().burst_max_requests >= 39
+    def test_a_real_page_loads_worth_of_requests_does_not_trip_it(self):
+        """Behaviour, not the constant.
 
-    def test_it_clears_the_largest_observed_human_burst(self):
-        assert RequestThrottler().burst_max_requests >= 35
+        These asserted `burst_max_requests >= 39`, which is the number itself
+        restated. What matters is whether a burst the size of real traffic
+        actually trips the cooldown: a single page load is 13 requests (the
+        document plus twelve locale bundles), and three inside a minute is 39.
+        """
+        t = _throttler()
+        for _ in range(39):
+            t._request_times.append(0.0)
+
+        assert len(t._request_times) < t._effective_burst_max, (
+            "three ordinary page loads in a minute must not read as a burst"
+        )
+
+    def test_the_largest_observed_human_burst_does_not_trip_it_either(self):
+        t = _throttler()
+        for _ in range(35):
+            t._request_times.append(0.0)
+
+        assert len(t._request_times) < t._effective_burst_max
 
     def test_the_jittered_trigger_still_never_lands_on_a_constant(self):
         t = _throttler()

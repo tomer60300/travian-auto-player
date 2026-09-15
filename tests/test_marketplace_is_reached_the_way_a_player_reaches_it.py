@@ -363,3 +363,59 @@ class TestAStaleSlotDoesNotFailForever:
         assert client.calls[before] == "/dorf2.php?newdid=20003", (
             "the retry has to re-learn the slot, or it repeats the same wrong URL"
         )
+
+
+class TestReopeningTheSameMarketplaceIsAReload:
+    """Not every "already on a marketplace" is a village switch.
+
+    Re-opening the SAME village's marketplace took the switch branch, which
+    refers the request from the page it is switching FROM -- and that page is
+    this page. So the GET went out with its own URL in its Referer, which a
+    browser emits only in a redirect loop.
+
+    A reload keeps the Referer the page was opened with. That is what this
+    remembers.
+    """
+
+    def _reopen(self):
+        service, client = _service({20003: 26})
+        _read(service, 20003)
+        before = len(client.calls)
+        _read(service, 20003)
+        return client, before
+
+    def test_it_does_not_refer_to_itself(self):
+        client, before = self._reopen()
+        path, referer = client.calls[before], client.referers[before]
+
+        assert referer != f"https://example.invalid{path}"
+
+    def test_it_refers_to_where_the_page_was_opened_from(self):
+        client, before = self._reopen()
+
+        assert client.referers[before] == "https://example.invalid/dorf2.php?newdid=20003"
+
+    def test_it_is_still_one_request_with_no_village_view(self):
+        """A reload is a reload -- it does not walk back through dorf2."""
+        client, before = self._reopen()
+
+        assert client.calls[before:] == ["/build.php?id=26&gid=17&t=3&newdid=20003"]
+
+    def test_a_real_switch_still_refers_from_the_other_marketplace(self):
+        import travian_api.services.trade_route_service as mod
+
+        service, client = _service({20003: 26, 20004: 31})
+        _read(service, 20004)
+        _read(service, 20003)
+        before = len(client.calls)
+        mod.random.random = lambda: 1.0  # stale load off
+        try:
+            _read(service, 20004)
+        finally:
+            import random as _r
+
+            mod.random.random = _r.random
+
+        assert client.referers[before] == (
+            "https://example.invalid/build.php?id=26&gid=17&t=3&newdid=20003"
+        )

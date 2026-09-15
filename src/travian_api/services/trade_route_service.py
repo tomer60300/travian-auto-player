@@ -432,6 +432,9 @@ class TradeRouteService:
         # Compared against the session's real last page before we claim to be
         # switching villages from one marketplace to another.
         self._last_marketplace_path: str | None = None
+        # village -> the page its marketplace was opened FROM. A reload keeps
+        # that Referer rather than naming itself.
+        self._marketplace_from: dict[int, str] = {}
         self._origin_lock = KeyedLock()
         # Serializes whole execute runs for this ACCOUNT -- see `execute_lock`
         # below and `_EXECUTE_LOCKS`. Held here only as the key; the lock itself
@@ -585,14 +588,26 @@ class TradeRouteService:
             and self.http_client.browser_headers.last_page_path == from_path
             and village_id in self._marketplace_slot
         ):
+            if from_path == self._marketplace_path(village_id):
+                # Not a switch at all -- this is the SAME page again, which is a
+                # reload. A reload keeps the Referer the page was opened with;
+                # it does not refer to itself. Returning `from_path` here would
+                # put the request's own URL in its Referer, which a browser
+                # emits only in a redirect loop.
+                return self._marketplace_from.get(village_id) or f"{base}/dorf1.php"
             referer = f"{base}{from_path}"
+            self._marketplace_from[village_id] = referer
             await self._stale_slot_load(village_id, from_path, referer)
             return referer
 
         newdid_q = f"?newdid={village_id}" if village_id else ""
         village_view = f"/dorf2.php{newdid_q}"
         self._learn_marketplace_slot(village_id, await self.http_client.get_html(village_view))
-        return f"{base}{village_view}"
+        came_from = f"{base}{village_view}"
+        # Remembered so a later RELOAD of this marketplace can refer to where it
+        # was opened from, which is what a browser sends on a reload.
+        self._marketplace_from[village_id] = came_from
+        return came_from
 
     async def open_marketplace(self, village_id: int) -> str:
         """Open the marketplace (gid=17) for a village and return its HTML.

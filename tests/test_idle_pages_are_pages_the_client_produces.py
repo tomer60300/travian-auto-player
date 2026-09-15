@@ -90,12 +90,26 @@ class TestTheUrlComesFromTheTableNotFromTheName:
         assert PageNavigator._warmup_page_path("troops", "?newdid=7") == "/build.php?gid=19"
 
     def test_only_village_scoped_pages_take_the_selector(self):
-        # The global pages have no village context to pin, and appending one
-        # would produce a URL the client does not emit -- the same class of
-        # mistake, arrived at from the other direction.
-        for page in PAGE_PATHS:
-            path = PageNavigator._warmup_page_path(page, "?newdid=7")
-            assert ("newdid" in path) == (path.startswith(("/dorf1", "/dorf2", "/karte")))
+        """Written out, not derived.
+
+        This used to compare the function's output against
+        `path.startswith(("/dorf1", "/dorf2", "/karte"))` -- which is the rule
+        the function applies, restated one line away from it. It could only fail
+        if a constant and the function beside it disagreed, never if both were
+        wrong together, which is the case that matters.
+
+        A village selector belongs on a page that HAS a village: the three
+        village views. The global pages have none to pin, and appending one
+        would produce a URL the client does not emit.
+        """
+        takes = {"/dorf1.php?newdid=7", "/dorf2.php?newdid=7", "/karte.php?newdid=7"}
+        does_not = {"/report", "/statistics", "/profile", "/hero", "/build.php?gid=19"}
+
+        emitted = {PageNavigator._warmup_page_path(p, "?newdid=7") for p in PAGE_PATHS}
+
+        assert takes <= emitted, "the village views must carry the selector"
+        assert does_not <= emitted, "the global pages must not"
+        assert emitted == takes | does_not | {"/production.php?t=balance"}
 
     def test_a_visited_path_maps_back_to_its_page(self):
         for page, path in PAGE_PATHS.items():
