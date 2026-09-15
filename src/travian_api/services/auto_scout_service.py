@@ -493,6 +493,16 @@ _recon_strict_context: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 
+def _tiles_before_a_pause() -> int:
+    """How many tiles to open before looking away.
+
+    Right-skewed and never a round number: a break every exactly-N tiles is a
+    period, and a period is the easiest thing in the world to find in a
+    timestamp series.
+    """
+    return max(6, int(random.lognormvariate(math.log(18.0), 0.45)))
+
+
 class AutoScoutService:
     """Scan the map for villages and send scouts based on filters."""
 
@@ -752,6 +762,36 @@ class AutoScoutService:
         html = resp.get("html", "")
         return self._parse_tile_details(x, y, html)
 
+    async def _look_away(self, done: int, total: int) -> None:
+        """Stop clicking tiles for a bit, the way a person has to.
+
+        Pacing fixed the RATE -- the throttler keeps this loop near 0.67
+        requests a second, below the busiest minute the recorded player
+        produced (0.88). It did nothing about DURATION, and this loop had none
+        of the burst-and-break machinery the oasis sweep has: several hundred
+        tiles, one after another, awaiting nothing but the next request.
+
+        Which is the part rate alone cannot fix. A human sustains 0.33
+        requests a second across a session and bursts above it briefly; they do
+        not make three hundred consecutive decisions without looking at
+        anything else. Twelve unbroken minutes of map clicks is not a fast
+        human, it is a shape no human has.
+
+        So the answer to "our scan is too fast" was never "slow the requests
+        down further" -- at some point that is just a machine being patient.
+        It is to make the operation look like several visits instead of one.
+        """
+        pause = min(max(random.lognormvariate(math.log(35.0), 0.6), 12.0), 240.0)
+        logger.info(
+            "Pausing %.0fs after %d of %d tiles — a person does not click three "
+            "hundred tiles without looking away. Nothing is stuck.",
+            pause,
+            done,
+            total,
+        )
+        self._report(f"Taking a short break after {done}/{total} tiles...")
+        await asyncio.sleep(pause)
+
     async def enrich_tiles(
         self, tiles: List[MapTileInfo], concurrency: int = 15
     ) -> List[MapTileInfo]:
@@ -765,8 +805,12 @@ class AutoScoutService:
         """
         enriched: List[MapTileInfo] = []
         total = len(tiles)
+        next_pause_at = _tiles_before_a_pause()
 
         for i, tile in enumerate(tiles):
+            if i and i >= next_pause_at:
+                await self._look_away(i, total)
+                next_pause_at = i + _tiles_before_a_pause()
             try:
                 detail = await self.get_tile_details(tile.x, tile.y)
                 detail.distance = tile.distance
