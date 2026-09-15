@@ -88,6 +88,10 @@ def village_view(slot: int = MARKETPLACE_SLOT) -> str:
 VILLAGE_VIEW = village_view()
 
 GRAPHQL = "/api/v1/graphql"
+# The building, and then the tab on it. `t=3` is reached by clicking "Trade
+# routes" once the marketplace is open -- the village view links only the first
+# of these, so the second is referred from the first and never from dorf2.
+MARKETPLACE_DEFAULT_TAB = f"/build.php?id={MARKETPLACE_SLOT}&gid=17&newdid=20003"
 MARKETPLACE_URL = f"/build.php?id={MARKETPLACE_SLOT}&gid=17&t=3&newdid=20003"
 
 
@@ -226,7 +230,7 @@ def _route(dest: int = 700) -> PlannedRoute:
     )
 
 
-class TestTheCanaryRunCostsFiveRequests:
+class TestTheCanaryRunCostsSixRequests:
     """Read the village, create one route, then settle the way the page does.
 
     Four of these were settled long ago. The fifth took two captures. A
@@ -249,17 +253,22 @@ class TestTheCanaryRunCostsFiveRequests:
     ``village/resources`` in the burst at all; a request from that same callback
     would share the millisecond, and nothing does.
 
-    So five, and every one of them quotable.
+    The sixth is the tab click -- ``t=3`` is a tab on the marketplace, not a page
+    the village view links, so a player loads the building first. See
+    :class:`TestEveryMarketplaceRequestStatesItsOwnReferer`.
+
+    So six, and every one of them quotable.
     """
 
-    def test_a_read_is_two_gets_in_the_human_order(self):
+    def test_a_read_is_three_gets_in_the_human_order(self):
         service, client = _service([VILLAGE_VIEW, EMPTY_MARKETPLACE])
         asyncio.run(service.list_existing_routes(20003))
 
         assert client.calls == [
             ("GET", "/dorf2.php?newdid=20003"),
+            ("GET", MARKETPLACE_DEFAULT_TAB),
             ("GET", MARKETPLACE_URL),
-        ], "the village view must come first, or the marketplace Referer is a lie"
+        ], "village view, then the building, then the tab -- or a Referer is a lie"
 
     def test_a_create_is_one_post_and_it_waits_first(self):
         service, client = _service([])
@@ -327,7 +336,7 @@ class TestTheCanaryRunCostsFiveRequests:
         assert [r.route_id for r in confirmed] == [1]
         assert client.calls == [("POST", GRAPHQL), ("POST", GRAPHQL)]
 
-    def test_the_whole_canary_is_five_requests_in_this_exact_order(self):
+    def test_the_whole_canary_is_six_requests_in_this_exact_order(self):
         service, client = _service(
             [VILLAGE_VIEW, EMPTY_MARKETPLACE],
             [_readback(20003, _route_row(1, 700))],
@@ -338,12 +347,13 @@ class TestTheCanaryRunCostsFiveRequests:
 
         assert client.calls == [
             ("GET", "/dorf2.php?newdid=20003"),
+            ("GET", MARKETPLACE_DEFAULT_TAB),
             ("GET", MARKETPLACE_URL),
             ("POST", "/api/v1/trade-routes"),
             ("POST", GRAPHQL),
             ("POST", GRAPHQL),
         ]
-        assert len(client.calls) == 5
+        assert len(client.calls) == 6
         assert [r.route_id for r in confirmed] == [1]
 
     def test_verifying_costs_exactly_one_request_more_than_not_verifying(self):
@@ -503,19 +513,24 @@ class TestEveryMarketplaceRequestStatesItsOwnReferer:
 
     MARKETPLACE = f"https://example.invalid{MARKETPLACE_URL}"
 
-    def test_the_marketplace_get_is_referred_from_the_village_view(self):
-        # The navigation stays a page load precisely so this Referer is truthful:
-        # dorf2 is the page a human clicks the marketplace from. Pinning it is
-        # what makes the claim survive a concurrent GET.
+    def test_each_hop_is_referred_from_the_page_that_links_it(self):
+        """dorf2 links the building; the building page has the tab.
+
+        The navigation stays a page load precisely so these Referers are
+        truthful, and each is pinned so the claim survives a concurrent GET.
+
+        `t=3` used to be referred from dorf2 -- which asserts a click on a link
+        the village view does not contain. A Referer naming a page that cannot
+        link to the URL it accompanies is a contradiction inside one request,
+        checkable without correlating anything to anything.
+        """
         service, client = _service([VILLAGE_VIEW, EMPTY_MARKETPLACE])
         asyncio.run(service.list_existing_routes(20003))
 
         assert client.referers == [
             ("/dorf2.php?newdid=20003", None),
-            (
-                MARKETPLACE_URL,
-                "https://example.invalid/dorf2.php?newdid=20003",
-            ),
+            (MARKETPLACE_DEFAULT_TAB, "https://example.invalid/dorf2.php?newdid=20003"),
+            (MARKETPLACE_URL, f"https://example.invalid{MARKETPLACE_DEFAULT_TAB}"),
         ]
 
     def test_a_create_is_referred_from_the_page_that_has_the_form(self):
@@ -630,11 +645,12 @@ class TestAFailedReadIsBilledToo:
         assert len(client.logged_activity) == 1
 
     def test_a_read_that_answers_is_billed_once_per_request(self):
-        # The regression anchor: open_marketplace is two GETs and two billings,
-        # refresh_marketplace is one POST and one more.
+        # The regression anchor: open_marketplace is three GETs -- village view,
+        # building, tab -- and three billings; refresh_marketplace is one POST
+        # and one more.
         service, client = _service([VILLAGE_VIEW, EMPTY_MARKETPLACE], [_readback(20003)])
         asyncio.run(service.list_existing_routes(20003))
-        assert len(client.logged_activity) == 2
+        assert len(client.logged_activity) == 3
 
         asyncio.run(service.refresh_marketplace(20003))
-        assert len(client.logged_activity) == 3
+        assert len(client.logged_activity) == 4

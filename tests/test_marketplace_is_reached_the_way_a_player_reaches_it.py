@@ -100,15 +100,20 @@ class TestTheUrlNamesTheSlot:
 
         assert client.calls == [
             "/dorf2.php?newdid=20003",
+            # The building, which is what dorf2 actually links…
+            "/build.php?id=26&gid=17&newdid=20003",
+            # …and then the tab on it.
             "/build.php?id=26&gid=17&t=3&newdid=20003",
         ]
 
     def test_it_costs_no_extra_request_to_learn(self):
-        # The village view was already being fetched and its HTML thrown away.
+        # The village view was already being fetched and its HTML thrown away,
+        # so the SLOT is still free. The third call is the tab click, which is
+        # not the price of learning anything -- it is the click itself.
         service, client = _service({20003: 26})
         _read(service, 20003)
 
-        assert len(client.calls) == 2
+        assert len(client.calls) == 3
 
     def test_a_different_village_gets_its_own_slot(self):
         """Nothing here is pinned to one account's layout."""
@@ -126,7 +131,7 @@ class TestTheUrlNamesTheSlot:
         service, client = _service({20003: 26})
         _read(service, 20003)
 
-        assert client.calls[1] == "/build.php?id=26&gid=17&t=3&newdid=20003"
+        assert client.calls[-1] == "/build.php?id=26&gid=17&t=3&newdid=20003"
 
     def test_a_village_with_no_marketplace_addresses_the_type(self):
         """Unknown is not zero, and not a guess.
@@ -391,9 +396,13 @@ class TestReopeningTheSameMarketplaceIsAReload:
         assert referer != f"https://example.invalid{path}"
 
     def test_it_refers_to_where_the_page_was_opened_from(self):
+        # Which is the building page -- the tab was opened by clicking it there,
+        # so that is the Referer the browser kept, not dorf2 one hop further up.
         client, before = self._reopen()
 
-        assert client.referers[before] == "https://example.invalid/dorf2.php?newdid=20003"
+        assert client.referers[before] == (
+            "https://example.invalid/build.php?id=26&gid=17&newdid=20003"
+        )
 
     def test_it_is_still_one_request_with_no_village_view(self):
         """A reload is a reload -- it does not walk back through dorf2."""

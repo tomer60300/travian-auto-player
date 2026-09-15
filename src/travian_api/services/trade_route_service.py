@@ -531,6 +531,23 @@ class TradeRouteService:
         newdid_amp = f"&newdid={village_id}" if village_id else ""
         return f"/build.php?{slot_q}gid={MARKETPLACE_GID}&t=3{newdid_amp}"
 
+    def _marketplace_default_tab_path(self, village_id: int) -> str | None:
+        """The building's own URL -- the tab you land on by clicking it.
+
+        The same URL as :meth:`_marketplace_path` minus ``t=3``, which is what
+        the village view's link actually is: dorf2 renders
+        ``/build.php?id=30&gid=17`` and nothing more. ``t=3`` is a TAB, and a tab
+        is reached by clicking it once the building is open.
+
+        ``None`` when the slot is unknown, because then we did not arrive by
+        clicking a village-view link and there is no such link to have followed.
+        """
+        slot = self._marketplace_slot.get(village_id)
+        if slot is None:
+            return None
+        newdid_amp = f"&newdid={village_id}" if village_id else ""
+        return f"/build.php?id={slot}&gid={MARKETPLACE_GID}{newdid_amp}"
+
     def _learn_marketplace_slot(self, village_id: int, village_view_html: str) -> None:
         """Read this village's marketplace slot off the village view.
 
@@ -639,6 +656,26 @@ class TradeRouteService:
         village_view = f"/dorf2.php{newdid_q}"
         self._learn_marketplace_slot(village_id, await self.http_client.get_html(village_view))
         came_from = f"{base}{village_view}"
+
+        # The tab click. A player arriving from the village view lands on the
+        # building's DEFAULT tab and then clicks "Trade routes"; the tab load is
+        # referred from the building page, never from dorf2. Both captures agree:
+        # 2026-08-20 has `/dorf2.php` -> `/build.php?id=30&gid=17` twice, and the
+        # 2026-09-15 HAR has the step after it --
+        #
+        #     GET /build.php?id=31&gid=17&t=3
+        #       referer: https://…/build.php?id=31&gid=17
+        #
+        # Going straight to `t=3` referred from dorf2 asserts a click on a link
+        # the village view does not contain, on a tab the session never opened.
+        # Unlike a missing request that is an absence, a Referer naming a page
+        # that cannot link to the URL it accompanies is a contradiction inside a
+        # single request -- checkable without correlating anything.
+        default_tab = self._marketplace_default_tab_path(village_id)
+        if default_tab is not None:
+            await self.http_client.get_html(default_tab, referer=came_from)
+            came_from = f"{base}{default_tab}"
+
         # Remembered so a later RELOAD of this marketplace can refer to where it
         # was opened from, which is what a browser sends on a reload.
         self._marketplace_from[village_id] = came_from
