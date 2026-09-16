@@ -71,7 +71,7 @@ class _Svc:
         self.calls.append("read")
         return list(self._now)
 
-    async def confirm_routes(self, vid, *, map_span=None):
+    async def confirm_routes(self, vid, *, map_span=None, after_write=False):
         self.calls.append("confirm")
         if isinstance(self._confirm_after, Exception):
             raise self._confirm_after

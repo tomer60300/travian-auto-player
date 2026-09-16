@@ -2,12 +2,20 @@
 
 Running the highest-volume loop straight through the night is the strongest
 machine-vs-human signal. These pin the wrap-aware window test and the
-client-level pause API that the farm loop consults to sleep until morning.
+client-level pause API.
+
+The second paragraph of this docstring used to say the farm loop "consults" that
+API to sleep until morning. It did not, and nor did any other loop: until
+`can_continue` learned about the window, `is_rest_window`, `rest_pause_seconds`
+and `seconds_until_rest_ends` had no callers between them anywhere in the
+project. The machinery was written, tested and unreachable.
 """
 
-from datetime import datetime
+import json
+import time
+from datetime import UTC, datetime, timedelta
 
-from travian_api.stealth.scheduler import ActivityScheduler
+from travian_api.stealth.scheduler import DEFAULT_SERVER_UTC_OFFSET_MINUTES, ActivityScheduler
 
 
 def _at(hour: float) -> datetime:
@@ -129,3 +137,244 @@ class TestClientRestPause:
             client._activity_scheduler, "seconds_until_rest_ends", lambda: 5 * 3600.0
         )
         assert client.rest_pause_seconds() == 0.0
+
+
+class TestTheWindowActuallyStopsTheLoops:
+    """`can_continue()` is the one place all three loops pass through.
+
+    It answered on quotas alone -- have I worked too long today, too long in
+    one sitting -- and said nothing about what time it is. So the night branch
+    of `next_break_duration`, which was correct, could only be reached if the
+    daily budget happened to run out inside the window.
+    """
+
+    def _sched(self, start: float, end: float) -> ActivityScheduler:
+        s = ActivityScheduler(enabled=True)
+        s._night_start_hour = start
+        s._night_end_hour = end
+        return s
+
+    def test_a_fresh_scheduler_still_works_outside_the_window(self):
+        """The premise: nothing here stops an ordinary daytime loop."""
+        s = self._sched(23.0, 6.0)
+        s._night_start_hour, s._night_end_hour = 23.0, 6.0
+        # Not asserting on wall-clock time: force the answer both ways below.
+        assert s.is_rest_window(_at(14.0)) is False
+
+    def test_can_continue_is_false_during_the_window(self, monkeypatch):
+        s = self._sched(23.0, 6.0)
+        monkeypatch.setattr(s, "is_rest_window", lambda *a, **k: True)
+
+        assert s.can_continue() is False
+
+    def test_can_continue_is_true_outside_it(self, monkeypatch):
+        s = self._sched(23.0, 6.0)
+        monkeypatch.setattr(s, "is_rest_window", lambda *a, **k: False)
+
+        assert s.can_continue() is True
+
+    def test_a_disabled_scheduler_never_rests(self):
+        """Stealth off means stealth off -- the window must not leak through."""
+        s = ActivityScheduler(enabled=False)
+
+        assert s.is_rest_window(_at(3.0)) is False
+        assert s.can_continue() is True
+
+
+class TestTheNightPauseCoversTheWholeWindow:
+    """A break that lands short is worse than no break at all.
+
+    It puts activity at 4am AND a gap that looks deliberate. A break that lands
+    long wastes the morning. The old branch drew 6-9h from wherever the loop
+    happened to be standing in the window, so it could do either; it now
+    delegates to `seconds_until_rest_ends`, which measures from the window's END.
+
+    Compared against the window end computed here rather than against a second
+    call, because that method carries its own wake-time buffer -- two samples of
+    one decision is exactly what this change removed.
+    """
+
+    WINDOW = (23.0, 6.0)
+    BUFFER_MAX_S = 2700.0  # the buffer seconds_until_rest_ends adds
+
+    def _sched(self) -> ActivityScheduler:
+        s = ActivityScheduler(enabled=True)
+        s._night_start_hour, s._night_end_hour = self.WINDOW
+        return s
+
+    def _floor_seconds(self, now) -> float:
+        """Time from *now* to the window's end, with no buffer."""
+        hour = now.hour + now.minute / 60.0 + now.second / 3600.0
+        return ((self.WINDOW[1] - hour) % 24.0) * 3600.0
+
+    def test_it_never_wakes_back_inside_the_window(self):
+        s = self._sched()
+        for hour in (23.1, 0.5, 2.0, 4.0, 5.9):
+            now = _at(hour)
+            floor = self._floor_seconds(now)
+            for _ in range(40):
+                assert s.next_break_duration(now) >= floor
+
+    def test_it_never_oversleeps_far_past_morning(self):
+        """The other half: a 6-9h draw entered at 05:30 slept through the day."""
+        s = self._sched()
+        now = _at(5.5)
+
+        for _ in range(60):
+            overshoot = s.next_break_duration(now) - self._floor_seconds(now)
+            assert 0.0 <= overshoot <= self.BUFFER_MAX_S
+
+    def test_the_wake_time_is_not_a_daily_constant(self):
+        s = self._sched()
+        now = _at(1.0)
+        draws = {round(s.next_break_duration(now)) for _ in range(200)}
+
+        assert len(draws) > 1, "waking at the identical second every morning is its own tell"
+
+    def test_outside_the_window_it_is_an_ordinary_short_break(self):
+        s = self._sched()
+
+        assert s.next_break_duration(_at(14.0)) < 3600.0
+
+
+class TestTheBreakIsMeasuredOnTheSameClockThatRefusedTheWork:
+    """`next_break_duration()` resolved its own default `now` from the HOST.
+
+    Every other method here moved to `_server_now()` when the scheduler learned
+    what time it is where the GAME is. This one kept `datetime.now()` -- and
+    because it then passes that value INTO `is_rest_window(now)`, it did not
+    merely disagree with that method, it overrode it.
+
+    With the host three hours ahead of a server at 04:00 and a 23:00-06:00
+    window, `can_continue()` read the server clock, found the night and refused
+    to work, while this read 07:00, found no window, and returned a ten-minute
+    daytime break with two hours of night still to run. `BuildQueueService`
+    sleeps whatever it is handed and resumes, so the account woke up inside its
+    own night and carried on.
+
+    Its own docstring already required all three to agree about where the
+    window is. This is the line that did not.
+    """
+
+    WINDOW = (23.0, 6.0)
+
+    def _sched(self, *, server_offset_minutes: int) -> ActivityScheduler:
+        s = ActivityScheduler(enabled=True)
+        s._night_start_hour, s._night_end_hour = self.WINDOW
+        s.set_server_utc_offset_minutes(server_offset_minutes)
+        return s
+
+    @staticmethod
+    def _pin_server_clock(s: ActivityScheduler, hour: float) -> None:
+        """Pin `_server_now`, leaving the host clock wherever it really is.
+
+        The point of the test is that the two differ, so the host side is
+        deliberately left as the real `datetime.now()` -- whatever the machine
+        running the suite happens to say. The bug reproduces for every host time
+        outside the window, which is most of the day.
+        """
+        s._server_now = lambda: _at(hour)
+
+    def test_a_night_on_the_server_gets_a_night_length_break(self):
+        s = self._sched(server_offset_minutes=60)
+        self._pin_server_clock(s, 4.0)
+
+        # 04:00 server, window ends 06:00 -> about two hours, plus the wake
+        # buffer. A short break here is the bug: ten to twenty minutes.
+        duration = s.next_break_duration()
+
+        assert duration >= 2.0 * 3600.0, (
+            f"got {duration / 60:.0f}min with two hours of night left -- "
+            f"the break was measured on the host clock"
+        )
+
+    def test_it_agrees_with_the_method_that_refuses_the_work(self):
+        """`can_continue` and `next_break_duration` must not split: one saying
+        stop and the other handing back a daytime break is how a loop resumes
+        mid-window."""
+        s = self._sched(server_offset_minutes=60)
+        self._pin_server_clock(s, 4.0)
+
+        assert s.can_continue() is False
+        assert s.next_break_duration() >= 3600.0
+
+    def test_an_explicit_now_is_still_honoured(self):
+        """The parameter exists so all three can be driven from one instant."""
+        s = self._sched(server_offset_minutes=60)
+        self._pin_server_clock(s, 4.0)
+
+        assert s.next_break_duration(_at(14.0)) < 3600.0
+
+    def test_an_explicit_none_keeps_the_host_clock(self):
+        """`set_server_utc_offset_minutes(None)` is the explicit opt-out to
+        host-local time. It is no longer the default -- the default presumes the
+        game world's measured offset, see the class below -- but the opt-out
+        must keep working for whoever states it."""
+        s = self._sched(server_offset_minutes=None)
+
+        assert s.next_break_duration(_at(14.0)) < 3600.0
+
+
+class TestTheClockStartsRightAndStaysLearned:
+    """The offset defaults to the game world's measured UTC+1 and survives a restart.
+
+    Before, the default was the HOST's clock until the first marketplace read of
+    every process. Two consequences, both wrong: the farm, oasis and build loops
+    -- which never read a marketplace -- ran the night window on host time
+    permanently, waking the account 1-2h into the server's night on this
+    operator's machine; and even the trade-route path re-spent a page read every
+    process start to learn a number the previous process already knew. The
+    operator's ruling: default to UTC+1, and cache the learned value so no
+    process needs a request to know what time it is.
+    """
+
+    def test_a_fresh_scheduler_presumes_the_game_worlds_offset(self):
+        s = ActivityScheduler(enabled=True)
+
+        expected = datetime.now(UTC).replace(tzinfo=None) + timedelta(
+            minutes=DEFAULT_SERVER_UTC_OFFSET_MINUTES
+        )
+        assert DEFAULT_SERVER_UTC_OFFSET_MINUTES == 60  # Europe 2, measured (#76)
+        assert abs((s._server_now() - expected).total_seconds()) < 5.0
+
+    def test_a_learned_offset_survives_a_restart(self, tmp_path):
+        state = tmp_path / "scheduler_state.json"
+        first = ActivityScheduler(enabled=True, state_file=state)
+        first.set_server_utc_offset_minutes(120)
+        first._save_state_force()
+
+        second = ActivityScheduler(enabled=True, state_file=state)
+
+        assert second._server_utc_offset_minutes == 120
+
+    def test_a_state_file_from_before_the_field_existed_keeps_the_default(self, tmp_path):
+        """An old save must not read as 'the server is at UTC+0'."""
+        state = tmp_path / "scheduler_state.json"
+        state.write_text(
+            json.dumps({"hourly_buckets": {}, "session_seconds": 0.0, "last_saved": time.time()}),
+            encoding="utf-8",
+        )
+
+        s = ActivityScheduler(enabled=True, state_file=state)
+
+        assert s._server_utc_offset_minutes == DEFAULT_SERVER_UTC_OFFSET_MINUTES
+
+    def test_a_corrupt_saved_offset_is_rejected_not_installed(self, tmp_path):
+        """The same posture `_coerce_cap` takes: a nonsense value on disk keeps
+        the fresh default rather than moving the account's night to it."""
+        state = tmp_path / "scheduler_state.json"
+        state.write_text(
+            json.dumps(
+                {
+                    "hourly_buckets": {},
+                    "session_seconds": 0.0,
+                    "last_saved": time.time(),
+                    "server_utc_offset_minutes": 99999,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        s = ActivityScheduler(enabled=True, state_file=state)
+
+        assert s._server_utc_offset_minutes == DEFAULT_SERVER_UTC_OFFSET_MINUTES

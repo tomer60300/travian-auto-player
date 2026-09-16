@@ -344,6 +344,9 @@ class HttpClient:
             noise_rate=settings.stealth_noise_rate,
             enabled=settings.stealth,
         )
+        # Same identity as the gap shape and the route preferences: how long
+        # this account's breaks run is a habit, not a per-session coin toss.
+        self._noise_injector.seed_breaks(behavioral_identity)
         self._activity_scheduler = ActivityScheduler(
             max_daily_hours=settings.stealth_max_daily_hours,
             max_continuous_hours=settings.stealth_max_continuous_hours,
@@ -527,6 +530,37 @@ class HttpClient:
             return True
         if self._activity_scheduler.can_continue():
             return True
+        raise self._budget_exhausted()
+
+    def check_activity_quota(self) -> bool:
+        """The CAPS only -- for a run whose operator has said they are present.
+
+        Same contract and same exception as :meth:`check_activity_budget`, minus
+        the night-rest window. Deliberately a separate method rather than a flag
+        on that one: which question gets asked is a property of the CALLER, and
+        a call site reading `check_activity_quota()` says why it is entitled to
+        the narrower one, where `check_activity_budget(ignore_rest=True)` would
+        only say that it does.
+
+        Scoped by being chosen at the call site. The scheduler is per-account
+        and shared with every other loop, so suppressing its night window as
+        mutable state for the duration of a run would take the farm and build
+        loops out of their night as well -- an override granted to one operation
+        quietly applying to three.
+        """
+        if not self._stealth_enabled:
+            return True
+        if self._activity_scheduler.quota_allows():
+            return True
+        raise self._budget_exhausted()
+
+    def _budget_exhausted(self) -> ActivityBudgetExhausted:
+        """Build the exception naming the limit that actually stopped us.
+
+        Returns it rather than raising it, so both callers end in a visible
+        `raise` and neither reads as though it could fall off the end of a
+        function declared `-> bool`.
+        """
         sched = self._activity_scheduler
         rolling_h = sched.daily_hours_used
         session_h = sched.session_hours
@@ -545,9 +579,17 @@ class HttpClient:
                 f"continuous session limit reached ({session_h:.1f}h / {sched.max_continuous_hours}h)"
                 f" — take a {sched.min_break_minutes:.0f}min break"
             )
+        elif sched.is_rest_window():
+            # Not a budget at all. This branch used to fall through to the
+            # catch-all below and report "rolling 24h 0.0h / 8h, session
+            # 0.0h / 3h" -- every number under its cap, presented as the reason
+            # nothing could run. An operator reading that goes looking at quotas
+            # that are untouched, and the one fact that would explain it, that
+            # the account is in its night window, appears nowhere.
+            reason = "night-rest window is open; this is a schedule, not a quota"
         else:
             reason = f"rolling 24h {rolling_h:.1f}h / {sched.max_daily_hours}h, session {session_h:.1f}h / {sched.max_continuous_hours}h"
-        raise ActivityBudgetExhausted(f"Activity budget exhausted: {reason}")
+        return ActivityBudgetExhausted(f"Activity budget exhausted: {reason}")
 
     def rest_pause_seconds(self) -> float:
         """Seconds to sleep NOW if the account is in its night-rest window.
@@ -616,7 +658,12 @@ class HttpClient:
                 pass
 
     async def _stealth_pre_request(
-        self, url: str, request_type: str = "page", *, referer: str | None = None
+        self,
+        url: str,
+        request_type: str = "page",
+        *,
+        referer: str | None = None,
+        consequential: bool = False,
     ) -> Dict[str, str]:
         """Run stealth pre-request checks and return appropriate headers.
 
@@ -660,8 +707,13 @@ class HttpClient:
                 headers["X-Version"] = x_version
             return headers
 
-        # Throttle
-        await self._throttler.wait(context=url)
+        # Throttle. Pacing follows the CALLER's stated intent, not the header
+        # shape -- see the note above `RequestThrottler._effective_gap`. Header
+        # shape and pacing answer different questions, and conflating them put
+        # every `/api/v1/*` call on a read-back's timing.
+        await self._throttler.wait(
+            context=url, request_type=request_type, consequential=consequential
+        )
 
         # Get browser-appropriate headers
         if request_type == "fetch":
@@ -1114,6 +1166,7 @@ class HttpClient:
         safe_to_retry: bool = True,
         request_type: str = "json",
         referer: str | None = None,
+        consequential: bool = False,
         _retry: int = 0,
     ) -> Dict[str, Any]:
         """Make a POST request with JSON data.
@@ -1143,7 +1196,9 @@ class HttpClient:
         # does not get one here: the transport sets it for a `json=` body, and
         # for_fetch's contract is that the caller owns that header.
         rt = request_type if request_type in ("xhr", "fetch") else "json"
-        headers = await self._stealth_pre_request(url, rt, referer=referer)
+        headers = await self._stealth_pre_request(
+            url, rt, referer=referer, consequential=consequential
+        )
         # The non-stealth header path returns Content-Type="" which would
         # bypass the `not in` form of this guard. `not headers.get(...)`
         # treats both "missing" and "empty string" identically.
@@ -1266,6 +1321,7 @@ class HttpClient:
         safe_to_retry: bool = True,
         request_type: str = "json",
         referer: str | None = None,
+        consequential: bool = False,
     ) -> Dict[str, Any]:
         """Make a DELETE request (JSON response expected).
 
@@ -1277,7 +1333,9 @@ class HttpClient:
             url = urljoin(self.base_url, url.lstrip("/"))
 
         rt = request_type if request_type in ("xhr", "fetch") else "json"
-        headers = await self._stealth_pre_request(url, rt, referer=referer)
+        headers = await self._stealth_pre_request(
+            url, rt, referer=referer, consequential=consequential
+        )
         # Set for BOTH shapes, not just xhr. The game's own API helper is a
         # single fetch() used for every verb, and it always sends
         # "application/json; charset=UTF-8". Leaving the fetch path to the
@@ -1378,6 +1436,7 @@ class HttpClient:
         safe_to_retry: bool = True,
         request_type: str = "json",
         referer: str | None = None,
+        consequential: bool = False,
     ) -> Dict[str, Any]:
         """Make a PUT request with a JSON body (JSON response expected).
 
@@ -1399,7 +1458,9 @@ class HttpClient:
             url = urljoin(self.base_url, url.lstrip("/"))
 
         rt = request_type if request_type in ("xhr", "fetch") else "json"
-        headers = await self._stealth_pre_request(url, rt, referer=referer)
+        headers = await self._stealth_pre_request(
+            url, rt, referer=referer, consequential=consequential
+        )
         # Set for BOTH shapes, not just xhr. The game's own API helper is a
         # single fetch() used for every verb, and it always sends
         # "application/json; charset=UTF-8". Leaving the fetch path to the
@@ -1612,6 +1673,127 @@ class HttpClient:
 
     @_billed
     @_transient_retry
+    async def get_json(
+        self,
+        url: str,
+        *,
+        skip_reauth: bool = False,
+        safe_to_retry: bool = True,
+        referer: str | None = None,
+        consequential: bool = False,
+        request_type: str = "fetch",
+    ) -> Dict[str, Any]:
+        """A GET the page's own script would make, parsed as JSON.
+
+        The counterpart to :meth:`post_json`, and it exists because some of the
+        game's API is read with GET -- ``/api/v1/videofeature/open/<type>`` and
+        ``/fallback/v1/request-ad`` both are, verified against a live capture.
+        Without this the only GET available was :meth:`get_html`, which sends
+        the headers of a NAVIGATION: ``Accept: text/html…``, ``Sec-Fetch-Mode:
+        navigate``, ``Sec-Fetch-Dest: document``. A browser asking its own API
+        for JSON does not send those, and using them here would have been the
+        same class of mismatch the whole stealth layer exists to avoid -- worse,
+        it would also have moved the account-wide "last page visited" to an API
+        URL, poisoning the Referer of everything after it.
+
+        ``request_type`` picks the browser shape, defaulting to ``fetch``;
+        ``_stealth_post_request`` is told the same, so page context is left
+        alone exactly as it is for a POST.
+
+        Returns the decoded object, or ``{"response_text": ...}`` when the body
+        was not JSON -- the same shape :meth:`post_json` uses, so callers can
+        recognise an HTML soft-block or a maintenance page rather than crash on
+        it.
+        """
+        if not url.startswith("http"):
+            url = urljoin(self.base_url, url.lstrip("/"))
+
+        headers = await self._stealth_pre_request(
+            url, request_type, referer=referer, consequential=consequential
+        )
+
+        try:
+            logger.debug(f"GET(json) {url}")
+
+            if self._use_curl:
+                response = await self._curl_get(url, headers)
+            else:
+                response = await self.client.get(url, headers=headers, follow_redirects=True)
+
+            # Session check BEFORE the suspicious-response scan, matching the
+            # order get_html uses. A login page is HTML full of form markup, and
+            # running the captcha/soft-block heuristics over it first can class
+            # an expired session as a block -- which is the wrong recovery
+            # (a block waits; an expired session re-authenticates).
+            resp_url = str(response.url) if hasattr(response, "url") else url
+            if "login" in resp_url.lower() or (
+                "auth" in resp_url.lower() and "code" not in resp_url
+            ):
+                # Fail closed, exactly as get_html does. An API GET answered
+                # with the login page is a dead session, and handing the caller
+                # a parse of it would report "no data" for "not logged in".
+                if skip_reauth:
+                    raise SessionExpiredError(f"Session expired (redirected to login): {resp_url}")
+                await self._handle_session_expired()
+                response = (
+                    await self._curl_get(url, headers)
+                    if self._use_curl
+                    else await self.client.get(url, headers=headers, follow_redirects=True)
+                )
+                retry_url = str(response.url) if hasattr(response, "url") else url
+                # The SAME test the landing check uses, not a narrower one. A
+                # re-auth that lands on an `/auth`-shaped page would otherwise
+                # come back as a successful parse of the login HTML --
+                # `{"response_text": "<html>…"}` -- and the caller would report
+                # "the endpoint gave us nothing" for "the session is dead". That
+                # is the exact confusion the landing check exists to prevent.
+                if "login" in retry_url.lower() or (
+                    "auth" in retry_url.lower() and "code" not in retry_url
+                ):
+                    raise SessionExpiredError(
+                        f"Session expired and re-authentication failed: {retry_url}"
+                    )
+
+            await self._check_suspicious_response(
+                response.text, url=url, status_code=response.status_code
+            )
+
+            if response.status_code >= 400:
+                if response.status_code == 429:
+                    self._penalize_rate_limit()
+                self._dump_http_error(
+                    method="GET", url=url, status=response.status_code, body=response.text
+                )
+                raise NetworkError(
+                    f"HTTP {response.status_code}: {response.text}", response.status_code
+                )
+
+            self._stealth_post_request(request_type, response, fallback_url=url)
+
+            try:
+                return response.json()
+            except Exception:
+                return {"response_text": response.text}
+
+        except NetworkError:
+            raise
+        except SessionExpiredError:
+            raise
+        except httpx.RequestError as e:
+            if not safe_to_retry:
+                raise NetworkError(f"Request failed (non-retryable): {e}")
+            raise
+        except Exception as e:
+            if HAS_CURL_CFFI and isinstance(e, CurlError):
+                if not safe_to_retry:
+                    raise NetworkError(f"Request failed (curl, non-retryable): {e}")
+                raise
+            if not safe_to_retry:
+                raise NetworkError(f"Request failed (non-retryable): {e}")
+            raise
+
+    @_billed
+    @_transient_retry
     async def get_html(
         self,
         url: str,
@@ -1620,6 +1802,7 @@ class HttpClient:
         skip_reauth: bool = False,
         safe_to_retry: bool = True,
         referer: str | None = None,
+        consequential: bool = False,
     ) -> str:
         """Make a GET request and return HTML.
 
@@ -1635,7 +1818,9 @@ class HttpClient:
         if not url.startswith("http"):
             url = urljoin(self.base_url, url.lstrip("/"))
 
-        headers = await self._stealth_pre_request(url, "page", referer=referer)
+        headers = await self._stealth_pre_request(
+            url, "page", referer=referer, consequential=consequential
+        )
 
         try:
             logger.debug(f"GET {url}")

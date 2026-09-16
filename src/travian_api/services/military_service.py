@@ -103,7 +103,7 @@ class MilitaryService:
         """Get available troops at rally point."""
         url = "/build.php?gid=16&tt=2"
         if village_id:
-            url = f"/build.php?newdid={village_id}&gid=16&tt=2"
+            url = f"/build.php?gid=16&tt=2&newdid={village_id}"
         html = await self.http_client.get_html(url)
         return parse_rally_point_troops(html)
 
@@ -120,7 +120,7 @@ class MilitaryService:
         """
         url = f"/build.php?id={smithy_slot}&gid=13"
         if village_id:
-            url = f"/build.php?newdid={village_id}&id={smithy_slot}&gid=13"
+            url = f"/build.php?id={smithy_slot}&gid=13&newdid={village_id}"
         html = await self.http_client.get_html(url)
         return parse_smithy_research_levels(html, tribe_id=tribe_id)
 
@@ -192,7 +192,7 @@ class MilitaryService:
 
             # Use newdid in the POST URL to set village context
             if village_id:
-                rally_url = f"/build.php?newdid={village_id}&gid=16&tt=2"
+                rally_url = f"/build.php?gid=16&tt=2&newdid={village_id}"
             else:
                 rally_url = "/build.php?gid=16&tt=2"
 

@@ -9,6 +9,7 @@ who occasionally gets distracted.
 
 import asyncio
 import logging
+import math
 import random
 from typing import TYPE_CHECKING, Optional
 
@@ -52,6 +53,17 @@ class NoiseInjector:
         self.enabled = enabled
         self._actions_since_noise = 0
         self._actions_since_break = 0
+        # Per-account break shape. Seeded from the global RNG here and rebound
+        # to the persona by `seed_breaks`, the same lifecycle the throttler's
+        # gap shape and the navigator's route preferences have.
+        self._break_median_min = random.uniform(3.0, 7.5)
+        self._break_sigma = random.uniform(0.45, 0.9)
+
+    def seed_breaks(self, identity: str) -> None:
+        """Bind the break shape to a stable persona identity."""
+        rng = random.Random(identity)
+        self._break_median_min = rng.uniform(3.0, 7.5)
+        self._break_sigma = rng.uniform(0.45, 0.9)
 
     async def maybe_inject_noise(self, village_id: Optional[int] = None) -> bool:
         """Called between automation actions. Returns True if noise was injected.
@@ -84,6 +96,25 @@ class NoiseInjector:
 
         return False
 
+    def _break_minutes(self) -> float:
+        """How long the player is away, when nobody said.
+
+        This was ``random.uniform(2.0, 10.0)``: a flat histogram between two
+        round numbers, never 1.9 minutes and never 10.1, with every value in
+        between exactly as likely as every other. ``stealth/timing.py`` opens
+        by calling that shape "trivially detectable" and the rest of this
+        package replaced its uniforms accordingly; this one was missed, and it
+        governs the longest and most conspicuous pauses we take.
+
+        Real breaks are right-skewed -- most are short, a few run long -- so
+        this is log-normal, with its own median and spread drawn per account.
+        Two accounts should not agree on how long a coffee takes.
+        """
+        return min(
+            max(random.lognormvariate(math.log(self._break_median_min), self._break_sigma), 0.75),
+            45.0,
+        )
+
     async def session_break(self, duration_minutes: Optional[float] = None) -> float:
         """Simulate a break (player went AFK, got coffee, etc.)
 
@@ -100,7 +131,7 @@ class NoiseInjector:
             return 0.0
 
         if duration_minutes is None:
-            duration_minutes = random.uniform(2.0, 10.0)
+            duration_minutes = self._break_minutes()
 
         duration_s = duration_minutes * 60.0
         logger.info(f"Taking a break for {duration_minutes:.1f} minutes...")

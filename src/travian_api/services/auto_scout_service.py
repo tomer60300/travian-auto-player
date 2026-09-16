@@ -17,6 +17,7 @@ from ..clients.http_client import HttpClient
 from ..exceptions import ReconStrictViolation
 from ..models.farm_list import MapTileInfo
 from ..parsers.html_parser import clean_unicode
+from ..stealth.navigator import map_viewport_referer
 
 logger = logging.getLogger(__name__)
 
@@ -492,6 +493,16 @@ _recon_strict_context: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 
+def _tiles_before_a_pause() -> int:
+    """How many tiles to open before looking away.
+
+    Right-skewed and never a round number: a break every exactly-N tiles is a
+    period, and a period is the easiest thing in the world to find in a
+    timestamp series.
+    """
+    return max(6, int(random.lognormvariate(math.log(18.0), 0.45)))
+
+
 class AutoScoutService:
     """Scan the map for villages and send scouts based on filters."""
 
@@ -675,6 +686,11 @@ class AutoScoutService:
                     }
                 },
                 request_type="xhr",
+                # The map's address bar follows the viewport, so a pan is
+                # referred from where the map was looking before it. A whole
+                # scan referred from one bare /karte.php is the tell this
+                # closes -- see `map_viewport_referer`.
+                referer=map_viewport_referer(read_client, sx, sy),
             )
             for t in resp.get("tiles", []):
                 pos = t.get("position", {})
@@ -732,11 +748,49 @@ class AutoScoutService:
         HttpClient when configured (concentrates bot-detection on the
         disposable account).
         """
-        resp = await self._read_client().post_json(
-            "/api/v1/map/tile-details", {"x": x, "y": y}, request_type="xhr"
+        # Named `read_client`, matching the scan-batch call above: the recon
+        # routing guard reads these receivers by name, and the referer pin needs
+        # a handle on the SAME client that sends the request -- the recon
+        # account's navigator has its own viewport.
+        read_client = self._read_client()
+        resp = await read_client.post_json(
+            "/api/v1/map/tile-details",
+            {"x": x, "y": y},
+            request_type="xhr",
+            referer=map_viewport_referer(read_client, x, y),
         )
         html = resp.get("html", "")
         return self._parse_tile_details(x, y, html)
+
+    async def _look_away(self, done: int, total: int) -> None:
+        """Stop clicking tiles for a bit, the way a person has to.
+
+        Pacing fixed the RATE -- the throttler keeps this loop near 0.67
+        requests a second, below the busiest minute the recorded player
+        produced (0.88). It did nothing about DURATION, and this loop had none
+        of the burst-and-break machinery the oasis sweep has: several hundred
+        tiles, one after another, awaiting nothing but the next request.
+
+        Which is the part rate alone cannot fix. A human sustains 0.33
+        requests a second across a session and bursts above it briefly; they do
+        not make three hundred consecutive decisions without looking at
+        anything else. Twelve unbroken minutes of map clicks is not a fast
+        human, it is a shape no human has.
+
+        So the answer to "our scan is too fast" was never "slow the requests
+        down further" -- at some point that is just a machine being patient.
+        It is to make the operation look like several visits instead of one.
+        """
+        pause = min(max(random.lognormvariate(math.log(35.0), 0.6), 12.0), 240.0)
+        logger.info(
+            "Pausing %.0fs after %d of %d tiles — a person does not click three "
+            "hundred tiles without looking away. Nothing is stuck.",
+            pause,
+            done,
+            total,
+        )
+        self._report(f"Taking a short break after {done}/{total} tiles...")
+        await asyncio.sleep(pause)
 
     async def enrich_tiles(
         self, tiles: List[MapTileInfo], concurrency: int = 15
@@ -751,8 +805,12 @@ class AutoScoutService:
         """
         enriched: List[MapTileInfo] = []
         total = len(tiles)
+        next_pause_at = _tiles_before_a_pause()
 
         for i, tile in enumerate(tiles):
+            if i and i >= next_pause_at:
+                await self._look_away(i, total)
+                next_pause_at = i + _tiles_before_a_pause()
             try:
                 detail = await self.get_tile_details(tile.x, tile.y)
                 detail.distance = tile.distance

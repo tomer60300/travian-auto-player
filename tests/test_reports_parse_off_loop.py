@@ -28,15 +28,25 @@ def _page(rows: int, page: int = 1) -> str:
 
 
 class _Client:
-    """Serves canned /report/all pages; no network, no throttle."""
+    """Serves canned report-list pages; no network, no throttle.
+
+    The URLs are asserted rather than pattern-matched loosely: page one is the
+    bare ``/report`` a player clicks, and later pages are ``/report?page=N``.
+    This used to split on ``=`` and take what followed, which quietly accepted
+    anything at all -- including ``/report/all?page=N``, a path this gpack does
+    not link.
+    """
 
     def __init__(self, sizes: list[int]) -> None:
         self.sizes = sizes
         self.requested: list[int] = []
+        self.paths: list[str] = []
 
     async def get_html(self, path: str) -> str:
-        page = int(path.rsplit("=", 1)[1])
+        assert path == "/report" or path.startswith("/report?page="), path
+        page = 1 if path == "/report" else int(path.split("page=", 1)[1])
         self.requested.append(page)
+        self.paths.append(path)
         rows = self.sizes[page - 1] if page <= len(self.sizes) else 0
         return _page(rows, page)
 
@@ -103,6 +113,9 @@ class TestPaginationIsUnchanged:
         reports = await service.fetch_reports(max_pages=10)
 
         assert client.requested == [1, 2, 3]
+        # The URLs the game's own links produce: a bare path to get here, a
+        # bare `?page=N` to go deeper. There is no `/report/all`.
+        assert client.paths == ["/report", "/report?page=2", "/report?page=3"]
         assert len(reports) == 72
         assert reports[0].report_type == "battle"
         assert reports[0].is_read is False
@@ -128,8 +141,7 @@ class TestPaginationIsUnchanged:
     async def test_a_failing_page_keeps_what_was_already_parsed(self):
         class Flaky(_Client):
             async def get_html(self, path: str) -> str:
-                page = int(path.rsplit("=", 1)[1])
-                if page == 2:
+                if path == "/report?page=2":
                     raise RuntimeError("boom")
                 return await super().get_html(path)
 

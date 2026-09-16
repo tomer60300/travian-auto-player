@@ -14,7 +14,7 @@ from .html_parser import clean_unicode
 
 def parse_report_list(html: str) -> List[ReportListItem]:
     """
-    Parse report list page (/report/all?page=N).
+    Parse report list page (/report, or /report?page=N beyond the first).
 
     Row structure:
       <input name="ids[]" value="{id}"/>
@@ -95,7 +95,7 @@ def parse_alliance_report_list(html: str) -> List[ReportListItem]:
     """
     Parse alliance report list page (/alliance/reports?filter=...).
 
-    Different structure from /report/all:
+    Different structure from the report list:
       - No input[name="ids[]"] checkboxes
       - Report ID in <a href="/report?id=XXX&aid=YYY">
       - Same iReport icons and td.sub/td.dat classes

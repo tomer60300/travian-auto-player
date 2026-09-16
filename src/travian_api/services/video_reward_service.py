@@ -1,24 +1,78 @@
-"""Video reward service — simulates video playback via ATG ad provider APIs."""
+"""Video reward service — the game's own ad-reward protocol, minus the video.
+
+**What this does not do**, said first because the first line used to claim
+otherwise: it never fetches the video. The ad response carries a
+``video_src_url`` and a ``tracking_url`` and neither is requested -- the flow
+asks for an ad, waits, and claims. Whether that is checkable server-side is
+unknown; that it differs from a browser is not.
+
+It stays that way for now because the recorder that captured everything else
+here filtered to documents and XHR/fetch, and a ``<video>`` element is neither.
+So there is no observation of how the real client requests those bytes -- how
+many range requests, what headers, whether the tracking URL is pinged -- and
+inventing that shape is the mistake this file was rewritten to stop making.
+Re-running the capture with media included would settle it.
+
+The whole flow, recorded live on 2026-09-15 with the operator watching two ads
+end to end (a building speed-up and a hero adventure), request and response
+bodies included::
+
+    GET  /api/v1/videofeature/open/<rewardType>      Referer: the offering page
+      <- {"vrid":"ipqm…cG0","hash":null,"identifier":"75f8…0f1a",
+          "gameId":"09ee…d311e4","suffix":""}
+
+    GET  /fallback/v1/request-ad?game_id=<gameId>    Referer: /
+      <- {"status":"success","data":{"video_src_url":"…/Hyperdrome_EN.mp4",
+          "tracking_url":"…","token":"d471…b83e"}}
+      (plus an ih.adscale.de/map iframe, which is the ad network's own pixel)
+
+    … 23-34 seconds of video …
+
+    POST /fallback/v1/reward                         Referer: /
+      -> {"token":"d471…b83e","external_identifier":"75f8…0f1a","custom_1":"ipqm…cG0"}
+      <- {"status":"success","data":{"rewarded":true,
+          "conversionId":"724355b8-d589-45d3-9f63-7ae575f6c8db",
+          "signature":"f15843e619164f612971fad8799c5d9671388a7a", …}}
+
+    POST /api/v1/videofeature/ends                   Referer: the offering page
+      -> {"vrid":"ipqm…cG0","hash":"724355b8-…-7ae575f6c8db" + "f15843e6…71388a7a"}
+      <- {"token":"s60Vn0D4R7PLoZlr"}
+
+Four things in that the previous implementation had wrong, and none of them
+were small:
+
+* **The ad provider moved.** This service talked to ATG -- fetched an iframe,
+  decoded a base64 config, fired ``fc.php`` progress ticks every three seconds,
+  then parsed a ``<sign>`` element out of an XML answer from ``xs.php``. None of
+  that is in the flow any more. The ad leg is two requests to Travian's own
+  ``/fallback/v1/`` and the network is adscale.
+* **``open`` is a GET, and carries nothing.** We POSTed it with a body naming
+  villageId/slotId/buildingId. The real request has no body and no query: the
+  server takes the target from the session and the Referer. Which changes what a
+  caller has to do -- see :meth:`_stand_where_the_offer_is`.
+* **The claim hash is not computed.** It is ``conversionId`` and ``signature``
+  from the ad network's receipt, concatenated, no separator. Verified on both
+  watches.
+* **There is no ``/api/v1/videofeature/start``.** Two complete granted claims
+  and a 1,631-request session contain none. That one was removed first, on its
+  own, because it was the only part that could be removed without knowing any
+  of the rest.
+
+The second-order win is that the whole thing now runs on the client that was
+already open. There used to be a separate HTTP session for the ad host, and
+keeping its identity coherent with the game's -- same impersonation target,
+same client hints, no Travian cookies -- was a standing maintenance cost that
+had already leaked a ``python-httpx`` User-Agent once. The ad host is Travian
+now. That client is gone.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 import logging
-import re
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlencode
-
-import httpx
-
-try:  # curl_cffi is optional; HttpClient refuses stealth without it
-    from curl_cffi.requests import AsyncSession as _CurlAsyncSession
-
-    _HAS_CURL = True
-except ImportError:  # pragma: no cover - mirrors http_client's own guard
-    _CurlAsyncSession = None
-    _HAS_CURL = False
+import math
+import random
+from typing import Any, Dict
 
 from ..clients.http_client import HttpClient
 
@@ -37,23 +91,15 @@ REWARD_TYPES = {
     "cropProductionBonus": "+15% crop production (8h)",
 }
 
-
-def _jquery_param(obj: Any, prefix: str = "") -> List[Tuple[str, str]]:
-    """Emulate jQuery.param() — serialize nested dicts to URL-encoded key=value pairs."""
-    parts: List[Tuple[str, str]] = []
-    if isinstance(obj, dict):
-        for key, value in obj.items():
-            full_key = f"{prefix}[{key}]" if prefix else str(key)
-            if isinstance(value, dict):
-                parts.extend(_jquery_param(value, full_key))
-            elif isinstance(value, list):
-                for i, item in enumerate(value):
-                    parts.extend(_jquery_param({str(i): item}, full_key))
-            else:
-                parts.append((full_key, str(value)))
-    else:
-        parts.append((prefix, str(obj)))
-    return parts
+# Reward type -> the page whose markup carries the button, where one is known.
+# Both recorded opens came from such a page, and the open call sends nothing
+# else, so this Referer is the whole of the context the server gets.
+#
+# `buildingUpgrade` is absent on purpose: its page is per-building
+# (/build.php?id=<slot>&gid=<gid>) and is built from the caller's parameters.
+_OFFER_PAGE = {
+    "adventureDuration": "/hero/adventures",
+}
 
 
 class VideoRewardResult:
@@ -66,292 +112,234 @@ class VideoRewardResult:
         self.raw = raw
 
     def __repr__(self):
-        return f"VideoRewardResult(success={self.success}, type={self.reward_type}, msg={self.message})"
+        return (
+            f"VideoRewardResult(success={self.success}, "
+            f"type={self.reward_type}, msg={self.message})"
+        )
 
 
 class VideoRewardService:
-    """
-    Claims video rewards by simulating the ATG ad provider protocol.
+    """Claims video rewards by following the game's own ad flow.
 
-    Flow:
-    1. POST /api/v1/videofeature/open/{type} → vrid + iframe URL
-    2. Fetch iframe HTML → extract ATG config (xsign with fc/xs URLs + xc state)
-    3. Rapid-fire progress ticks to fc.php (simulates 30s video)
-    4. POST xs.php → get signature hash
-    5. POST /api/v1/videofeature/start → notify server
-    6. POST /api/v1/videofeature/ends → claim reward with hash
+    Five requests, all on Travian's host:
+
+    1. ``GET  /api/v1/videofeature/open/{type}``  -> vrid, identifier, gameId
+    2. ``GET  /fallback/v1/request-ad?game_id=``  -> ad token
+    3. wait out the video
+    4. ``POST /fallback/v1/reward``               -> conversionId + signature
+    5. ``POST /api/v1/videofeature/ends``         -> the reward
+
+    The module docstring carries the capture this is built from, byte for byte.
     """
 
     def __init__(self, http_client: HttpClient):
         self.http_client = http_client
-        # Separate httpx client for ATG requests (no Travian cookies/headers)
-        self._atg_client: Optional[httpx.AsyncClient] = None
 
-    async def _get_atg_client(self):
-        """The ad-network client: no Travian cookies, but the same browser.
+    async def close(self) -> None:
+        """Nothing to close any more, and kept because callers call it.
 
-        This client exists to keep Travian's session cookies off the ad host, and
-        that part was right. What it also did was leave headers to httpx, which
-        means every one of these requests announced ``User-Agent:
-        python-httpx/<version>`` -- a plaintext "not a browser" string on a host
-        that Travian's own reward flow validates against. The rest of the stack
-        spends real effort on TLS and header shape; this endpoint gave it away in
-        cleartext.
-
-        The ad frame is a page inside the game's own browser, so it carries that
-        browser's identity: same UA, same language, same client hints.
+        There used to be a second HTTP client here for the ad network, with its
+        own cookie jar, its own impersonation target and its own lifecycle trap
+        (httpx says ``aclose``, curl_cffi says ``close``; picking wrong leaked a
+        session per claim). The ad network is on Travian's own host now, so the
+        claim runs on the client that was already open.
         """
-        if not self._atg_client:
-            headers = self.http_client._browser_headers.for_page_load()
-            identity = {
-                key: value
-                for key, value in headers.items()
-                # The ad host is a different origin: Travian's Referer and
-                # its same-origin Sec-Fetch-Site would both be lies, and a
-                # detectable one. The identity headers are what carry over.
-                if key
-                in (
-                    "User-Agent",
-                    "Accept-Language",
-                    "Accept-Encoding",
-                    "sec-ch-ua",
-                    "sec-ch-ua-mobile",
-                    "sec-ch-ua-platform",
-                )
-                and value is not None
-            }
-            # Chrome headers over Python TLS is the exact combination
-            # HttpClient refuses to run (see its RuntimeError): the mismatch
-            # between a Chrome User-Agent and a non-Chrome JA3 is a stronger
-            # tell than sending no Chrome headers at all. This client had the
-            # full Chrome persona bolted onto a bare httpx session, so the ad
-            # host saw a fingerprint no browser produces -- while the game path
-            # two files away impersonated properly. Same impersonation target as
-            # the persona, so the two agree.
-            if _HAS_CURL:
-                persona = getattr(self.http_client, "_persona", None)
-                self._atg_client = _CurlAsyncSession(
-                    impersonate=persona.impersonate if persona else "chrome",
-                    timeout=30,
-                    headers=identity,
-                )
+
+    @staticmethod
+    def _open_endpoint(reward_type: str) -> tuple[str, str | None]:
+        """The path segment for a reward type, and the resource it implies.
+
+        The four per-resource bonuses are one ``productionBoost`` feature with a
+        resource attached -- a distinction this service's callers make and the
+        URL does not.
+        """
+        resource_map = {
+            "lumberProductionBonus": ("productionBoost", "lumber"),
+            "clayProductionBonus": ("productionBoost", "clay"),
+            "ironProductionBonus": ("productionBoost", "iron"),
+            "cropProductionBonus": ("productionBoost", "crop"),
+            "productionBoost": ("productionBoost", None),
+        }
+        return resource_map.get(reward_type, (reward_type, None))
+
+    @staticmethod
+    def _watch_seconds() -> float:
+        """How long to let the ad run before claiming.
+
+        Two real watches, timed from the ad request to the reward POST: 33.6s
+        and 23.2s. The spread is the ad itself -- the second was
+        ``Hyperdrome_EN.mp4`` -- plus however long the player took to click
+        after it finished. There is no single right number, and a constant would
+        be the wrong SHAPE whatever its value: a reward flow that always takes
+        exactly N seconds is a stronger signal than one that takes too long.
+
+        Log-normal around 31s, floored at 24s, just above the shorter
+        observation. Erring long is nearly free -- a player who glanced away
+        mid-ad looks like a player -- while erring short is a claim for a video
+        that had not finished.
+        """
+        return min(max(random.lognormvariate(math.log(31.0), 0.18), 24.0), 75.0)
+
+    def _origin(self) -> str:
+        return self.http_client.base_url.rstrip("/")
+
+    async def _stand_where_the_offer_is(
+        self, reward_type: str, extra_params: Dict[str, Any]
+    ) -> str:
+        """Navigate to the page offering this reward; return its absolute URL.
+
+        Both recorded opens came from the page carrying the button -- a building
+        speed-up from ``/build.php?id=22&gid=22``, an adventure from
+        ``/hero/adventures``. The open call carries no body, so that Referer is
+        the entire context the server has for deciding what is being sped up.
+
+        Which makes this a correctness step before it is a stealth one. A
+        building claim made from the wrong page is not a failed claim; it is a
+        claim against whatever the session was last looking at, and the daily
+        video is spent either way.
+
+        A reward type whose page is not known falls back to wherever the session
+        already is. That is not a guess at a URL, it is declining to make one --
+        the same rule the navigator's page table follows.
+        """
+        origin = self._origin()
+        navigator = getattr(self.http_client, "navigator", None)
+
+        if reward_type == "buildingUpgrade":
+            slot = extra_params.get("slotId")
+            gid = extra_params.get("buildingId")
+            village = extra_params.get("villageId")
+            if slot is None or gid is None:
+                raise ValueError("buildingUpgrade needs slotId and buildingId to find its page")
+            # `newdid` last, as everywhere: see stealth/navigator.py.
+            path = f"/build.php?id={slot}&gid={gid}"
+            if village:
+                path = f"{path}&newdid={village}"
+            if navigator is not None and navigator.enabled:
+                # The gid goes in, so the navigator lands on this exact URL and
+                # there is nothing left to load afterwards. Passing it also
+                # spares the village-view parse: we were handed the building's
+                # type by the caller.
+                await navigator.navigate_to_building(int(slot), village, gid=int(gid))
             else:
-                # Only reachable with stealth off; HttpClient refuses to start
-                # stealthed without curl_cffi.
-                self._atg_client = httpx.AsyncClient(
-                    timeout=30, follow_redirects=True, headers=identity
-                )
-        return self._atg_client
+                await self.http_client.get_html(path, skip_reauth=True)
+            return f"{origin}{path}"
 
-    async def close(self):
-        if self._atg_client:
-            # httpx says aclose(); curl_cffi's AsyncSession says close(). Both
-            # are coroutines, and getting this wrong leaks a session per claim.
-            closer = getattr(self._atg_client, "aclose", None) or self._atg_client.close
-            await closer()
-            self._atg_client = None
+        known = _OFFER_PAGE.get(reward_type)
+        if known:
+            await self.http_client.get_html(known, skip_reauth=True)
+            return f"{origin}{known}"
 
-    async def claim_reward(
-        self,
-        reward_type: str,
-        tick_delay_ms: int = 3000,
-        wait_before_claim_s: float = 1.0,
-        **extra_params,
-    ) -> VideoRewardResult:
-        """
-        Claim a video reward by simulating ATG ad playback.
+        current = self.http_client.browser_headers.last_page_path
+        return f"{origin}{current}" if current else f"{origin}/dorf1.php"
 
-        Takes ~33 seconds (real 3s timing required by ATG server).
+    async def claim_reward(self, reward_type: str, **extra_params) -> VideoRewardResult:
+        """Watch an ad the way the game's client watches one, and claim it.
 
-        Args:
-            reward_type: One of the REWARD_TYPES keys (e.g. "ironProductionBonus")
-            tick_delay_ms: Delay between progress ticks (ms). 3000ms required for signature.
-            wait_before_claim_s: Wait time before calling /ends after getting hash
-
-        Returns:
-            VideoRewardResult
+        ``extra_params`` still accepts ``villageId``/``slotId``/``buildingId``,
+        but they are no longer SENT -- the open call carries no body at all.
+        They locate the page the request has to come from instead. The target
+        used to be something we asserted; it is now something the session
+        demonstrates.
         """
         if reward_type not in REWARD_TYPES:
             return VideoRewardResult(
                 False, reward_type, f"Unknown reward type. Valid: {', '.join(REWARD_TYPES.keys())}"
             )
 
+        endpoint, resource = self._open_endpoint(reward_type)
+        origin = self._origin()
+
         try:
-            # Phase 1: Open video session
-            logger.info(f"Opening video session for {reward_type}")
-            # Build request data based on reward type
-            open_body: Dict[str, Any] = {}
-            open_endpoint = reward_type
+            referer = await self._stand_where_the_offer_is(reward_type, extra_params)
 
-            # Production boost types need resource parameter
-            resource_map = {
-                "lumberProductionBonus": ("productionBoost", "lumber"),
-                "clayProductionBonus": ("productionBoost", "clay"),
-                "ironProductionBonus": ("productionBoost", "iron"),
-                "cropProductionBonus": ("productionBoost", "crop"),
-                "productionBoost": ("productionBoost", None),  # needs resource param
-            }
-
-            if reward_type in resource_map:
-                endpoint, resource = resource_map[reward_type]
-                open_endpoint = endpoint
-                if resource:
-                    open_body["resource"] = resource
-            elif reward_type == "buildingUpgrade":
-                # buildingUpgrade requires villageId, slotId, buildingId
-                for key in ("villageId", "slotId", "buildingId"):
-                    if key in extra_params:
-                        open_body[key] = extra_params[key]
-                if not all(k in open_body for k in ("villageId", "slotId", "buildingId")):
-                    return VideoRewardResult(
-                        False,
-                        reward_type,
-                        "buildingUpgrade requires villageId, slotId, buildingId params",
-                    )
-
-            open_data = await self.http_client.post_json(
-                f"/api/v1/videofeature/open/{open_endpoint}",
-                open_body,
-                skip_reauth=True,
-                safe_to_retry=False,
-            )
-
-            vrid = open_data.get("vrid") if isinstance(open_data, dict) else None
-            iframe_url = open_data.get("videoIframeUrl") if isinstance(open_data, dict) else None
-
-            if not vrid or not iframe_url:
-                error_msg = open_data.get("error", open_data.get("message", "Unknown"))
-                return VideoRewardResult(
-                    False, reward_type, f"Open failed: {error_msg}", str(open_data)
-                )
-
-            logger.info(f"Got vrid={vrid}, iframe URL length={len(iframe_url)}")
-
-            # Phase 2: Fetch iframe and extract ATG config
-            atg_config = await self._extract_atg_config(iframe_url)
-            if not atg_config:
-                return VideoRewardResult(
-                    False, reward_type, "Failed to extract ATG config from iframe"
-                )
-
-            xsign = atg_config.get("xsign")
-            if not xsign:
-                return VideoRewardResult(False, reward_type, "No xsign in ATG config")
-
-            fc_url = xsign.get("fc")
-            xs_url = xsign.get("xs")
-            xc = xsign.get("xc")
-
-            if not all([fc_url, xs_url, xc]):
+            if resource:
+                # Refused rather than guessed. The previous implementation
+                # appended `?resource=<name>`, and the two recorded opens --
+                # `buildingUpgrade` and `adventureDuration` -- carry no body and
+                # no query at all, so that parameter is a shape nothing has been
+                # observed producing.
+                #
+                # Emitting it would put an invented query string on a real
+                # endpoint, which is the precise thing this service was rewritten
+                # to stop doing; four of the nine reward types routed through it.
+                # An unavailable feature costs a free bonus. An invented request
+                # costs the account, and it is the cheapest kind of anomaly to
+                # alert on.
+                #
+                # One captured production-boost watch turns this back on.
                 return VideoRewardResult(
                     False,
                     reward_type,
-                    f"Missing ATG fields: fc={bool(fc_url)} xs={bool(xs_url)} xc={bool(xc)}",
+                    "A production boost needs a parameter this client has never been "
+                    "observed sending. Refusing to invent it: record one production-boost "
+                    "ad watch and the real shape can be used instead.",
                 )
-
-            # Get banner/zone IDs
-            waterfall = atg_config.get("waterfall", [])
-            bid = waterfall[0].get("bid", "17606") if waterfall else "17606"
-            zone_id = str(atg_config.get("zone_id", "3716"))
-
-            logger.info(
-                f"ATG config: fc={fc_url[:50]}... xs={xs_url[:50]}... bid={bid} zone={zone_id}"
+            open_path = f"/api/v1/videofeature/open/{endpoint}"
+            logger.info("Opening a video session for %s", reward_type)
+            opened = await self.http_client.get_json(
+                open_path, referer=referer, skip_reauth=True, safe_to_retry=False
             )
 
-            # Phase 3: Notify server that video started
-            logger.info("Notifying server: video started")
-            await self.http_client.post_json(
-                "/api/v1/videofeature/start",
-                {"vrid": vrid},
+            vrid = opened.get("vrid") if isinstance(opened, dict) else None
+            identifier = opened.get("identifier") if isinstance(opened, dict) else None
+            game_id = opened.get("gameId") if isinstance(opened, dict) else None
+            if not (vrid and identifier and game_id):
+                return VideoRewardResult(
+                    False, reward_type, f"Open did not hand back a session: {opened}", str(opened)
+                )
+
+            # Referred from the site root, not the game page: this is the ad
+            # frame asking, and the frame's own document is the root.
+            ad = await self.http_client.get_json(
+                f"/fallback/v1/request-ad?game_id={game_id}",
+                referer=f"{origin}/",
+                skip_reauth=True,
+            )
+            token = (ad.get("data") or {}).get("token") if isinstance(ad, dict) else None
+            if not token:
+                return VideoRewardResult(False, reward_type, f"No ad was offered: {ad}", str(ad))
+
+            watching = self._watch_seconds()
+            logger.info(
+                "Watching the ad for %.0fs before claiming — the reward is granted for a "
+                "video that finished, so the wait is the feature, not overhead.",
+                watching,
+            )
+            await asyncio.sleep(watching)
+
+            rewarded = await self.http_client.post_json(
+                "/fallback/v1/reward",
+                {"token": token, "external_identifier": identifier, "custom_1": vrid},
+                referer=f"{origin}/",
                 skip_reauth=True,
                 safe_to_retry=False,
             )
+            receipt = (rewarded.get("data") or {}) if isinstance(rewarded, dict) else {}
+            conversion_id = receipt.get("conversionId")
+            signature = receipt.get("signature")
+            if not receipt.get("rewarded") or not (conversion_id and signature):
+                return VideoRewardResult(
+                    False,
+                    reward_type,
+                    f"The ad network did not grant a reward: {rewarded}",
+                    str(rewarded),
+                )
 
-            # Phase 4: Send progress ticks to fc.php (real 3s timing required)
-            total_duration = 30
-            tick_interval = 3
-            atg = await self._get_atg_client()
-            atg_headers = {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "X-Requested-With": "XMLHttpRequest",
-                # jQuery's default for $.post with no dataType.
-                "Accept": "*/*",
-                # An ad frame calling its own host is a cross-site subresource,
-                # and saying so is what the browser would do.
-                "Sec-Fetch-Site": "cross-site",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Dest": "empty",
-            }
+            # The hash is the two halves of that receipt, concatenated, with no
+            # separator and no transformation. Verified on both watches:
+            #
+            #   c0069958-…-2cfda24e4da2 + 7e5e7cc8…97762333
+            #   724355b8-…-7ae575f6c8db + f15843e6…71388a7a
+            #
+            # The previous implementation went looking for a <sign> element in
+            # an XML answer from a provider no longer in this flow.
+            claim_hash = f"{conversion_id}{signature}"
 
-            logger.info(
-                f"Sending progress ticks ({total_duration}s with {tick_delay_ms}ms delays)..."
-            )
-            for ts in range(0, total_duration + 1, tick_interval):
-                remaining = total_duration - ts
-                xc["ts"] = ts + tick_interval  # Mutate xc.ts BEFORE sending (matches JS behavior)
-
-                try:
-                    payload = {
-                        "self": xc,
-                        "at": ts,
-                        "rm": remaining,
-                        "b": str(bid),
-                        "z": str(zone_id),
-                    }
-                    body = urlencode(_jquery_param(payload))
-                    resp = await atg.post(fc_url, content=body.encode(), headers=atg_headers)
-                    if resp.status_code == 200 and resp.text.strip():
-                        try:
-                            xc = resp.json()
-                        except json.JSONDecodeError:
-                            pass
-                except Exception as e:
-                    logger.warning(f"fc.php error at {ts}s: {e}")
-
-                if ts < total_duration:
-                    # Stealth: micro-jitter on tick timing (must stay close to 3s)
-                    from ..stealth.timing import HumanTiming
-
-                    tick_s = tick_delay_ms / 1000.0
-                    await asyncio.sleep(max(2.0, HumanTiming.micro_jitter(tick_s, jitter_pct=0.1)))
-
-            # Phase 5: Get signature from xs.php
-            logger.info("Requesting signature from xs.php")
-            try:
-                xs_payload = {"self": xc, "csid": f"{bid}-{zone_id}", "val": 2}
-                xs_body = urlencode(_jquery_param(xs_payload))
-                xs_resp = await atg.post(xs_url, content=xs_body.encode(), headers=atg_headers)
-                if xs_resp.status_code != 200:
-                    return VideoRewardResult(
-                        False,
-                        reward_type,
-                        f"xs.php returned {xs_resp.status_code}: {xs_resp.text[:200]}",
-                    )
-                # Parse XML response for signature
-                sign_match = re.search(r"<sign>(.*?)</sign>", xs_resp.text)
-                signature = sign_match.group(1) if sign_match else ""
-                if not signature:
-                    return VideoRewardResult(
-                        False, reward_type, "Empty signature from xs.php (timing too fast?)"
-                    )
-                logger.info(f"Got signature: {signature}")
-            except Exception as e:
-                return VideoRewardResult(False, reward_type, f"xs.php failed: {e}")
-
-            if not signature:
-                return VideoRewardResult(False, reward_type, "Empty signature from xs.php")
-
-            # Phase 6: Wait a bit then claim reward (human-like reaction)
-            from ..stealth.timing import HumanTiming
-
-            actual_wait = wait_before_claim_s + HumanTiming.reaction_time(base_ms=1500)
-            logger.info(f"Waiting {actual_wait:.1f}s before claiming...")
-            await asyncio.sleep(actual_wait)
-
-            logger.info("Claiming reward via /videofeature/ends")
             ends_data = await self.http_client.post_json(
                 "/api/v1/videofeature/ends",
-                {"vrid": vrid, "hash": signature},
+                {"vrid": vrid, "hash": claim_hash},
+                referer=referer,
                 skip_reauth=True,
                 safe_to_retry=False,
             )
@@ -386,13 +374,17 @@ class VideoRewardService:
                     str(ends_data),
                 )
 
-            # For buildingUpgrade: follow the redirectTo URL to actually start the build
+            # For buildingUpgrade: follow the redirectTo URL to actually start
+            # the build. Both recorded claims answered with a token and nothing
+            # else, so this is conditional on the field being present rather
+            # than expected -- and the field, when it comes, is a link the page
+            # rendered, which is why it is followed rather than reconstructed.
             redirect_to = ends_data.get("redirectTo")
             if redirect_to and reward_type == "buildingUpgrade":
-                logger.info(f"Following buildingUpgrade redirect: {redirect_to}")
+                logger.info("Following the buildingUpgrade redirect: %s", redirect_to)
                 await self.http_client.get_html(redirect_to, skip_reauth=True, safe_to_retry=False)
 
-            logger.info(f"Reward claimed successfully! Type: {reward_type}")
+            logger.info("Reward claimed. Type: %s", reward_type)
             return VideoRewardResult(
                 True,
                 reward_type,
@@ -401,64 +393,8 @@ class VideoRewardService:
             )
 
         except Exception as e:
-            logger.error(f"Video reward failed: {e}")
+            logger.error("Video reward failed: %s", e)
             return VideoRewardResult(False, reward_type, f"Error: {e}")
-
-    async def _extract_atg_config(self, iframe_url: str) -> Optional[Dict[str, Any]]:
-        """Fetch iframe HTML and extract the base64-encoded ATG config."""
-        try:
-            full_url = iframe_url if iframe_url.startswith("http") else f"https:{iframe_url}"
-            atg = await self._get_atg_client()
-            # This is the browser loading the ad iframe's document, and its
-            # headers say so -- a document request that looked like a bare API
-            # call would not match what the game's page actually does.
-            resp = await atg.get(
-                full_url,
-                headers={
-                    "Accept": (
-                        "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                        "image/avif,image/webp,image/apng,*/*;q=0.8"
-                    ),
-                    "Sec-Fetch-Site": "cross-site",
-                    "Sec-Fetch-Mode": "navigate",
-                    "Sec-Fetch-Dest": "iframe",
-                    "Upgrade-Insecure-Requests": "1",
-                },
-            )
-
-            if resp.status_code != 200:
-                logger.warning(f"Iframe fetch returned {resp.status_code}")
-                return None
-
-            html = resp.text
-
-            # Extract base64 config — the ATG player wraps it in a custom atob
-            # Pattern: n("eyJ...") where the base64 starts with eyJ (JSON opening)
-            b64_match = re.search(r'"(eyJ[A-Za-z0-9+/=]{100,})"', html)
-            if not b64_match:
-                # Try the standard atob() pattern
-                b64_match = re.search(r'atob\(["\']([^"\']+)["\']\)', html)
-
-            if not b64_match:
-                logger.warning("No base64 config found in iframe HTML")
-                return None
-
-            config_json = base64.b64decode(b64_match.group(1)).decode("utf-8")
-            config = json.loads(config_json)
-
-            # xsign can be at root or inside config
-            if "xsign" not in config and "config" in config and "xsign" in config["config"]:
-                config["xsign"] = config["config"]["xsign"]
-
-            # zone_id can be in config subobject
-            if "zone_id" not in config and "config" in config:
-                config["zone_id"] = config["config"].get("zone_id")
-
-            return config
-
-        except Exception as e:
-            logger.error(f"Failed to extract ATG config: {e}")
-            return None
 
     async def get_available_rewards(self) -> Dict[str, bool]:
         """

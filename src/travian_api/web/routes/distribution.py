@@ -2407,6 +2407,18 @@ class ExecuteRequest(PlanRequest):
         '`execution_mode: "live"` is a 422, and `dry_run: true` alongside '
         '`execution_mode: "live"` is a 422.',
     )
+    i_am_awake: bool = Field(
+        default=False,
+        description=(
+            "Run even though the account is inside its night-rest window. For an "
+            "operator actually at the keyboard: a person who opens the game at "
+            "23:30 and sorts out their trade routes is an ordinary evening, and "
+            "refusing that protects nothing. What the window exists to stop is an "
+            "UNATTENDED run at 04:00 every night, which is a pattern rather than "
+            "an evening -- so this defaults to off and a scheduler that never sets "
+            "it can never drift into one."
+        ),
+    )
     disable_existing: bool = Field(
         default=True,
         description="Disable a village's existing routes before creating new ones.",
@@ -5888,7 +5900,14 @@ async def post_revert_plan(
                 continue
             try:
                 now = await svc.list_existing_routes(origin, map_span=body.map_span)
-                requests_used += 2  # dorf2 + the marketplace tab
+                # Three on the arrival path a revert origin takes: the village
+                # view, the building's default tab, then the trade-route tab
+                # (`open_marketplace` -> `_walk_to_marketplace`). It was 2 before
+                # the walk grew the default-tab hop, and this figure is spent
+                # against the same shared daily ceiling the farm and oasis loops
+                # draw on -- so, exactly as the post-write reads two hunks down
+                # argue, under-counting here quietly licenses THOSE to overspend.
+                requests_used += 3
             except (NetworkError, MarketplaceUnreadable) as exc:
                 # Conclude nothing about a village we could not read: an unreadable
                 # page would otherwise look like "every route vanished".
@@ -5959,8 +5978,16 @@ async def post_revert_plan(
                     # naming a rejection -- stays in the else: there is nothing to
                     # look at, and looking would cost a request for no information.
                     try:
-                        after = await svc.confirm_routes(origin, map_span=body.map_span)
-                        requests_used += 1
+                        after = await svc.confirm_routes(
+                            origin, map_span=body.map_span, after_write=True
+                        )
+                        # Three, not one. A post-write confirmation is the
+                        # read-back plus the two requests the page fires behind
+                        # it (`settle_after_write`), and this figure is spent
+                        # against a daily activity ceiling shared with the farm
+                        # and oasis loops -- so under-counting here quietly
+                        # licenses THOSE to overspend.
+                        requests_used += 3
                     except (NetworkError, MarketplaceUnreadable) as exc:
                         problems.append(
                             f"village {origin}: disabled {len(plan.disable_ids)} route(s) "
@@ -6035,8 +6062,10 @@ async def post_revert_plan(
                 # is the same class of false outcome as an unverified create, and
                 # this endpoint exists to make an undo trustworthy.
                 try:
-                    left = await svc.confirm_routes(origin, map_span=body.map_span)
-                    requests_used += 1
+                    left = await svc.confirm_routes(
+                        origin, map_span=body.map_span, after_write=True
+                    )
+                    requests_used += 3  # read-back + the two the page fires behind it
                 except (NetworkError, MarketplaceUnreadable) as exc:
                     problems.append(
                         f"village {origin}: deleted the route(s) but could not re-read "
@@ -6290,8 +6319,20 @@ def _row_minute(e: ExistingRoute) -> int:
     On a non-UTC account that replaces correct schedules and prunes the wrong
     rows.
 
-    Unknown is now unknown. `_offset_is_known` refuses the run before any
-    schedule-dependent write rather than letting -1 recreate a route on a guess.
+    Unknown is now unknown, and the guard that makes it so is a raise, not a
+    helper: `list_existing_routes` (trade_route_service) raises
+    `MarketplaceUnreadable` when a page states no clock while its rows state
+    departures, which stops the run before any schedule-dependent write. There
+    is no `_offset_is_known` function and there never was -- this docstring
+    named one for three weeks, which is worse than saying nothing, because a
+    reader who goes looking concludes the guard was deleted.
+
+    The asymmetry that remains is real and worth knowing: that raise lives on
+    the HTML read only. `confirm_routes` stamps `departure_minute` from the same
+    offset and neither learns it nor requires it, so a service instance whose
+    first read is a post-write confirmation yields None for every row and every
+    row then reconciles by recreation. The executor always reads the page first,
+    which is why this has never fired; nothing enforces that it must.
     """
     return -1 if e.departure_minute is None else e.departure_minute
 
@@ -7418,12 +7459,73 @@ async def post_execute(
     canary_rows_created: list[int] | None = None
     canary_settled = False  # the read-back reached a verdict about that create
 
+    # ── The account's night ────────────────────────────────────────────────
+    #
+    # `ActivityScheduler` has drawn this account a per-account sleep window
+    # since it was written, `http_client.rest_pause_seconds()` exposes it, and
+    # NOTHING has ever called either. Its own docstring names the stake:
+    # "activity that respects no sleep window is the most reliable
+    # machine-vs-human signal there is." A player who sets up trade routes at
+    # 04:00 every night is not a player.
+    #
+    # Refused rather than slept through. This is a request/response endpoint, so
+    # pausing until morning would hang the caller for hours; the operator (or
+    # their scheduler) is told when the window reopens and comes back then. That
+    # also keeps the decision where it can be seen, instead of inside a sleep
+    # nobody can observe.
+    #
+    # LIVE runs only. A preview issues no game request at all, so there is
+    # nothing about it for anyone to observe, and refusing one would stop the
+    # operator planning tomorrow's work this evening.
+    _rest_seconds = 0.0
+    try:
+        _rest_seconds = float(svc.http_client.rest_pause_seconds())
+    except Exception:
+        # Stealth is advisory here, and a scheduler that cannot answer must not
+        # take the run down with it -- the budget and captcha gates below are
+        # the ones that refuse on their own failure.
+        _rest_seconds = 0.0
+    if _rest_seconds > 0 and not body.i_am_awake:
+        _mins = int(_rest_seconds // 60)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"This account is in its night-rest window for another "
+                f"{_mins // 60}h{_mins % 60:02d}m. A live run now is the one pattern "
+                f"no amount of per-request pacing disguises: real players sleep. "
+                f"Re-run after it closes, or send i_am_awake: true if you are at the "
+                f"keyboard right now -- an operator having a late evening is not the "
+                f"pattern this guards against."
+            ),
+        )
+
     # Register the run so the session-lifecycle guards see it: disconnect/
     # reconnect consults ActiveOpRegistry and will not close this HttpClient
     # underneath the run (issue #63). Registered synchronously before the first
     # game await so a concurrent disconnect can't slip in between. Unregistered
     # in `finally`. `started_at` lets the captcha-stop signal target only this run.
     started_at = time.monotonic()
+
+    # Which budget question this run is entitled to ask, resolved ONCE and used
+    # by every check below.
+    #
+    # `i_am_awake` waives the night-rest window at the door (the 409 above) --
+    # and used to be waived straight back in here, because `can_continue()`
+    # answers "have I worked too long" and "is it 4am" with one boolean. So the
+    # override cleared the 409 and the run then stopped at the first budget
+    # check with "Activity budget exhausted" against completely untouched
+    # quotas, deferring every route. The recovery the 409 offers in its own
+    # error message could not once have worked.
+    #
+    # The caps are NOT waived: `check_activity_quota` still enforces the rolling
+    # 24h and continuous-session limits, and the captcha stop below is
+    # untouched. Only the schedule is set aside, by the only person who can
+    # honestly set it aside.
+    _check_budget = (
+        svc.http_client.check_activity_quota
+        if body.i_am_awake
+        else svc.http_client.check_activity_budget
+    )
 
     def _stop_reason() -> str | None:
         """Why the run must stop right now, or None. Checked before EVERY mutation
@@ -7433,7 +7535,7 @@ async def post_execute(
         if captcha_stop.should_stop(user.id, started_after=started_at):
             return "captcha resolved — execution stopped"
         try:
-            svc.http_client.check_activity_budget()
+            _check_budget()
         except ActivityBudgetExhausted as exc:
             return f"activity budget exhausted: {exc}"
         return None
@@ -7468,7 +7570,7 @@ async def post_execute(
             # does -- the HttpClient bills nothing, and believing otherwise is
             # how the reads went uncounted for a while.
             try:
-                svc.http_client.check_activity_budget()
+                _check_budget()
             except ActivityBudgetExhausted as exc:
                 problems.append(f"Activity budget exhausted; no routes were created: {exc}")
                 deferred.extend(items)
@@ -7480,6 +7582,51 @@ async def post_execute(
                 # was written here, but the contract is about whether the run
                 # finished its work, not about whether it managed to do damage.
                 stopped_early = True
+
+            # ── Arriving, rather than appearing ────────────────────────────
+            #
+            # A run that resumes a session hours old opens with a village view
+            # and goes straight to a marketplace. `PageNavigator.warm_up` exists
+            # to stop exactly that -- its own docstring calls the pattern
+            # "login -> immediate API blast" -- and until now only the login path
+            # called it, so a session reused later never arrived anywhere. It
+            # simply materialised at the form it came for.
+            #
+            # A person opening the game after a few hours lands on the resource
+            # overview and looks at a page or two before doing the thing they
+            # came to do. `warm_up` is that: dorf1, then a short walk over this
+            # account's own Markov chain of top-level pages, so the visited set
+            # and the transition structure are both account-specific rather than
+            # a shared signature.
+            #
+            # Gated on the SCHEDULER's idea of a new session, not a threshold of
+            # its own, so "the scheduler reset the session counter" and "the
+            # navigator thinks this is an arrival" cannot disagree. Two runs
+            # minutes apart are one visit and warm up once; a run after a long
+            # gap is a new visit and arrives again.
+            #
+            # Costs a handful of GETs on a run that is about to write to the
+            # game, which is the cheapest part of it, and nothing at all on a
+            # preview -- this is inside the live path.
+            try:
+                _sched = svc.http_client.activity_scheduler
+                _nav = svc.http_client.navigator
+                if getattr(_sched, "is_new_session", False) and getattr(_nav, "enabled", False):
+                    # Announced, because it costs the operator a few seconds of
+                    # apparently nothing happening before the run they asked for
+                    # starts. Reaches the UI through LogBroadcastHandler.
+                    logger.info(
+                        "Opening the game first — landing on the overview and "
+                        "looking around, the way a session starts. The routes come "
+                        "after."
+                    )
+                    await _nav.warm_up()
+            except Exception as exc:
+                # Advisory, like the rest of the stealth layer at this point. A
+                # navigator that cannot walk must not stop a run the operator
+                # asked for; the budget and captcha gates are the ones that
+                # refuse on their own failure.
+                logger.debug("skipping arrival walk: %s", exc)
 
             # A full reconciliation must not be cut short by the CREATE budget:
             # the whole point is that no village is left holding a route the plan
@@ -8083,7 +8230,7 @@ async def post_execute(
                             if disabled.status == "unverified":
                                 try:
                                     checked = await svc.confirm_routes(
-                                        origin, map_span=body.map_span
+                                        origin, map_span=body.map_span, after_write=True
                                     )
                                 except (NetworkError, MarketplaceUnreadable) as exc:
                                     read_back_error = str(exc)
@@ -8892,7 +9039,9 @@ async def post_execute(
                         or unverified_updates
                     ):
                         try:
-                            after = await svc.confirm_routes(origin, map_span=body.map_span)
+                            after = await svc.confirm_routes(
+                                origin, map_span=body.map_span, after_write=True
+                            )
                         except (NetworkError, MarketplaceUnreadable) as exc:
                             # "I could not check" is NOT "it failed". Say exactly
                             # that, and leave the routes reported as created --
@@ -10017,7 +10166,7 @@ async def post_execute(
                                 # an accepted create that produced nothing.
                                 try:
                                     _checked = await svc.confirm_routes(
-                                        origin, map_span=body.map_span
+                                        origin, map_span=body.map_span, after_write=True
                                     )
                                 except (NetworkError, MarketplaceUnreadable) as exc:
                                     trace.event(

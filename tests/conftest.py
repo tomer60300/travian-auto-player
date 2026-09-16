@@ -365,3 +365,42 @@ def _public_dns(monkeypatch):
         return ["8.8.8.8"]
 
     monkeypatch.setattr(url_guard, "_resolve_host", resolves_public)
+
+
+@pytest.fixture(autouse=True)
+def _no_test_leaves_the_rng_patched():
+    """Fail the test that leaks a stubbed RNG, not the one that trips over it.
+
+    Stubbing `random.random` is the ordinary way to pin a probabilistic branch,
+    and most of this suite does it through `monkeypatch`, which restores
+    correctly. A hand-rolled save/restore does not always: a service module's
+    ``random`` attribute IS the stdlib module, so patching through it is
+    process-global, and a `finally` that recovers the original by re-importing
+    `random` reads back the stub it just installed. That shipped once. The
+    restore assigned the lambda to itself and `random.random()` returned 1.0 for
+    the remainder of the interpreter.
+
+    What made it expensive was where the damage landed. Not here -- this test
+    passed -- but in whatever ran next, as a distribution assertion that could
+    not possibly fail (``min(samples) == 5`` over a support starting at 2), in a
+    file with no connection to the one that broke it. And only under SERIAL
+    execution: `-n 8` puts the two on different workers, so the inner loop and
+    the pre-commit gate are both blind to it and only CI sees it.
+
+    So the check runs where the evidence is. Two attribute reads per test.
+    """
+    import random
+
+    before = random.random
+    yield
+    after = random.random
+    if after is not before:
+        # Put it back, so this failure stays one failure instead of becoming
+        # every subsequent test in the worker.
+        random.random = before
+        raise AssertionError(
+            "this test left random.random patched, which silently biases every "
+            "later test in the same process. Use `monkeypatch.setattr` (it saves "
+            "the original before replacing) rather than a hand-rolled restore, "
+            "or patch the module constant the branch reads instead of the RNG."
+        )

@@ -62,7 +62,16 @@ class Settings(BaseSettings):
         default=True, description="Simulate page navigation before actions"
     )
     stealth_burst_max: int = Field(
-        default=30, description="Max requests per 60s window before cooldown"
+        default=60,
+        description=(
+            "Max requests per 60s window before cooldown. 60, not 20/30: a "
+            "recorded human session (2026-09-15) put a single page load at 13 "
+            "parallel requests and its largest burst at 35 under 0.5s apart, so "
+            "three ordinary page loads in a minute is 39 -- a cap that trips on "
+            "genuine human traffic is calibrated wrong. This is the value "
+            "RequestThrottler is built and measured around; the two are pinned "
+            "equal in test_throttler_is_bimodal."
+        ),
     )
     stealth_burst_cooldown: float = Field(
         default=10.0, description="Cooldown seconds when burst limit hit"

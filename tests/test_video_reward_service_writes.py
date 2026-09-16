@@ -1,36 +1,45 @@
-"""`VideoRewardService.claim_reward` spends the operator's ad-view sessions and,
-at the end, claims a real production/build reward from the live game. Four
-`http_client.post_json` calls are its write surface: the session open
-(`/api/v1/videofeature/open/{type}`), the mid-flow start notify
-(`/api/v1/videofeature/start`), the reward claim (`/api/v1/videofeature/ends`
--- the one call that actually grants something), and the availability read
-(`/api/v1/graphql`) `get_available_rewards` uses to decide which types are
-worth attempting.
+"""`VideoRewardService.claim_reward` spends the operator's daily ad views and,
+at the end, claims a real production/build reward from the live game.
 
-The ad-network (ATG) leg -- the iframe config, the 3s tick loop, the xs.php
-signature -- is faked out entirely: `_extract_atg_config` and `_get_atg_client`
-are monkeypatched, and `asyncio.sleep`/`HumanTiming.micro_jitter`/
-`HumanTiming.reaction_time` are all patched to be instant, so these tests
-exercise the same open -> start -> ends sequence real playback does without
-any real HTTP, the real ~33s of ticking, or the reaction-time wait.
-`tests/test_action_url_integrity.py` already pins the ad client's own
-header/TLS identity; this file does not repeat that.
+Every request it makes is pinned here against a capture: two ads watched end to
+end on 2026-09-15, request and response bodies included. The flow is five calls
+and they are all on Travian's own host::
 
-**Finding**: `/ends`'s handler read `ends_data.get("error")` straight off the
-POST's answer. `post_json` hands back ``{"response_text": ...}`` for a body
-that was not JSON (an HTML soft-block, a maintenance page) -- that dict has no
-``"error"`` key, so the claim fell through to the success return and reported
-"Reward claimed successfully!" for an answer that named no such thing. A
-non-dict answer (e.g. a bare JSON array) was worse: ``.get`` raised
-``AttributeError``, caught only by the outer catch-all, which reported failure
-with a raw exception string rather than the deliberate "unverified" classification
-this codebase gives every other write's unreadable answer
-(`farm_list_service._check_mutation`, `trade_route_service.ToggleResponseUnreadable`).
-Both shared one root cause -- using the answer's shape without checking it --
-and are fixed together in `video_reward_service.py`.
+    GET  /api/v1/videofeature/open/<type>    -> vrid, identifier, gameId
+    GET  /fallback/v1/request-ad?game_id=    -> token
+    … the video …
+    POST /fallback/v1/reward                 -> conversionId + signature
+    POST /api/v1/videofeature/ends           -> the reward
+
+This file used to test a different protocol entirely: a POSTed open carrying
+villageId/slotId/buildingId, a `/videofeature/start` notify, an ATG iframe, a
+3-second tick loop against `fc.php`, and a signature parsed out of `xs.php`'s
+XML. None of that is in the game any more, and a test suite that faked the ad
+network with `_AtgClient` was green the whole time it was describing a provider
+Travian had stopped using -- which is the specific way a mocked integration
+test fails: confidently, and about nothing.
+
+So the fake here answers by URL and the assertions quote the capture. What it
+cannot check is the one thing no capture gave us -- how a *production boost*
+names its resource -- and that is marked rather than invented.
+
+**Findings this file also carries**, from the version before the rewrite, all
+still live because the `/ends` handling survived it:
+
+`/ends`'s handler read `ends_data.get("error")` straight off the POST's answer.
+`post_json` hands back ``{"response_text": ...}`` for a body that was not JSON
+(an HTML soft-block, a maintenance page) -- that dict has no ``"error"`` key, so
+the claim fell through to the success return and reported "Reward claimed
+successfully!" for an answer that named no such thing. A non-dict answer (e.g. a
+bare JSON array) was worse: ``.get`` raised ``AttributeError``, caught only by
+the outer catch-all, which reported failure with a raw exception string rather
+than the deliberate "unverified" classification this codebase gives every other
+write's unreadable answer (`farm_list_service._check_mutation`,
+`trade_route_service.ToggleResponseUnreadable`).
 """
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -39,54 +48,73 @@ from travian_api.services.video_reward_service import VideoRewardService
 
 from .activity_billing import billing
 
-FC_URL = "https://atg.example/fc.php"
-XS_URL = "https://atg.example/xs.php"
+BASE = "https://example.invalid"
+
+# The `open` answer, field for field as the live game sent it.
+OPENED = {
+    "vrid": "ipqmKd3wFEdw2uh4tKYOx5Vqlb6v1cG0",
+    "hash": None,
+    "identifier": "75f8d800-2924-11f1-6502-010000000f1a",
+    "gameId": "09eed1e1-3feb-4cc8-a734-e8c315d311e4",
+    "suffix": "",
+}
+
+CONVERSION_ID = "724355b8-d589-45d3-9f63-7ae575f6c8db"
+SIGNATURE = "f15843e619164f612971fad8799c5d9671388a7a"
+
+AD = {
+    "status": "success",
+    "data": {
+        "video_src_url": "https://cdn.traviangames.com/Hyperdrome_EN.mp4",
+        "tracking_url": "https://games.traviangames.com/115271234591123/38",
+        "token": "d471db71449dd56507476cb4d45cb11eecb75ad75b7e2a3e92eead867764b83e",
+    },
+}
+
+GRANTED = {
+    "status": "success",
+    "data": {
+        "status": "success",
+        "rewarded": True,
+        "externalIdentifier": OPENED["identifier"],
+        "currency": 0,
+        "conversionId": CONVERSION_ID,
+        "signature": SIGNATURE,
+        "custom_1": OPENED["vrid"],
+    },
+}
 
 
-def _atg_config() -> dict:
-    return {
-        "xsign": {"fc": FC_URL, "xs": XS_URL, "xc": {"ts": 0}},
-        "waterfall": [{"bid": "17606"}],
-        "zone_id": "3716",
+def _happy(**overrides) -> dict:
+    """The scripted answers for a claim that goes all the way through."""
+    bodies = {
+        "videofeature/open": OPENED,
+        "request-ad": AD,
+        "fallback/v1/reward": GRANTED,
+        "videofeature/ends": {"token": "s60Vn0D4R7PLoZlr"},
     }
-
-
-class _AtgResponse:
-    def __init__(self, status_code=200, text=""):
-        self.status_code = status_code
-        self.text = text
-
-
-class _AtgClient:
-    """Stands in for the ad-network httpx session: tick posts + the xs.php
-    signature POST. Never touched by billing -- the ad network is not the
-    game, and the transport only bills `self.http_client`'s own methods."""
-
-    def __init__(self, *, xs_signature: str = "deadbeef"):
-        self.posts: list[str] = []
-        self._xs_body = f"<xml><sign>{xs_signature}</sign></xml>" if xs_signature else ""
-
-    async def post(self, url, content=b"", headers=None):
-        self.posts.append(url)
-        if url == XS_URL:
-            return _AtgResponse(200, self._xs_body)
-        return _AtgResponse(200, "")  # fc.php tick: empty body, xc left unchanged
+    bodies.update(overrides)
+    return bodies
 
 
 class _Http:
-    """Records every post_json/get_html call and replays a scripted answer per
-    endpoint, matched by substring against the URL. An answer that is an
-    ``Exception`` instance is raised instead of returned, modelling a lost
-    write. Bills like the real transport via the shared `billing` helper --
-    never by replacing the wrapped method, so a defect that skips billing
-    cannot go unnoticed.
+    """Records every call and replays a scripted answer per endpoint, matched by
+    substring against the URL. An answer that is an ``Exception`` instance is
+    raised instead of returned, modelling a lost write. Bills like the real
+    transport via the shared `billing` helper -- never by replacing the wrapped
+    method, so a defect that skips billing cannot go unnoticed.
     """
 
     def __init__(self, bodies: dict):
         self._bodies = bodies
         self.calls: list[tuple[str, dict]] = []
+        self.referers: list[tuple[str, str | None]] = []
         self.bills: list[float] = []
+        self.base_url = BASE
+        self.browser_headers = SimpleNamespace(last_page_path="/dorf1.php")
+        self.navigator = SimpleNamespace(enabled=False)
         self.post_json = billing(self.bills)(self._post_json)
+        self.get_json = billing(self.bills)(self._get_json)
         self.get_html = billing(self.bills)(self._get_html)
 
     def _answer(self, url: str):
@@ -95,325 +123,404 @@ class _Http:
                 return answer
         raise AssertionError(f"no scripted answer for {url}")
 
-    async def _post_json(self, url, data=None, **kwargs):
+    def _record(self, url, data, kwargs):
         self.calls.append((url, dict(data or {})))
+        self.referers.append((url, kwargs.get("referer")))
         answer = self._answer(url)
         if isinstance(answer, Exception):
             raise answer
         return answer
 
+    async def _post_json(self, url, data=None, **kwargs):
+        return self._record(url, data, kwargs)
+
+    async def _get_json(self, url, **kwargs):
+        return self._record(url, None, kwargs)
+
     async def _get_html(self, url, **kwargs):
         self.calls.append((url, {}))
+        self.referers.append((url, kwargs.get("referer")))
         return ""
 
 
-def _service(bodies: dict, *, atg: _AtgClient | None = None):
+def _service(bodies: dict):
     http = _Http(bodies)
-    svc = VideoRewardService(http_client=http)
-    svc._test_atg_client = atg if atg is not None else _AtgClient()
-    return svc, http
+    return VideoRewardService(http_client=http), http
 
 
 @pytest.fixture(autouse=True)
-def _fake_atg_and_no_real_pauses(monkeypatch):
-    async def _fake_extract(self, iframe_url):
-        return _atg_config()
-
-    async def _fake_get_client(self):
-        return self._test_atg_client
+def _no_real_pauses(monkeypatch):
+    """The claim waits out a real ~31-second ad. Not in a unit test it doesn't."""
 
     async def _instant_sleep(_seconds):
         return None
 
-    monkeypatch.setattr(VideoRewardService, "_extract_atg_config", _fake_extract)
-    monkeypatch.setattr(VideoRewardService, "_get_atg_client", _fake_get_client)
     monkeypatch.setattr("travian_api.services.video_reward_service.asyncio.sleep", _instant_sleep)
-    for name in ("micro_jitter", "reaction_time"):
-        monkeypatch.setattr(
-            f"travian_api.stealth.timing.HumanTiming.{name}", staticmethod(lambda *a, **k: 0)
+
+
+def _paths(http) -> list[str]:
+    return [c[0] for c in http.calls]
+
+
+def _body(http, needle: str) -> dict:
+    return next(body for url, body in http.calls if needle in url)
+
+
+# ── The shape of a whole claim ────────────────────────────────────────────
+
+
+class TestTheClaimIsTheFlowTheGameUses:
+    def test_it_is_five_requests_in_the_recorded_order(self):
+        svc, http = _service(_happy())
+
+        result = asyncio.run(svc.claim_reward("adventureDuration"))
+
+        assert result.success is True
+        assert _paths(http) == [
+            "/hero/adventures",
+            "/api/v1/videofeature/open/adventureDuration",
+            f"/fallback/v1/request-ad?game_id={OPENED['gameId']}",
+            "/fallback/v1/reward",
+            "/api/v1/videofeature/ends",
+        ]
+
+    def test_the_open_carries_no_body(self):
+        """The real GET has no body and no query. The target comes from the
+        session and the Referer, which is why standing on the right page is a
+        correctness step and not decoration."""
+        svc, http = _service(_happy())
+        asyncio.run(svc.claim_reward("adventureDuration"))
+
+        assert _body(http, "videofeature/open") == {}
+
+    def test_there_is_no_start_notify(self):
+        svc, http = _service(_happy())
+        asyncio.run(svc.claim_reward("adventureDuration"))
+
+        assert not any("videofeature/start" in p for p in _paths(http))
+
+    def test_nothing_leaves_travians_host(self):
+        """The ad network used to be a second HTTP client with its own cookie
+        jar and its own impersonation target to keep coherent. It is Travian's
+        own /fallback/v1/ now, so there is one client and one identity."""
+        svc, http = _service(_happy())
+        asyncio.run(svc.claim_reward("adventureDuration"))
+
+        assert all(p.startswith("/") for p in _paths(http))
+
+    def test_every_request_is_billed(self):
+        svc, http = _service(_happy())
+        asyncio.run(svc.claim_reward("adventureDuration"))
+
+        assert len(http.bills) == len(http.calls) == 5
+
+
+class TestTheAdReceiptBecomesTheClaimHash:
+    """conversionId + signature, concatenated, no separator. Both watches."""
+
+    def test_the_reward_post_carries_the_token_identifier_and_vrid(self):
+        svc, http = _service(_happy())
+        asyncio.run(svc.claim_reward("adventureDuration"))
+
+        assert _body(http, "fallback/v1/reward") == {
+            "token": AD["data"]["token"],
+            "external_identifier": OPENED["identifier"],
+            "custom_1": OPENED["vrid"],
+        }
+
+    def test_the_hash_is_the_two_halves_of_the_receipt(self):
+        svc, http = _service(_happy())
+        asyncio.run(svc.claim_reward("adventureDuration"))
+
+        assert _body(http, "videofeature/ends") == {
+            "vrid": OPENED["vrid"],
+            "hash": CONVERSION_ID + SIGNATURE,
+        }
+
+    def test_the_hash_is_not_transformed(self):
+        """It is not hashed, signed, or re-encoded -- the previous
+        implementation went looking for a <sign> element to parse."""
+        svc, http = _service(_happy())
+        asyncio.run(svc.claim_reward("adventureDuration"))
+        sent = _body(http, "videofeature/ends")["hash"]
+
+        assert sent.startswith(CONVERSION_ID) and sent.endswith(SIGNATURE)
+        assert len(sent) == len(CONVERSION_ID) + len(SIGNATURE)
+
+    def test_an_ad_the_network_did_not_reward_stops_before_the_claim(self):
+        ungranted = dict(GRANTED["data"], rewarded=False)
+        svc, http = _service(_happy(**{"fallback/v1/reward": {"data": ungranted}}))
+
+        result = asyncio.run(svc.claim_reward("adventureDuration"))
+
+        assert result.success is False
+        assert not any("videofeature/ends" in p for p in _paths(http))
+
+    def test_a_receipt_missing_its_signature_stops_before_the_claim(self):
+        half = {k: v for k, v in GRANTED["data"].items() if k != "signature"}
+        svc, http = _service(_happy(**{"fallback/v1/reward": {"data": half}}))
+
+        result = asyncio.run(svc.claim_reward("adventureDuration"))
+
+        assert result.success is False
+        assert not any("videofeature/ends" in p for p in _paths(http))
+
+
+class TestTheRequestComesFromThePageThatOffersIt:
+    def test_an_adventure_claim_stands_on_the_adventure_page(self):
+        svc, http = _service(_happy())
+        asyncio.run(svc.claim_reward("adventureDuration"))
+
+        assert _paths(http)[0] == "/hero/adventures"
+        assert dict(http.referers)["/api/v1/videofeature/open/adventureDuration"] == (
+            f"{BASE}/hero/adventures"
         )
 
+    def test_a_building_claim_stands_on_that_buildings_page(self):
+        """`/build.php?id=22&gid=22` in the capture. A claim made from the wrong
+        page is not a failed claim -- it is a claim against whatever the session
+        was last looking at, and the daily video is spent either way.
 
-# ── Call site 1: POST /api/v1/videofeature/open/{type} ────────────────────
+        With the navigator off (this fake's default) the page is loaded
+        directly; with it on, the navigator walks dorf2 -> the same URL, and the
+        gid is handed to it so there is no second load afterwards.
+        """
+        svc, http = _service(_happy())
+        asyncio.run(svc.claim_reward("buildingUpgrade", villageId=7, slotId=22, buildingId=22))
 
+        assert _paths(http)[0] == "/build.php?id=22&gid=22&newdid=7"
 
-def test_a_production_boost_claim_opens_with_its_resource_param():
-    svc, http = _service(
-        {
-            "videofeature/open": {"vrid": "v1", "videoIframeUrl": "//x.ad/iframe"},
-            "videofeature/start": {},
-            "videofeature/ends": {},
-        }
-    )
+    def test_the_navigator_is_given_the_gid_so_it_lands_in_one_hop(self):
+        seen = {}
 
-    result = asyncio.run(svc.claim_reward("ironProductionBonus"))
+        async def _nav(slot, village=None, gid=None):
+            seen.update(slot=slot, village=village, gid=gid)
 
-    assert http.calls[0] == ("/api/v1/videofeature/open/productionBoost", {"resource": "iron"})
-    assert result.success is True
+        svc, http = _service(_happy())
+        http.navigator = SimpleNamespace(enabled=True, navigate_to_building=_nav)
 
+        asyncio.run(svc.claim_reward("buildingUpgrade", villageId=7, slotId=22, buildingId=22))
 
-def test_a_building_upgrade_claim_opens_with_village_slot_and_building():
-    svc, http = _service(
-        {
-            "videofeature/open": {"vrid": "v2", "videoIframeUrl": "//x.ad/iframe"},
-            "videofeature/start": {},
-            "videofeature/ends": {},
-        }
-    )
+        assert seen == {"slot": 22, "village": 7, "gid": 22}
+        assert not any(p.startswith("/build.php") for p in _paths(http)), (
+            "the navigator landed on the page; loading it again would be a hop "
+            "the capture does not contain"
+        )
 
-    asyncio.run(svc.claim_reward("buildingUpgrade", villageId=1, slotId=2, buildingId=3))
+    def test_the_village_selector_is_still_last(self):
+        svc, http = _service(_happy())
+        asyncio.run(svc.claim_reward("buildingUpgrade", villageId=7, slotId=22, buildingId=22))
 
-    assert http.calls[0] == (
-        "/api/v1/videofeature/open/buildingUpgrade",
-        {"villageId": 1, "slotId": 2, "buildingId": 3},
-    )
+        assert _paths(http)[0].endswith("&newdid=7")
 
+    def test_the_ad_requests_are_referred_from_the_site_root(self):
+        """They are the ad frame asking, and the frame's document is the root."""
+        svc, http = _service(_happy())
+        asyncio.run(svc.claim_reward("adventureDuration"))
+        referers = dict(http.referers)
 
-def test_an_unknown_reward_type_is_refused_before_any_request():
-    svc, http = _service({})
+        assert referers[f"/fallback/v1/request-ad?game_id={OPENED['gameId']}"] == f"{BASE}/"
+        assert referers["/fallback/v1/reward"] == f"{BASE}/"
 
-    result = asyncio.run(svc.claim_reward("not_a_real_type"))
+    def test_the_claim_is_referred_from_the_offering_page(self):
+        svc, http = _service(_happy())
+        asyncio.run(svc.claim_reward("adventureDuration"))
 
-    assert result.success is False
-    assert http.calls == []
+        assert dict(http.referers)["/api/v1/videofeature/ends"] == f"{BASE}/hero/adventures"
 
+    def test_a_building_claim_without_its_slot_is_refused_before_any_request(self):
+        svc, http = _service(_happy())
 
-def test_a_building_upgrade_missing_its_params_is_refused_before_any_request():
-    svc, http = _service({})
+        result = asyncio.run(svc.claim_reward("buildingUpgrade"))
 
-    result = asyncio.run(svc.claim_reward("buildingUpgrade"))
+        assert result.success is False
+        assert http.calls == []
 
-    assert result.success is False
-    assert "requires villageId" in result.message
-    assert http.calls == []
 
+class TestTheWaitIsTheVideo:
+    """Timed from the ad request to the reward POST: 33.6s and 23.2s."""
 
-def test_open_is_a_refusal_when_the_game_names_an_error():
-    svc, http = _service({"videofeature/open": {"error": "errorAlreadyClaimed"}})
+    def test_it_is_never_shorter_than_the_shorter_observation(self):
+        assert min(VideoRewardService._watch_seconds() for _ in range(2000)) >= 24.0
 
-    result = asyncio.run(svc.claim_reward("ironProductionBonus"))
+    def test_it_is_not_a_constant(self):
+        draws = {round(VideoRewardService._watch_seconds(), 3) for _ in range(200)}
 
-    assert result.success is False
-    assert "errorAlreadyClaimed" in result.message
-    assert [c[0] for c in http.calls] == ["/api/v1/videofeature/open/productionBoost"]
+        assert len(draws) > 100, "a flow that always takes exactly N seconds is its own signal"
 
+    def test_its_body_sits_around_the_observations(self):
+        import statistics
 
-def test_an_unreadable_open_answer_is_reported_as_a_failure_not_a_crash():
-    """Open grants nothing by itself, so a soft-block here is honestly just a
-    failure -- unlike `/ends`, there is no reward to falsely claim."""
-    svc, http = _service({"videofeature/open": {"response_text": "<html>blocked</html>"}})
+        draws = [VideoRewardService._watch_seconds() for _ in range(4000)]
 
-    result = asyncio.run(svc.claim_reward("ironProductionBonus"))
+        assert 28.0 < statistics.median(draws) < 36.0
+        assert max(draws) <= 75.0
 
-    assert result.success is False
-    assert "Open failed" in result.message
-    assert len(http.calls) == 1, "an unreadable open must not fall through to start/ends"
 
+# ── Failures along the way ────────────────────────────────────────────────
 
-def test_a_lost_open_answer_is_reported_as_ambiguous_with_no_further_calls():
-    svc, http = _service(
-        {"videofeature/open": NetworkError("Connection reset (non-retryable): peer closed")}
-    )
 
-    result = asyncio.run(svc.claim_reward("ironProductionBonus"))
+class TestAFailedStepStopsTheFlow:
+    def test_an_unknown_reward_type_is_refused_before_any_request(self):
+        svc, http = _service({})
 
-    assert result.success is False
-    assert "non-retryable" in result.message
-    assert len(http.calls) == 1
-    assert len(http.bills) == 1, "the failed request must still be billed"
+        result = asyncio.run(svc.claim_reward("not_a_real_type"))
 
+        assert result.success is False
+        assert http.calls == []
 
-# ── Call site 2: POST /api/v1/videofeature/start ──────────────────────────
+    def test_an_open_that_hands_back_no_session_stops_there(self):
+        svc, http = _service(_happy(**{"videofeature/open": {"error": "errorAlreadyClaimed"}}))
 
+        result = asyncio.run(svc.claim_reward("adventureDuration"))
 
-def test_the_start_notify_carries_only_the_vrid():
-    svc, http = _service(
-        {
-            "videofeature/open": {"vrid": "vrid-42", "videoIframeUrl": "//x.ad/iframe"},
-            "videofeature/start": {},
-            "videofeature/ends": {},
-        }
-    )
+        assert result.success is False
+        assert "errorAlreadyClaimed" in result.message
+        assert not any("request-ad" in p for p in _paths(http))
 
-    asyncio.run(svc.claim_reward("ironProductionBonus"))
+    def test_an_unreadable_open_answer_is_a_failure_not_a_crash(self):
+        svc, http = _service(
+            _happy(**{"videofeature/open": {"response_text": "<html>blocked</html>"}})
+        )
 
-    assert http.calls[1] == ("/api/v1/videofeature/start", {"vrid": "vrid-42"})
+        result = asyncio.run(svc.claim_reward("adventureDuration"))
 
+        assert result.success is False
+        assert not any("request-ad" in p for p in _paths(http))
 
-def test_a_refusal_shaped_start_answer_does_not_stop_the_flow():
-    """Documents current behaviour: `/start`'s answer is never inspected, so
-    the flow still proceeds to `/ends` even if `/start` names an error."""
-    svc, http = _service(
-        {
-            "videofeature/open": {"vrid": "v1", "videoIframeUrl": "//x.ad/iframe"},
-            "videofeature/start": {"error": "sessionExpired"},
-            "videofeature/ends": {},
-        }
-    )
+    def test_a_lost_open_is_reported_as_ambiguous_and_still_billed(self):
+        svc, http = _service(
+            _happy(
+                **{
+                    "videofeature/open": NetworkError(
+                        "Connection reset (non-retryable): peer closed"
+                    )
+                }
+            )
+        )
 
-    result = asyncio.run(svc.claim_reward("ironProductionBonus"))
+        result = asyncio.run(svc.claim_reward("adventureDuration"))
 
-    assert result.success is True
-    assert [c[0] for c in http.calls] == [
-        "/api/v1/videofeature/open/productionBoost",
-        "/api/v1/videofeature/start",
-        "/api/v1/videofeature/ends",
-    ]
+        assert result.success is False
+        assert "non-retryable" in result.message
+        assert len(http.bills) == 2, "the page load and the failed open both went out"
 
+    def test_no_ad_on_offer_stops_before_the_wait(self):
+        svc, http = _service(_happy(**{"request-ad": {"status": "success", "data": {}}}))
 
-def test_a_lost_start_answer_is_reported_as_ambiguous_and_ends_is_never_called():
-    svc, http = _service(
-        {
-            "videofeature/open": {"vrid": "v1", "videoIframeUrl": "//x.ad/iframe"},
-            "videofeature/start": NetworkError("Connection reset (non-retryable): peer closed"),
-        }
-    )
+        result = asyncio.run(svc.claim_reward("adventureDuration"))
 
-    result = asyncio.run(svc.claim_reward("ironProductionBonus"))
+        assert result.success is False
+        assert not any("reward" in p for p in _paths(http))
 
-    assert result.success is False
-    assert "non-retryable" in result.message
-    assert [c[0] for c in http.calls] == [
-        "/api/v1/videofeature/open/productionBoost",
-        "/api/v1/videofeature/start",
-    ]
-    assert len(http.bills) == 2
 
+class TestTheClaimsAnswerIsNeverReadOptimistically:
+    def test_a_refused_claim_reports_the_games_reason(self):
+        svc, _ = _service(
+            _happy(**{"videofeature/ends": {"error": "errorNoVideoAvailable", "message": "nope"}})
+        )
 
-# ── Call site 3: POST /api/v1/videofeature/ends (the actual claim) ────────
+        result = asyncio.run(svc.claim_reward("adventureDuration"))
 
+        assert result.success is False
+        assert "errorNoVideoAvailable" in result.message
 
-def _through_ends(ends_body, *, reward_type="ironProductionBonus", **extra):
-    svc, http = _service(
-        {
-            "videofeature/open": {"vrid": "v1", "videoIframeUrl": "//x.ad/iframe"},
-            "videofeature/start": {},
-            "videofeature/ends": ends_body,
-        }
-    )
-    return asyncio.run(svc.claim_reward(reward_type, **extra)), http
+    def test_an_html_soft_block_is_not_read_as_a_silent_success(self):
+        svc, _ = _service(
+            _happy(**{"videofeature/ends": {"response_text": "<html>maintenance</html>"}})
+        )
 
+        result = asyncio.run(svc.claim_reward("adventureDuration"))
 
-def test_the_claim_post_carries_the_vrid_and_the_parsed_signature():
-    result, http = _through_ends({})
+        assert result.success is False
+        assert "cannot be read" in result.message
 
-    assert http.calls[2] == ("/api/v1/videofeature/ends", {"vrid": "v1", "hash": "deadbeef"})
-    assert result.success is True
-    assert "Reward claimed" in result.message
+    def test_a_non_object_answer_is_unverified_not_a_crash(self):
+        svc, _ = _service(_happy(**{"videofeature/ends": ["unexpected"]}))
 
+        result = asyncio.run(svc.claim_reward("adventureDuration"))
 
-def test_a_building_upgrade_claim_follows_its_redirect_to_start_the_build():
-    result, http = _through_ends(
-        {"redirectTo": "/build.php?id=1&a=1"},
-        reward_type="buildingUpgrade",
-        villageId=1,
-        slotId=2,
-        buildingId=3,
-    )
+        assert result.success is False
+        assert "cannot be read" in result.message
 
-    assert result.success is True
-    assert http.calls[-1][0] == "/build.php?id=1&a=1"
+    def test_a_lost_claim_is_not_re_sent(self):
+        svc, http = _service(
+            _happy(
+                **{
+                    "videofeature/ends": NetworkError(
+                        "Connection reset (non-retryable): peer closed"
+                    )
+                }
+            )
+        )
 
+        result = asyncio.run(svc.claim_reward("adventureDuration"))
 
-def test_a_refused_claim_is_reported_as_a_failure_with_the_games_reason():
-    result, _http = _through_ends({"error": "errorAlreadyClaimed", "message": "already used"})
+        assert result.success is False
+        assert "non-retryable" in result.message
+        assert _paths(http).count("/api/v1/videofeature/ends") == 1
 
-    assert result.success is False
-    assert "errorAlreadyClaimed" in result.message
-    assert "already used" in result.message
+    def test_a_building_claim_follows_a_redirect_when_the_game_sends_one(self):
+        svc, http = _service(_happy(**{"videofeature/ends": {"redirectTo": "/dorf2.php?id=1&a=1"}}))
+        http._bodies["/dorf2.php"] = ""
 
+        result = asyncio.run(svc.claim_reward("buildingUpgrade", slotId=22, buildingId=22))
 
-def test_an_html_soft_block_after_the_claim_is_not_read_as_a_silent_success():
-    """FINDING: this used to report 'Reward claimed successfully!'"""
-    result, _http = _through_ends({"response_text": "<html>we are down for maintenance</html>"})
+        assert result.success is True
+        assert _paths(http)[-1] == "/dorf2.php?id=1&a=1"
 
-    assert result.success is False, "an unreadable claim answer must not read as granted"
-    assert "may already have taken effect" in result.message
 
-
-def test_a_genuinely_empty_claim_answer_is_not_read_as_a_silent_success():
-    """FINDING: same defect, the empty-body variant of the response_text wrapper."""
-    result, _http = _through_ends({"response_text": ""})
-
-    assert result.success is False
-    assert "may already have taken effect" in result.message
-
-
-def test_a_non_object_claim_answer_is_reported_as_unverified_not_a_crash():
-    """A bare JSON array used to raise AttributeError inside the handler,
-    caught only by the outer catch-all -- reported failure, but via a raw
-    exception string instead of the deliberate unverified classification."""
-    result, _http = _through_ends([])
-
-    assert result.success is False
-    assert "may already have taken effect" in result.message
-
-
-def test_a_lost_claim_answer_is_not_re_sent_and_stays_ambiguous():
-    svc, http = _service(
-        {
-            "videofeature/open": {"vrid": "v1", "videoIframeUrl": "//x.ad/iframe"},
-            "videofeature/start": {},
-            "videofeature/ends": NetworkError("Connection reset (non-retryable): peer closed"),
-        }
-    )
-
-    result = asyncio.run(svc.claim_reward("ironProductionBonus"))
-
-    assert result.success is False
-    assert "non-retryable" in result.message
-    assert [c[0] for c in http.calls] == [
-        "/api/v1/videofeature/open/productionBoost",
-        "/api/v1/videofeature/start",
-        "/api/v1/videofeature/ends",
-    ], "the claim must be attempted exactly once, never re-sent"
-    assert len(http.bills) == 3
-
-
-def test_a_dispatched_claim_bills_once_per_post_json_call():
-    _result, http = _through_ends({})
-
-    assert len(http.calls) == 3
-    assert len(http.bills) == 3
-
-
-# ── Call site 4: POST /api/v1/graphql (get_available_rewards) ─────────────
+# ── Availability ──────────────────────────────────────────────────────────
 
 
 def test_get_available_rewards_parses_the_graphql_response_per_resource():
-    resp = {
-        "data": {
-            "ownPlayer": {
-                "productionBoost": {
-                    "lumber": {"videoFeatureAvailable": True, "isActive": False},
-                    "clay": {"videoFeatureAvailable": False, "isActive": False},
-                    "iron": {"videoFeatureAvailable": True, "isActive": True},
-                    "crop": {"videoFeatureAvailable": False, "isActive": False},
+    svc, http = _service(
+        {
+            "graphql": {
+                "data": {
+                    "ownPlayer": {
+                        "productionBoost": {
+                            "lumber": {"videoFeatureAvailable": True, "isActive": False},
+                            "clay": {"videoFeatureAvailable": False, "isActive": True},
+                            "iron": {"videoFeatureAvailable": True, "isActive": False},
+                            "crop": {"videoFeatureAvailable": False, "isActive": False},
+                        }
+                    }
                 }
             }
         }
-    }
-    svc, http = _service({"graphql": resp})
+    )
 
     result = asyncio.run(svc.get_available_rewards())
 
     assert result["lumberProductionBonus"] is True
     assert result["clayProductionBonus"] is False
-    assert result["ironProductionBonus"] is True
-    assert result.get("iron_active") is True
-    assert "clay_active" not in result, "isActive is only reported when true"
+    assert result["clay_active"] is True
     assert http.calls[0][0] == "/api/v1/graphql"
-    assert "productionBoost" in http.calls[0][1]["query"]
-    assert len(http.bills) == 1
 
 
 def test_a_failed_availability_read_reports_nothing_available_not_unlimited():
-    """The one guard this read backs (which types are worth claiming) must
-    never default to "everything is available" just because the read failed
-    -- the same defect class the scout preflight guard was fixed for."""
-    svc, http = _service({"graphql": NetworkError("Connection reset (non-retryable): peer closed")})
+    svc, _ = _service({"graphql": NetworkError("boom")})
 
-    result = asyncio.run(svc.get_available_rewards())
+    assert asyncio.run(svc.get_available_rewards()) == {}
 
-    assert result == {}
-    assert len(http.bills) == 1, "the failed read must still be billed"
+
+def test_a_production_boost_is_refused_rather_than_guessed_at():
+    """Four of the nine reward types used to append `?resource=<name>`.
+
+    Both recorded opens -- `buildingUpgrade` and `adventureDuration` -- carry no
+    body and no query at all, so that parameter is a shape nothing has been
+    observed producing. Sending it puts an invented query string on a real
+    endpoint, which is precisely what this service was rewritten to stop doing.
+
+    An unavailable feature costs a free bonus. An invented request costs the
+    account, and is the cheapest kind of anomaly to alert on. One captured
+    production-boost watch turns it back on.
+    """
+    svc, http = _service(_happy())
+
+    result = asyncio.run(svc.claim_reward("ironProductionBonus"))
+
+    assert result.success is False
+    assert "never been observed" in result.message
+    assert http.calls == [], "nothing goes out on a shape we cannot quote"
