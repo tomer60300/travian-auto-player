@@ -553,6 +553,19 @@ The next morning, read:
 | the game shows a row the response does not | reconciliation is wrong about the account | stop; this is a review finding, not an operator error |
 | an incoming attack on any origin or destination in the plan | the executor does not consult this and will act identically under threat | stop the protocol; a run that commits merchants and cargo into a village under attack is a decision no player would make |
 
+Five more refusals exist that did not when this document was written. They were
+added by the 2026-09-08 auto-executor safety review
+(`docs/resource-planner-auto-executor-resolution-2026-09-08.md`), and all five
+are deliberate: each replaces a case where the executor used to carry on.
+
+| signal | meaning | action |
+|---|---|---|
+| `409` — "Another process is writing to this account" | a second process holds the account's execute lock; the message names its pid, host and how long it has held it | let the other run finish. The lock is held by the operating system and is released the moment that process ends, so there is nothing to clear by hand |
+| a `problems` line saying the run's execution trace stopped recording | the write-ahead evidence the undo path reads stopped being durable, so no further write is allowed | **rows already written are real and were NOT rolled back** — read the marketplace, then fix the trace directory before running again |
+| "the marketplace page describes village N" | the page answered for a village other than the one asked for — a redirect, or a concurrent `?newdid=` | stop. Nothing was written for that village. Re-read it before any write; do not assume the routes shown are its own |
+| "could not be read in full" on a marketplace read | the page carried a route model that could only be parsed in part, so what is already there is unknown | stop for that village. This is the case that used to read as "no routes here", which is what makes a reconciler create the whole plan a second time |
+| `deferred_origins` non-empty at the end of a sweep | villages that were visited and still owe work — a create the cap deferred, or cargo it could not correct | not an error: the sweep goes back for them. It IS an error if the page reports the sweep complete while this list is non-empty |
+
 ## What this protocol does not cover
 
 - Gold Club: `docs/15-gold-club-features.md`. A Gold Club account's route

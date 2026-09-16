@@ -111,14 +111,14 @@ Every task MUST follow this exact pipeline. Do not skip steps.
 ### Phase 3: Verify
 
 Scope the gate to what you actually changed. **The full suite is a pre-commit
-gate, not an edit-test loop.** Measured 2026-09-07 on this machine, wall clock
+gate, not an edit-test loop.** Measured 2026-09-16 on this machine, wall clock
 including `uv run`:
 
 | run | wall | tests |
 |---|---|---|
 | one test file, no xdist — **the inner loop** | **~5s** | 53 |
-| `-n 8 -m "not slow"` | **48s** | 3,663 |
-| `-n 8`, full gate | **~110s** | 3,828 |
+| `-n 8 -m "not slow"` | **48s** | 3,822 |
+| `-n 8`, full gate | **~122s** | 3,987 |
 
 Those are a quiet machine. Repeated runs while another agent was working the
 same checkout measured 109s, 122s and once 154s — so treat a single slow run
@@ -127,8 +127,9 @@ as contention, not a regression, and re-measure before believing it.
 History, so the trend is legible: 1,911 tests took 107s warm / 199s cold, then
 2,031 (99s), 2,431 (102s), 2,573 (129s), 2,646 (135s), and 3,252 took **157s**
 before the 2026-09-07 work below. That work took it to 111s while *adding* 576
-tests — so the suite is 29% faster carrying 18% more than it did an hour
-earlier, and nothing was deleted, skipped or weakened to get there.
+tests — so the suite got 29% faster carrying 18% more, and nothing was deleted,
+skipped or weakened to get there. The auto-executor safety work and the live-run
+fixes since have added ~160 more cases for roughly ten seconds.
 
 Three things got it there, and they are worth knowing before you try to make it
 faster again:
@@ -158,7 +159,7 @@ worker re-imports pytest, runs conftest's isolation and collects all 149 test
 modules, ~4.3s each. For the same reason `-n` is deliberately NOT in `addopts`
 — on a single-file run the 9-process bootstrap costs more than the tests do.
 
-Even at 97s, running the suite to verify a Markdown edit verifies nothing.
+Even at two minutes, running the suite to verify a Markdown edit verifies nothing.
 
 **Always:**
 1. Backend linting, if any Python changed: `uv run ruff check . && uv run ruff format --check .`
@@ -192,8 +193,8 @@ Even at 97s, running the suite to verify a Markdown edit verifies nothing.
    expensive shared plan came to be rebuilt eight times.
    While iterating, `-m "not slow"` skips the heavy cases: the oracle
    agreement checks, the relabelling permutations, the mutation guards, and
-   every 40-village planner case. Measured 2026-09-07 with `-n 8`: **48s over
-   3,663 tests against 111s over 3,828** — the marker is worth reaching for
+   every 40-village planner case. Measured 2026-09-16 with `-n 8`: **48s over
+   3,822 tests against ~122s over 3,987** — the marker is worth reaching for
    again, now that the three cases leaking past it have been marked.
    Run the full set (still `-n 8`) before committing.
 
@@ -213,12 +214,13 @@ uv run --extra dev --extra web pytest -q -n 8
 **Frontend changed:**
 5. `cd frontend && npx eslint . --max-warnings=20 && npm test`
    No build: see the Phase 2 note — building deploys to :80.
-   `npm test` is vitest. There is also a tracked Playwright suite — 45 specs
-   under `frontend/e2e/*.pw.js` with `frontend/playwright.config.js` — which
-   drives the real page against stubbed endpoints and is what the distribution
+   `npm test` is vitest. There is also a tracked Playwright suite — 74 spec
+   files under `frontend/e2e/*.pw.js` with `frontend/playwright.config.js`,
+   around 545 cases across the `functional` and `visual` projects — which drives
+   the real page against stubbed endpoints and is what the distribution
    planner's own gates are written in. Run the specs your change touches
-   (`npx playwright test <name>`); the whole suite takes 13–17 minutes, so run
-   it before a hand-off rather than on every iteration.
+   (`npx playwright test <name>`); the whole suite takes 8–11 minutes, so run it
+   before a hand-off rather than on every iteration.
 
 **Docs, comments or CI YAML only:** none of the above apply beyond a sanity
 read. Do not run the test suite.

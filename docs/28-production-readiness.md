@@ -305,7 +305,24 @@ Two notes on that command line, both worth knowing before you retype it:
 Nothing runs on port 8000. Older docs and prompts that call 8000 "production"
 are stale.
 
-### 3.2 :80 is never restarted without explicit permission
+### 3.2 One live executor per account, across both servers
+
+:80 and :8001 run the same code against the same game account. Until 2026-09-08
+they shared no mutual exclusion at all — the execute lock was an `asyncio.Lock`
+in each process's memory — so both could read a marketplace before either wrote
+to it, and each would then create what the other had just made.
+
+`services/account_lease.py` now holds an exclusive lock **in the kernel**, keyed
+by server-plus-login, taken before the in-process lock. A second process is
+refused with a 409 naming the holder. It cannot be taken from a live holder, it
+cannot be released by anyone else, and the kernel drops it when the process ends
+— including a kill — so nothing has to be cleaned up.
+
+Its scope is one filesystem. Two machines against one account is outside it, and
+so is a share whose locking is advisory-only across hosts. On this machine, that
+is the whole population.
+
+### 3.3 :80 is never restarted without explicit permission
 
 That is the standing rule, and the reason is in §3.3: both servers run from the
 same checkout and serve the same built directory, so almost nothing you would
@@ -316,7 +333,7 @@ restart :80 *for* actually requires it.
 - A **`.env`** change needs neither restart — settings are rebuilt per session
   (§4.2), so a reconnect is enough.
 
-### 3.3 A frontend build IS a production deploy
+### 3.4 A frontend build IS a production deploy
 
 Three facts, each read in the tree:
 
@@ -337,7 +354,7 @@ never a build. Deploying is a separate act that the operator authorises
 explicitly. If you must be able to go back, copy the existing `static/`
 directory somewhere before building; nothing else will preserve it.
 
-### 3.4 How to verify a server is healthy after a restart
+### 3.5 How to verify a server is healthy after a restart
 
 **There is no health endpoint.** Verified rather than assumed: no route matching
 `/health`, `/healthz`, `/ping` or `/version` exists anywhere under
@@ -379,7 +396,7 @@ Unauthenticated, no game request, one trivial query, and it must be registered
 **before** the `/{full_path:path}` catch-all that `web/app.py` mounts last.
 Until that exists, `GET /openapi.json` then `GET /` is the restart check.
 
-### 3.5 What has not been reviewed
+### 3.6 What has not been reviewed
 
 `web/app.py` binds `0.0.0.0` in both configurations, which puts both servers on
 the LAN. It adds a `SecurityHeadersMiddleware` (CSP, `X-Frame-Options: DENY`,
