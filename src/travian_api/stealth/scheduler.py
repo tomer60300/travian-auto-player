@@ -24,6 +24,23 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# The offset the night window runs on before any page has stated one, in
+# minutes east of UTC. Europe 2 -- the world this account plays -- measures
+# UTC+1 (issue #76; the live page states `Travian.Game.timezoneOffsetToUTC =
+# -3600`), and the operator ruled the DEFAULT should say so rather than fall
+# back to the host's clock: the host has been on a third offset more than once,
+# and a night window 1-2h out of phase wakes the account inside the server's
+# night, nightly -- the pattern the window exists to remove. A page-stated
+# offset still overrides this (see `set_server_utc_offset_minutes`) and is
+# persisted with the scheduler state, so a world on another offset corrects
+# itself on its first marketplace read and no later process spends a request
+# re-learning it.
+DEFAULT_SERVER_UTC_OFFSET_MINUTES = 60
+
+# Reject a stored offset outside the range real timezones occupy (UTC-12 to
+# UTC+14), the same bounds the page parser enforces.
+_MAX_UTC_OFFSET_MINUTES = 14 * 60
+
 
 class ActivityScheduler:
     """Enforces realistic play session boundaries.
@@ -90,9 +107,10 @@ class ActivityScheduler:
         # phase across accounts is the tell).
         self._night_start_hour = 23.0
         self._night_end_hour = 6.0
-        # Host-local until a page tells us otherwise; see
-        # `set_server_utc_offset_minutes`.
-        self._server_utc_offset_minutes: int | None = None
+        # The game's clock, presumed Europe 2 (UTC+1) until a page states
+        # otherwise; a value learned in an earlier process is restored by
+        # `_load_state`. See `set_server_utc_offset_minutes`.
+        self._server_utc_offset_minutes: int | None = DEFAULT_SERVER_UTC_OFFSET_MINUTES
 
         # Effective caps: jittered at-or-below the configured hard ceilings so
         # the actual stop point varies instead of landing on the exact same
@@ -172,13 +190,23 @@ class ActivityScheduler:
         an account awake at 04:00 server time every single night is a pattern,
         not an absence of one.
 
-        Passing None leaves it on host-local time, which is the old behaviour
-        and the only honest answer before any page has stated the offset.
+        The default is :data:`DEFAULT_SERVER_UTC_OFFSET_MINUTES` -- this
+        account's world, measured -- so the window sits at (or within DST of)
+        the right hours from the first minute of a process, rather than only
+        after a marketplace read has happened to run. A learned value is
+        persisted with the scheduler state and outlives the process; passing
+        None is the explicit opt-out back to host-local time.
         """
-        self._server_utc_offset_minutes = minutes
+        if minutes != self._server_utc_offset_minutes:
+            self._server_utc_offset_minutes = minutes
+            # Learned once, kept for every later process: this is what makes
+            # the offset cost zero requests after the first page ever to state
+            # it. Throttled like every other save; atexit force-writes anyway.
+            self._save_state()
 
     def _server_now(self) -> datetime:
-        """Now, on the game's clock when we know it and the host's when we do not."""
+        """Now on the game's clock -- learned, else presumed UTC+1 -- and the
+        host's only after an explicit ``set_server_utc_offset_minutes(None)``."""
         if self._server_utc_offset_minutes is None:
             return datetime.now()
         return datetime.now(UTC).replace(tzinfo=None) + timedelta(
@@ -351,6 +379,19 @@ class ActivityScheduler:
             # cap before any can_continue() gate uses the stale one.
             self._maybe_resample_daily_cap()
 
+            # The game clock's offset, learned from a page by some earlier
+            # process. Restoring it is what makes the night window sit right
+            # without this process ever reading a marketplace. Same posture as
+            # `_coerce_cap`: a value that is not a plausible timezone keeps the
+            # fresh default rather than moving the account's night to nonsense.
+            offset = data.get("server_utc_offset_minutes")
+            if (
+                isinstance(offset, int)
+                and not isinstance(offset, bool)
+                and abs(offset) <= _MAX_UTC_OFFSET_MINUTES
+            ):
+                self._server_utc_offset_minutes = offset
+
             rolling = self._rolling_24h_seconds()
             logger.info(
                 "Restored scheduler: rolling_24h=%.1fh, session=%.1fh (idle_since_save=%.0fs)",
@@ -381,6 +422,7 @@ class ActivityScheduler:
             "effective_continuous_hours": self._effective_continuous_hours,
             "effective_daily_hours": self._effective_daily_hours,
             "daily_cap_day": self._daily_cap_day,
+            "server_utc_offset_minutes": self._server_utc_offset_minutes,
             "last_saved": time.time(),
         }
         try:

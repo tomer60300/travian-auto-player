@@ -5900,7 +5900,14 @@ async def post_revert_plan(
                 continue
             try:
                 now = await svc.list_existing_routes(origin, map_span=body.map_span)
-                requests_used += 2  # dorf2 + the marketplace tab
+                # Three on the arrival path a revert origin takes: the village
+                # view, the building's default tab, then the trade-route tab
+                # (`open_marketplace` -> `_walk_to_marketplace`). It was 2 before
+                # the walk grew the default-tab hop, and this figure is spent
+                # against the same shared daily ceiling the farm and oasis loops
+                # draw on -- so, exactly as the post-write reads two hunks down
+                # argue, under-counting here quietly licenses THOSE to overspend.
+                requests_used += 3
             except (NetworkError, MarketplaceUnreadable) as exc:
                 # Conclude nothing about a village we could not read: an unreadable
                 # page would otherwise look like "every route vanished".

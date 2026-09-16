@@ -900,9 +900,13 @@ def test_the_night_window_runs_on_the_games_clock_when_it_is_known():
 
     s = ActivityScheduler(max_continuous_hours=6.0, max_daily_hours=16.0)
 
-    # Default: host-local, which is the only honest answer before any page has
-    # stated the offset.
-    assert s._server_utc_offset_minutes is None
+    # Default: the game world's measured offset (UTC+1, Europe 2), not the
+    # host's clock. The operator ruled the presumption should be the world this
+    # account plays -- a night window 1-2h out of phase because the host sits on
+    # a different offset wakes the account inside the server's night nightly,
+    # which is the pattern the window exists to remove. A naive server-clock
+    # datetime carries no tzinfo.
+    assert s._server_utc_offset_minutes == 60
     assert s._server_now().tzinfo is None
 
     # A stated offset moves the clock the window is evaluated against.
@@ -913,8 +917,13 @@ def test_the_night_window_runs_on_the_games_clock_when_it_is_known():
 
     assert 2.9 < (three_hours_east - on_game_clock).total_seconds() / 3600.0 < 3.1
 
-    # And the window follows it rather than the machine.
-    s.set_server_utc_offset_minutes(None)
+    # And the window follows the stated clock rather than the machine.
+    s.set_server_utc_offset_minutes(60)
     midnight = datetime(2026, 9, 15, 23, 30)
     assert s.is_rest_window(midnight) is True
     assert s.is_rest_window(datetime(2026, 9, 15, 14, 0)) is False
+
+    # The explicit opt-out back to host-local time still works for whoever
+    # states it, even though it is no longer the default.
+    s.set_server_utc_offset_minutes(None)
+    assert s._server_utc_offset_minutes is None

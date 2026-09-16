@@ -11,9 +11,11 @@ and `seconds_until_rest_ends` had no callers between them anywhere in the
 project. The machinery was written, tested and unreachable.
 """
 
-from datetime import datetime
+import json
+import time
+from datetime import UTC, datetime, timedelta
 
-from travian_api.stealth.scheduler import ActivityScheduler
+from travian_api.stealth.scheduler import DEFAULT_SERVER_UTC_OFFSET_MINUTES, ActivityScheduler
 
 
 def _at(hour: float) -> datetime:
@@ -303,10 +305,76 @@ class TestTheBreakIsMeasuredOnTheSameClockThatRefusedTheWork:
 
         assert s.next_break_duration(_at(14.0)) < 3600.0
 
-    def test_with_no_offset_known_it_is_the_host_clock_exactly_as_before(self):
-        """`_server_now` falls back to `datetime.now()` when no page has stated
-        the offset, so this change is inert until one has."""
+    def test_an_explicit_none_keeps_the_host_clock(self):
+        """`set_server_utc_offset_minutes(None)` is the explicit opt-out to
+        host-local time. It is no longer the default -- the default presumes the
+        game world's measured offset, see the class below -- but the opt-out
+        must keep working for whoever states it."""
         s = self._sched(server_offset_minutes=None)
 
-        assert s._server_now is not None
         assert s.next_break_duration(_at(14.0)) < 3600.0
+
+
+class TestTheClockStartsRightAndStaysLearned:
+    """The offset defaults to the game world's measured UTC+1 and survives a restart.
+
+    Before, the default was the HOST's clock until the first marketplace read of
+    every process. Two consequences, both wrong: the farm, oasis and build loops
+    -- which never read a marketplace -- ran the night window on host time
+    permanently, waking the account 1-2h into the server's night on this
+    operator's machine; and even the trade-route path re-spent a page read every
+    process start to learn a number the previous process already knew. The
+    operator's ruling: default to UTC+1, and cache the learned value so no
+    process needs a request to know what time it is.
+    """
+
+    def test_a_fresh_scheduler_presumes_the_game_worlds_offset(self):
+        s = ActivityScheduler(enabled=True)
+
+        expected = datetime.now(UTC).replace(tzinfo=None) + timedelta(
+            minutes=DEFAULT_SERVER_UTC_OFFSET_MINUTES
+        )
+        assert DEFAULT_SERVER_UTC_OFFSET_MINUTES == 60  # Europe 2, measured (#76)
+        assert abs((s._server_now() - expected).total_seconds()) < 5.0
+
+    def test_a_learned_offset_survives_a_restart(self, tmp_path):
+        state = tmp_path / "scheduler_state.json"
+        first = ActivityScheduler(enabled=True, state_file=state)
+        first.set_server_utc_offset_minutes(120)
+        first._save_state_force()
+
+        second = ActivityScheduler(enabled=True, state_file=state)
+
+        assert second._server_utc_offset_minutes == 120
+
+    def test_a_state_file_from_before_the_field_existed_keeps_the_default(self, tmp_path):
+        """An old save must not read as 'the server is at UTC+0'."""
+        state = tmp_path / "scheduler_state.json"
+        state.write_text(
+            json.dumps({"hourly_buckets": {}, "session_seconds": 0.0, "last_saved": time.time()}),
+            encoding="utf-8",
+        )
+
+        s = ActivityScheduler(enabled=True, state_file=state)
+
+        assert s._server_utc_offset_minutes == DEFAULT_SERVER_UTC_OFFSET_MINUTES
+
+    def test_a_corrupt_saved_offset_is_rejected_not_installed(self, tmp_path):
+        """The same posture `_coerce_cap` takes: a nonsense value on disk keeps
+        the fresh default rather than moving the account's night to it."""
+        state = tmp_path / "scheduler_state.json"
+        state.write_text(
+            json.dumps(
+                {
+                    "hourly_buckets": {},
+                    "session_seconds": 0.0,
+                    "last_saved": time.time(),
+                    "server_utc_offset_minutes": 99999,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        s = ActivityScheduler(enabled=True, state_file=state)
+
+        assert s._server_utc_offset_minutes == DEFAULT_SERVER_UTC_OFFSET_MINUTES

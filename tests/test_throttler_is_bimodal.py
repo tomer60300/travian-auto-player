@@ -346,3 +346,25 @@ class TestPacingFollowsIntentNotTransport:
         total = sum(t._effective_gap() for _ in range(200))
 
         assert total / 200 >= 1.5, "a sweep must not sustain more than ~0.66 req/s"
+
+
+def test_the_calibrated_burst_cap_is_the_one_production_runs():
+    """The 20 -> 60 recalibration originally moved only this class's constructor
+    default -- which production never reads. `HttpClient` passes
+    `settings.stealth_burst_max`, and that stayed at 30, so the measured
+    justification sat on a dead parameter while the live cap never changed.
+
+    Pinned as an equality between the two seams, so whichever one the next
+    calibration edits, this fails until the other follows and the number that
+    was measured is the number that ships.
+    """
+    import inspect
+
+    from travian_api.config import Settings
+
+    configured = Settings.model_fields["stealth_burst_max"].default
+    constructor = (
+        inspect.signature(RequestThrottler.__init__).parameters["burst_max_requests"].default
+    )
+
+    assert configured == constructor == 60
