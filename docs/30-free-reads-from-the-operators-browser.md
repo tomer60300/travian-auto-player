@@ -7,10 +7,21 @@ A page the operator has already loaded is already in the browser. Reading its DO
 were spent by the human browsing, and reading what they fetched spends them again zero
 times.
 
-Every read in this document is therefore free in the only sense that matters here: it
-does not touch the Travian account, so it does not consume the daily budget shared with
-the farm, oasis and build loops, and it does not need the operator's approval the way a
-request does.
+Every read in this document is therefore free **of requests**: it does not touch the
+Travian account and does not consume the budget shared with the farm, oasis and build
+loops.
+
+**It is not free of risk, and the first version of this document said it was.** Reading
+a page's DOM means attaching a debugger to a browser that is logged into the game, and a
+debugger attachment is observable from inside the page — see section 4, trap 3, where
+attaching measurably changed renderer behaviour. Zero requests is not zero exposure;
+counting requests is the wrong axis for this particular cost.
+
+So the rule is the opposite of what was written here first: **raise it and wait.** State
+that the read costs no requests, state that it attaches a debugger to a session logged
+into the game, and let the operator decide. Never treat "it spends nothing" as
+self-authorising. If the operator is not using that browser for the game at all, the
+exposure is gone — the surface is a loaded game page, not the open port.
 
 ## 2. Why it is worth having
 
@@ -73,7 +84,12 @@ need exists.
 controlled test — tabs created after the attach scroll normally and survive repeated
 connect/disconnect cycles; tabs open at the first attach lose wheel and keyboard
 scrolling permanently, while `window.scrollTo()` keeps working. It presents exactly like
-a website bug, and was reported as one. Poll the plain `/json/list` HTTP endpoint (which
+a website bug, and was reported as one.
+
+Read that finding twice, because it is not only an annoyance. Attaching a debugger
+**changed behaviour the renderer exposes**, and anything visible to us from JavaScript
+should be assumed visible to the page's own JavaScript. That makes this the reason the
+mechanism needs authorising, not merely a usability footnote. Poll the plain `/json/list` HTTP endpoint (which
 attaches nothing) and attach only for the instant a DOM read needs it, or give automation
 its own Chrome instance.
 
@@ -94,6 +110,12 @@ The procedure, the scripts and the gotchas are the `free-read-open-tabs` skill u
 the Marketplace — and serves a live view on `127.0.0.1:8777` that fills in as the
 operator browses.
 
-One rule when using it: **state the request cost out loud every time.** The operator is
-tracking a budget and cannot tell from the outside whether a number arrived free or cost
-them.
+Two rules when using it, and the second was learned the hard way:
+
+**State the request cost out loud every time.** The operator is tracking a budget and
+cannot tell from the outside whether a number arrived free or cost them.
+
+**Ask before the first attach, every session.** Not because of the requests — there are
+none — but because attaching to a browser logged into the game is an automation signal
+of unknown size. "It costs nothing" is an argument about the wrong resource, and it is
+not a reason to proceed unasked.
