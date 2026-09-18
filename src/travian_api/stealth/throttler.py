@@ -201,10 +201,11 @@ class RequestThrottler:
         it in the tail defeats it nowhere: the tail is the cheaper statistic to
         measure, because the long gaps are the conspicuous ones.
 
-        The rate spans roughly 0.7%-3%, so one account pauses four times as
-        often as another, and both are plausible; the length is a log-normal
-        whose own median and spread are drawn too. An explicitly configured
-        chance is left exactly alone -- a caller that names a number means it.
+        The rate spans 1.25%-4.5% -- the 2.5% base scaled by 0.5x to 1.8x -- so
+        one account pauses nearly four times as often as another, and both sit
+        around the 2.2% the recording measured; the length is a log-normal whose
+        own median and spread are drawn too. An explicitly configured chance is
+        left exactly alone -- a caller that names a number means it.
         """
         self.distraction_chance = (
             _DISTRACTION_CHANCE * rng.uniform(0.5, 1.8)
