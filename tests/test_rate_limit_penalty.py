@@ -255,6 +255,33 @@ class TestTheThrottlerSeparatesPacingFromPenalties:
         assert first > 0.0
         assert second == 0.0
 
+    def test_a_penalty_raised_mid_sleep_is_still_owed(self):
+        # The other side of consuming the deadline. `wait_for_penalty` clears
+        # `_penalty_until` after sleeping, so that a wake a few ms early on the
+        # event loop's coarser timer does not leave a remainder for the next
+        # call to serve. It must clear only the deadline it actually waited out:
+        # `add_penalty` takes a `max`, so a SECOND 429 arriving mid-sleep pushes
+        # the deadline out, and clearing unconditionally would swallow it and
+        # send the next request straight into the server that just said stop.
+        throttler = RequestThrottler(enabled=False)
+
+        async def raise_it_mid_sleep():
+            throttler.add_penalty(0.2)
+            bump = asyncio.create_task(bump_after(0.05))
+            first = await throttler.wait_for_penalty()
+            await bump
+            return first, await throttler.wait_for_penalty()
+
+        async def bump_after(delay):
+            await asyncio.sleep(delay)
+            throttler.add_penalty(0.5)
+
+        first, second = asyncio.run(raise_it_mid_sleep())
+
+        assert first > 0.0
+        # The longer penalty outlived the first sleep and is still owed.
+        assert second > 0.0
+
     def test_an_enabled_throttler_serves_the_penalty_through_wait(self):
         # The paced path keeps folding the penalty into its own gate, so a 429
         # is not waited out twice.

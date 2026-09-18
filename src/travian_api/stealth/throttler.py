@@ -406,9 +406,23 @@ class RequestThrottler:
         now = time.monotonic()
         if now >= self._penalty_until:
             return 0.0
-        penalty_wait = self._penalty_until - now
+        deadline = self._penalty_until
+        penalty_wait = deadline - now
         logger.debug(f"Throttle penalty: waiting {penalty_wait:.1f}s")
         await asyncio.sleep(penalty_wait)
+        # Consume the deadline we waited out instead of trusting two clocks to
+        # agree it has passed. `asyncio.sleep` schedules on the event loop's
+        # timer, whose Windows resolution is ~15.6ms, so it can return while
+        # `time.monotonic()` still reads short of `deadline` -- measured at 9ms.
+        # The next call then finds an outstanding penalty and serves the
+        # remainder, which is exactly the "once and only once" above breaking on
+        # a rounding difference between two clocks rather than on any 429.
+        #
+        # Only OUR deadline is cleared. `add_penalty` takes a `max`, so a longer
+        # penalty that arrived mid-sleep leaves `_penalty_until` past `deadline`
+        # and is still owed -- dropping it would turn a second 429 into silence.
+        if self._penalty_until <= deadline:
+            self._penalty_until = 0.0
         return penalty_wait
 
     def add_penalty(self, seconds: float) -> None:
