@@ -578,6 +578,13 @@ class OverBudget:
     available: int
     trade_office_levels_needed: int | None = None
 
+    relay_candidates_that_would_fit: tuple[int, ...] = ()
+    """The other remedy, and the free one: villages which, declared as a relay
+    for this origin's downstreams, would bring it inside its budget with no
+    upgrade at all. Nearest first, empty where none would -- see
+    :func:`_relay_candidates_that_would_fit`, which prices each one through the
+    machinery that would actually do the relocating."""
+
     max_busy: int | None = None
     """The operator's own ceiling here, where one was set.
 
@@ -903,13 +910,21 @@ def _budget_relief_withdrawals(
     villages: Mapping[int, VillageState],
     pair_merchants: Callable[[int, int, Mapping[Resource, float]], int],
     movable: Collection[Resource],
-) -> set[tuple[int, int]]:
+) -> tuple[set[tuple[int, int]], dict[int, int]]:
     """Whole ROUTES to lift off an over-budget origin and onto a declared relay.
 
-    Returns the ``(origin, destination)`` keys to drop from the direct plan.
-    Every resource on a dropped key becomes a gap the tier then serves, which is
-    why this runs once over the finished direct pass for ALL resources rather
-    than once per resource inside it.
+    Returns the ``(origin, destination)`` keys to drop from the direct plan, and
+    what each over-budget origin would then spend. Every resource on a dropped
+    key becomes a gap the tier then serves, which is why this runs once over the
+    finished direct pass for ALL resources rather than once per resource inside
+    it.
+
+    The projection is returned rather than recomputed by whoever wants it
+    because two callers ask two different questions of one calculation: the plan
+    asks *which routes move*, and :func:`_relay_candidates_that_would_fit` asks
+    *did the cap end up fitting*. Re-pricing the second from the first means a
+    second copy of the trunk-pooling arithmetic, and two pricings that disagree
+    would have the plan withdrawing routes the advice said were pointless.
 
     **Why this exists.** The tier used to fire on shortfalls alone, so an
     operator could declare exactly the structure that would fix a breached cap
@@ -940,7 +955,7 @@ def _budget_relief_withdrawals(
             if vid not in relays and vid in villages:
                 serves.setdefault(vid, relay)
     if not serves:
-        return set()
+        return set(), {}
 
     # One entry per ROUTE, carrying every resource that route moves. Both
     # halves of this fix live in that sentence.
@@ -967,6 +982,7 @@ def _budget_relief_withdrawals(
         spent[origin] = spent.get(origin, 0) + pair_merchants(origin, destination, cargo)
 
     withdrawn: set[tuple[int, int]] = set()
+    projected_by_origin: dict[int, int] = {}
     over = sorted(origin for origin, count in spent.items() if count > budgets.get(origin, 0))
     for origin in over:
         if origin in relays or origin not in villages:
@@ -1017,7 +1033,140 @@ def _budget_relief_withdrawals(
             projected = after
             trunk[relay] = pooled
             withdrawn.add((origin, destination))
-    return withdrawn
+        projected_by_origin[origin] = projected
+    return withdrawn, projected_by_origin
+
+
+# How many neighbours the over-budget record tries as a would-be relay. Bounded
+# because this is advice about a plan that is already built, and every candidate
+# is priced whether it helps or not -- but bounded SMALL because of what makes
+# relief pay rather than to save time: the saving is the difference between
+# hauls in flight and one pooled trunk, so a candidate further out than the
+# destinations it would serve saves nothing and
+# :func:`_budget_relief_withdrawals` declines it. The nearest few are where the
+# answer is if there is one.
+MAX_RELAY_CANDIDATES = 6
+
+
+def _relay_candidates_that_would_fit(
+    origin: int,
+    routes_from: Sequence[Route],
+    villages: Mapping[int, VillageState],
+    geometry: MapGeometry,
+    budgets: Mapping[int, int],
+    committed: Mapping[int, int],
+    relay_for: Mapping[int, Sequence[int]],
+    pair_merchants: Callable[[int, int, Mapping[Resource, float]], int],
+) -> tuple[int, ...]:
+    """Villages that, declared as a relay here, would bring *origin* inside its cap.
+
+    The second remedy, beside ``trade_office_levels_needed``, and the free one:
+    an upgrade costs days and resources, while a declaration costs a line in the
+    config. Until this existed the plan knew that a declared relay would have
+    fixed the breach -- :func:`_budget_relief_withdrawals` is the machinery that
+    uses one -- and said only "Trade Office +5 would fit".
+
+    **Priced by the mechanism that would do it, never by a second formula.**
+    Each candidate is handed to :func:`_budget_relief_withdrawals` as a
+    synthetic one-entry ``relay_for``, and kept only if the projection it
+    returns is inside the budget. That is the same trunk-pooling arithmetic the
+    plan itself would run on the declaration, so this cannot name a village the
+    tier would then decline: a relay in the wrong direction makes the origin's
+    bill worse, and both halves of that judgement are made in one place.
+
+    **Only what the schema would accept**, or the remedy is a 422. So: not the
+    origin, not a village already declared as a relay, not one already claimed
+    as somebody's downstream (a relay may not feed a relay), and not a role
+    village other than a feeder -- which is
+    ``_relay_tier_is_one_hop_of_non_role_villages``' rule, NOT
+    :func:`_may_relay_through`'s. The two differ on purpose: ``may_relay`` and
+    the crop-sign inference answer whether the route search may conscript a
+    village as a CROP hub, and the declared tier moves materials. Reading them
+    here would withhold a legal remedy from, say, a crop-negative village with
+    no role -- which most of this tier's real hubs are.
+
+    **And the relay has to be able to run what it is handed.** The load is
+    RELOCATED, not reduced, so a candidate whose own fleet cannot staff the
+    forward legs on top of what it already ships buys one breach with another.
+    It is priced with the same ``pair_merchants``.
+
+    Empty where nothing fits, and deliberately: naming a village that would not
+    help costs the operator a re-plan to find that out, which is worse than the
+    silence this replaces. Like the Trade Office advice it is a statement about
+    the CURRENT route set -- declaring a relay changes what the search can do,
+    so the plan is re-run afterwards rather than assumed.
+
+    That re-run is also why each record answers for ITS origin alone. One
+    downstream may be claimed by one relay only, so two breached villages
+    shipping to the same place cannot both act on their list in one edit; the
+    schema says which, and the next plan is built on what was actually
+    declared.
+    """
+    budget = budgets.get(origin, 0)
+    relays = set(relay_for)
+    claimed = {vid for downstreams in relay_for.values() for vid in downstreams}
+    cargo_from = {
+        route.destination: {r: a for r, a in route.cargo_per_hour.items() if a > EPSILON}
+        for route in routes_from
+    }
+    downstreams = sorted(
+        vid
+        for vid, cargo in cargo_from.items()
+        if vid in villages
+        and vid not in relays
+        and vid not in claimed
+        and any(resource in MATERIALS for resource in cargo)
+    )
+    if not downstreams:
+        return ()
+
+    direct: dict[Resource, dict[tuple[int, int], float]] = {}
+    for destination, cargo in cargo_from.items():
+        for resource, amount in cargo.items():
+            direct.setdefault(resource, {})[(origin, destination)] = amount
+
+    nearest = sorted(
+        (
+            vid
+            for vid, village in villages.items()
+            if vid != origin
+            and vid not in relays
+            and vid not in claimed
+            and village.merchant_count > 0
+            and (village.role is None or default_may_relay(village.role))
+        ),
+        key=lambda vid: (
+            geometry.distance(villages[origin].coords, villages[vid].coords),
+            villages[vid].routing_key,
+        ),
+    )[:MAX_RELAY_CANDIDATES]
+
+    fitting: list[int] = []
+    for candidate in nearest:
+        serving = tuple(vid for vid in downstreams if vid != candidate)
+        if not serving:
+            continue
+        withdrawn, projected = _budget_relief_withdrawals(
+            direct,
+            {candidate: serving},
+            budgets,
+            villages,
+            pair_merchants,
+            MATERIALS,
+        )
+        if projected.get(origin, budget + 1) > budget:
+            continue
+        forwarded = sum(
+            pair_merchants(
+                candidate,
+                destination,
+                {r: a for r, a in cargo_from[destination].items() if r in MATERIALS},
+            )
+            for _origin, destination in withdrawn
+        )
+        if committed.get(candidate, 0) + forwarded <= budgets.get(candidate, 0):
+            fitting.append(candidate)
+    return tuple(fitting)
 
 
 def _relay_tier_flows(
@@ -2524,6 +2673,22 @@ def build_plan(
     # blind to the cap is a source that ships.
     budgets = {vid: villages[vid].merchant_budget(merchant_reserve) for vid in villages}
 
+    # What one pair of villages would cost, the plan's own way. Named once
+    # because relief and the over-budget record's relay advice both price
+    # against it, and advice costed differently from the mechanism that would
+    # carry it out is advice the mechanism can refuse.
+    def pair_merchants(origin: int, destination: int, cargo: Mapping[Resource, float]) -> int:
+        return _route_for_pair(
+            origin,
+            destination,
+            cargo,
+            villages,
+            geometry,
+            merchant_model,
+            cycles,
+            max_cycle_by_destination,
+        ).merchants_committed
+
     for resource in sorted(resource_plans, key=lambda r: r.value):
         plan = resource_plans[resource]
         missing = {v.village_id for v in plan.villages} - set(villages)
@@ -2626,7 +2791,7 @@ def build_plan(
             relay_hub_candidates=relay_hub_candidates,
             fixed_assignment={},
         )
-        withdrawn = _budget_relief_withdrawals(
+        withdrawn, _projected = _budget_relief_withdrawals(
             # EVERY resource, not just the movable ones. A village's cap is
             # breached by what its routes actually cost, and its routes carry
             # crop too -- so a materials-only view both understates the breach
@@ -2635,18 +2800,7 @@ def build_plan(
             relay_for,
             budgets,
             villages,
-            lambda origin, destination, cargo: (
-                _route_for_pair(
-                    origin,
-                    destination,
-                    cargo,
-                    villages,
-                    geometry,
-                    merchant_model,
-                    cycles,
-                    max_cycle_by_destination,
-                ).merchants_committed
-            ),
+            pair_merchants,
             MATERIALS,
         )
 
@@ -2852,6 +3006,16 @@ def build_plan(
                 budgets[vid],
                 cycles,
                 max_cycle_by_destination,
+            ),
+            relay_candidates_that_would_fit=_relay_candidates_that_would_fit(
+                vid,
+                routes_by_origin.get(vid, []),
+                villages,
+                geometry,
+                budgets,
+                committed,
+                relay_for,
+                pair_merchants,
             ),
         )
         for vid, used in sorted(committed.items())
