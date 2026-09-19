@@ -137,7 +137,12 @@ class NpcReserve:
     shares: tuple[float, ...] = ()
     drawn: frozenset[Resource] = frozenset()
     """Resources this village must ship beyond its production, so cannot fund
-    the conversion with. The complement of ``sources`` when nothing overrode it."""
+    the conversion with. Computed first, and materials only -- a granary is not
+    NPC-fed, so crop is never drawn. ``sources`` is then derived from it, as its
+    complement where nothing overrode it, and narrowed to the stores that
+    actually contribute retention. So the two are not a partition: a resource
+    the village retains none of is in neither, and neither is anything at a
+    village whose feedstock could not be read."""
 
     def __post_init__(self) -> None:
         if self.allowance_per_day < 0:
