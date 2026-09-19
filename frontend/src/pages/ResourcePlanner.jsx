@@ -1169,6 +1169,22 @@ export default function ResourcePlanner() {
   // A toast expires; this stays until the next attempt (dry or live) clears
   // it, same as `canaryRefusal` above for its one narrower case.
   const [execRefusal, setExecRefusal] = useState(null)
+  // The night-rest override, and deliberately ONE-SHOT: cleared after every
+  // attempt, never persisted, never written to the setup document.
+  //
+  // The server refuses a live run inside the rest window and its own 409 tells
+  // the operator to "send i_am_awake: true if you are at the keyboard right
+  // now" -- an instruction this app had no control for, so the only way to obey
+  // it was curl. The flag exists for a real case the guard should not block: a
+  // person who opens the game at 23:30 and sorts out their trade routes is an
+  // ordinary evening.
+  //
+  // A sticky checkbox would quietly retire the guard, which is the one thing
+  // "real players sleep" cannot survive. So this renders only once the refusal
+  // has actually fired, and resets after the attempt it authorises. Re-ticking
+  // costs nothing: the 409 is raised before the first game request, so being
+  // refused is free.
+  const [iAmAwake, setIAmAwake] = useState(false)
   // Run history from the app's own execution traces (zero game requests).
   const [runHistory, setRunHistory] = useState(null)
   const [historyLoading, setHistoryLoading] = useState(false)
@@ -3171,6 +3187,10 @@ export default function ResourcePlanner() {
           // preview: the validator requires `execution_mode: "live"`, so
           // sending it there would 422 the one action that costs nothing.
           ...(!dryRun && canary ? { canary: true } : {}),
+          // Only on a live run, and only when the operator ticked it against a
+          // refusal that had already fired. A preview never reaches the rest
+          // gate, so sending it there would state a presence nothing asked for.
+          ...(!dryRun && iAmAwake ? { i_am_awake: true } : {}),
         })
         if (
           dryRun &&
@@ -3288,6 +3308,9 @@ export default function ResourcePlanner() {
         toast.error(detail)
       } finally {
         setExecuting(false)
+        // Spent. It authorised the attempt that just finished and nothing
+        // after it -- see the state's own note on why this must not be sticky.
+        setIAmAwake(false)
       }
     },
     [
@@ -3305,6 +3328,7 @@ export default function ResourcePlanner() {
       disableExisting,
       updateDrifted,
       canary,
+      iAmAwake,
       // Read by the marked-cell and run-control guard above.
       blockers,
       runIssues,
@@ -4358,9 +4382,16 @@ export default function ResourcePlanner() {
   // origin it VISITS, up to the per-run cap — which can include origins whose own
   // routes the preview shows as `deferred`. So the honest figure is an UPPER
   // BOUND: distinct origins across every planned row, capped by the visit budget.
+  //
+  // `routeCap(routesPerRun)`, not MAX_ROUTES_PER_RUN. The cap is the operator's,
+  // edited in "Routes this run" and sent as `max_routes_per_run` — the constant is
+  // only its default. Reading the constant here capped the estimate at 3 however
+  // high the box went, and the box goes to MAX_ROUTES_PER_RUN_CEILING, so a run
+  // budgeted at 50 origins was advertised as 3. That figure is printed on the one
+  // irreversible control on this page, which is the worst place to be 47 light.
   const plannedOriginCount = execResult
     ? Math.min(
-        MAX_ROUTES_PER_RUN,
+        routeCap(routesPerRun),
         new Set(
           execResult.actions
             .filter((a) => a.status === 'would_create' || a.status === 'deferred')
@@ -8266,6 +8297,29 @@ export default function ResourcePlanner() {
                     is untouched by a refusal and keeps whatever it held
                     before, so this is the only place the attempt is recorded. */}
                 {execRefusal && <FetchError what={execRefusal} />}
+                {/* The control the 409 above asks for, next to the sentence
+                    asking for it. Rendered only against that refusal: the flag
+                    means "a person is at the keyboard right now", which is a
+                    statement about this minute and not a setting. Offering it
+                    before the guard has fired would invite ticking it in
+                    advance, and a night-rest guard that can be pre-authorised
+                    is not one. */}
+                {execRefusal && /night-rest window/.test(execRefusal) && (
+                  <label className="flex items-center gap-2 mt-2 text-sm text-secondary cursor-pointer min-h-[44px]">
+                    <input
+                      type="checkbox"
+                      className="w-6 h-6"
+                      checked={iAmAwake}
+                      onChange={(e) => setIAmAwake(e.target.checked)}
+                    />
+                    <span>
+                      I am at the keyboard right now — run anyway.{' '}
+                      <span className="text-xs">
+                        Applies to the next run only; it clears afterwards.
+                      </span>
+                    </span>
+                  </label>
+                )}
 
                 {execResult && (
                   <>
