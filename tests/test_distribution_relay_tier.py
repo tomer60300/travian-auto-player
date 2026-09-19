@@ -1105,13 +1105,25 @@ class TestTheBufferSeverityTurnsOnWhetherAnythingLeftFirst:
 
 
 class TestADeclaredRelayDoesNotRelieveACappedHub:
-    """The tier fires on SHORTFALLS, so a cap it could fix is ignored (#74).
+    """A declared relay that cannot pay for itself is declined, not obeyed.
 
-    Drop the whitelist and 02 reaches every defensive village directly, so
-    nothing is short -- and nothing needs to be for the tier to be the right
-    answer: 02 simply cannot staff five hauls at once. The operator declares
-    exactly the structure that would fix it and the planner never looks,
-    because `_relay_tier_flows` returns early on an empty `unmet`.
+    The first line of this docstring used to read "the tier fires on SHORTFALLS,
+    so a cap it could fix is ignored (#74)". That was true BEFORE #74 and has
+    been false since: `_budget_relief_withdrawals` widened the trigger from
+    "this destination is unreachable" to "unreachable OR its origin cannot staff
+    the haul", and `TestARelayBringsAFarHubBackUnderItsCap` below is that path
+    working. The stale line outlived its fix by describing the bug rather than
+    the behaviour, and it was afterwards read as current and written up as a
+    live defect in `docs/issues/planner-merchant-cap-not-constraining.md`, whose
+    headline claim had to be withdrawn. A test class named for an absence is
+    exactly where that mistake is cheap to make, so the reason for the absence
+    is now the first thing this says.
+
+    Nothing is short here and the cap still binds: 02 reaches every defensive
+    village directly and simply cannot staff five hauls at once. The tier IS
+    consulted. It declines, because in this regime the swap does not pay --
+    `after >= projected` for every candidate, and relief that costs more than it
+    saves is refused rather than performed because it was declared.
 
     THE REGIME MATTERS, and the operator's is not the default one here. Every
     village in this module is Trade Office 0, so a merchant carries 2,500 and
