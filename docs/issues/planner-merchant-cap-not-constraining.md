@@ -2,10 +2,31 @@
 
 ## 1. Summary
 
-A declared `max_busy_merchants` cap does not constrain route selection. The optimizer
-builds a plan, and only afterwards does a separate layer notice the village is over its
-budget and emit a blocker — so the cap behaves as an assertion about a finished plan
-rather than as a constraint on building one. On a real account this produces a plan that
+> **CORRECTION, 2026-09-19.** The headline claim below was wrong when this was
+> written, and the error is mine. The cap **is** a constraint inside the search:
+> `_improve_flows` minimises the lexicographic objective
+> `(over_budget_excess, total_merchants + SOFT_BUDGET_PRICE x soft_excess, route_count)`,
+> in which `over_budget_excess` is the FIRST key — hard feasibility before merchant
+> count, before route count. `budgets` is built once and, per its own comment, read by
+> "the declared tier's source choice, the improvement search, the latency pass, the
+> crowding report, the over-budget record". `_budget_relief_withdrawals` exists
+> specifically to lift whole routes off an over-budget origin, and
+> `_relay_tier_flows` sorts candidates by `(merchants over budget, distance,
+> coordinates)`. The latency pass spends only idle merchants so "feasibility never
+> regresses".
+>
+> What happened: `merchants.py:301-309` says known issue #6 is "that comparison being
+> skipped", which is a true statement about `cheapest_cycle` — a function that
+> legitimately takes no budget, because it already returns the per-route minimum. I
+> generalised one function's note into a claim about the whole optimizer without
+> reading the search objective.
+>
+> Sections 2 to 5 are observations and stand. Section 6(b) and 6(c) stand. The
+> surviving defect is narrow and is stated in section 7.
+
+A declared `max_busy_merchants` cap did not, on the account below, produce a runnable
+plan. The optimizer builds a plan and a later layer reports the village as over its
+budget. On a real account this produces a plan that
 is `feasible: false` / `executable: false`, which `/execute` refuses, with no route the
 operator can take from inside the planner: no cycle choice fits the cap, the optimizer is
 forbidden from discovering a material relay, and the one declared mechanism that *could*
@@ -153,9 +174,16 @@ relay is the single sanctioned exception, one hop deep, because "a chain puts on
 forward leg behind another's, which no daily beat can order". Requiring a *declaration*
 for a structure that breaks an invariant is defensible design.
 
-What is **not** defensible is (a): a cap the operator declared is silently ignored while
-the plan is built. That is a separate decision from the relay policy, and it is the core
-of this issue.
+(a) as originally written is **withdrawn** — see the correction at the top. The cap is
+not silently ignored while the plan is built; it is the first key of the search's
+objective function.
+
+What survives is narrower and is really (c) wearing (b)'s clothes: when no legal move
+can bring an origin within its cap, the optimizer reports the breach, which is correct
+behaviour. The gap is that the ONE mechanism that could still fix it -- the declared
+relay tier -- cannot fire, because it activates only against shortfalls and this account
+has none. So an operator who declares both a cap and a relay gets neither honoured
+together.
 
 ## 7. Proposed fixes
 
@@ -196,8 +224,12 @@ Let the improvement search propose material relays the way it already does for c
   (`optimizer.py:31-34` notes they are asserted in tests, not defended at runtime), so the
   invariant would have to become an explicit constraint. Highest risk by far.
 
-**Recommendation:** (a) then (b). (a) makes the cap honest; (b) makes it satisfiable
-without hand-crafting `ship_only_to`. (c) only if the declaration requirement itself
+**Recommendation, revised.** (a) is withdrawn; there is nothing to make honest. **(b)
+is the whole of the remaining work**: let `_relay_tier_flows` activate on a budget
+breach and not only on a shortfall, sizing the collecting leg from the over-committed
+flows. That is a small, bounded change to an existing declared mechanism, and it is the
+only thing standing between a declared cap plus a declared relay and a plan that
+respects both. (c) only if the declaration requirement itself
 proves unacceptable.
 
 ## 8. Acceptance criteria
