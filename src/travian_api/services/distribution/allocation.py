@@ -437,10 +437,19 @@ def resolve_resource(
     if remainder_id is not None:
         # The remainder holds whatever is left. When over-allocated this goes
         # negative, which the day-check needs verbatim to model the sender
-        # draining its stock. The PLAN must not treat that negative target as
-        # sustainable surplus, though: the optimizer caps each sender's shippable
-        # surplus at its own production, so the shortfall surfaces there and the
-        # plan is reported infeasible rather than emitting an impossible rate.
+        # draining its stock -- and nothing clamps it on the way to the plan.
+        # The negative target flows straight into `ship_per_hour`, and the
+        # optimizer seeds each sender's surplus from `-ship_per_hour` and only
+        # ever decrements it (`_flows_for_resource`), so it reads a shippable
+        # surplus of own production PLUS the whole over-allocation. There is no
+        # cap at own production anywhere on that path.
+        #
+        # What actually stops that impossible rate reaching the game is the
+        # finding below: OVER_ALLOCATED is CRITICAL, so the verdict refuses the
+        # plan before anything routes. Anything that relaxes that refusal --
+        # letting the remainder ship from its stock, say -- must add the clamp
+        # to the optimizer FIRST, or it will emit routes at a rate no
+        # production backs.
         targets[remainder_id] = unallocated
         if unallocated < -EPSILON:
             label = village_label(remainder_id, names)
