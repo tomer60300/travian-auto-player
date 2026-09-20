@@ -194,7 +194,12 @@ class DistributionPlan:
     beat: Beat = field(default_factory=Beat)
     findings: tuple[Finding, ...] = ()
     relays: tuple[RelayHub, ...] = ()
-    """Villages the plan routes crop THROUGH, which the sheet's rows cannot show.
+    """Villages the plan routes a resource THROUGH, which the sheet's rows cannot
+    show. Crop hubs and the operator's declared MATERIAL relays alike: `build_plan`
+    hands `relay_hubs` the `relay_for` map, and every hub names its own `resource`.
+    Reading this as crop-only has already cost a bug -- see `time_relays`, where
+    the field fell off a rebuilt hub and every declared LUMBER relay came back out
+    of the beat claiming to be a crop one.
     Timed from the beat, so these figures are what the schedule will really do."""
     latency_target_hours: float | None = None
     """The delivery-lag target that actually SHAPED these routes, in hours.
@@ -277,8 +282,8 @@ class DistributionPlan:
 
 
 # What ``is_feasible`` weighs, in the operator's words. Carried on every verdict
-# so a green light cannot be read as "and nothing else is wrong": these three
-# things, and only these three.
+# so a green light cannot be read as "and nothing else is wrong": these four
+# things, and only these four.
 FEASIBILITY_COVERS: tuple[str, ...] = (
     "every origin stays inside its merchant budget",
     "every receiver's demand can be supplied by some village",
@@ -333,9 +338,9 @@ def _blocks(short: Shortfall) -> bool:
 
     Reads `plan.shortfalls` rather than a `blocking_shortfalls` attribute so
     that anything shaped like a plan can be passed here -- the same reason
-    :func:`is_feasible_for` is a function. `RoutingResult` applies the identical
-    threshold when it answers `is_feasible`; the constant is shared so the two
-    cannot drift.
+    :func:`is_feasible_for` is a function. `optimizer.Plan` applies the identical
+    threshold in `blocking_shortfalls` when it answers `is_feasible`; the constant
+    is shared so the two cannot drift.
     """
     return short.per_hour > NEGLIGIBLE_PER_HOUR
 
@@ -403,11 +408,11 @@ def blockers(
         reasons.append(
             f"{village_label(over.village_id, names)} commits {over.committed} merchants but {said}"
         )
-    # Filtered by `_blocks`, which is the same threshold `RoutingResult`
-    # applies when it answers `is_feasible`. The two must agree, because
-    # `/execute` gates on the predicate and then explains itself with this list:
-    # when they disagreed, a plan could be refused with no reason given, or
-    # listed with a reason it was not refused for.
+    # Filtered by `_blocks`, which is the same threshold `optimizer.Plan`
+    # applies in `blocking_shortfalls` when it answers `is_feasible`. The two
+    # must agree, because `/execute` gates on the predicate and then explains
+    # itself with this list: when they disagreed, a plan could be refused with
+    # no reason given, or listed with a reason it was not refused for.
     for short in plan.shortfalls:
         if not _blocks(short):
             # Reported everywhere else, but not a reason to refuse: see
@@ -619,8 +624,8 @@ def craft_plan(
     )
     findings.extend(beat.findings)
 
-    # Re-timed against the schedule that was actually built: `relay_chains` can
-    # only estimate a leg's wait from its cycle length, which is wrong by up to
+    # Re-timed against the schedule that was actually built: `optimizer.relay_hubs`
+    # can only estimate a leg's wait from its cycle length, which is wrong by up to
     # most of a day inside a profile window (the beat drops firings outside it).
     #
     # The window is passed ONLY when the executor will prune to it, the same

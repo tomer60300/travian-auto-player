@@ -50,10 +50,14 @@ class RevertPlan:
     origin: int
     # Rows that exist now and did not before: what the run added.
     created: list[RouteState] = field(default_factory=list)
-    # Rows that existed before and are gone now. Nothing in a normal execute run
-    # deletes -- only an explicit revert does -- so outside that case this means
-    # something else changed the village, which makes the rest of the diff
-    # unreliable. Worth surfacing rather than quietly ignoring.
+    # Rows that existed before and are gone now. A normal run DOES delete --
+    # `prune_to_window` trims the out-of-window half of a fan-out -- but only
+    # rows this very `before` never held: the prune works off /execute's
+    # `fresh`, which is the post-write read less the pre-write inventory, and a
+    # stale PRE-EXISTING row is disabled there, never removed. So nothing the
+    # run itself did can put a row here; one that appears means something else
+    # changed the village, which makes the rest of the diff unreliable. Worth
+    # surfacing rather than quietly ignoring.
     vanished: list[RouteState] = field(default_factory=list)
     # Pre-existing rows whose enabled flag the run moved: (route_id, was_active).
     to_restore: list[tuple[int, bool]] = field(default_factory=list)
