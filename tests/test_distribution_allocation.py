@@ -123,6 +123,39 @@ class TestRemainderRules:
         assert plan.unallocated == pytest.approx(-1200)  # 140% of 3,000
         assert any("exceed production" in w for w in plan.warnings)
 
+    def test_over_allocation_leaves_the_remainder_shipping_more_than_it_makes(self):
+        """The negative remainder target is NOT clamped to own production.
+
+        The optimizer seeds a sender's surplus from `-ship_per_hour` and never
+        caps it at what the village makes, so an over-allocated sheet hands it
+        a shippable rate of own production plus the whole over-allocation. The
+        only thing standing between that and the game is the CRITICAL
+        OVER_ALLOCATED refusal, pinned here too: relax it without adding the
+        clamp and the plan routes cargo no production backs.
+        """
+        plan = resolve_resource(
+            Resource.CROP,
+            productions={1: 10_000, 2: 1_000, 3: 1_000},
+            allocations={
+                1: Allocation(AllocationMode.REMAINDER),
+                2: Allocation(AllocationMode.ABSOLUTE, 20_000),
+                3: Allocation(AllocationMode.ABSOLUTE, 20_000),
+            },
+        )
+        remainder = next(v for v in plan.villages if v.village_id == 1)
+
+        assert plan.total_production == pytest.approx(12_000)
+        assert plan.unallocated == pytest.approx(-28_000)
+        assert remainder.own_per_hour == pytest.approx(10_000)
+        assert remainder.ship_per_hour == pytest.approx(-38_000)
+        # The measured relationship: the shippable rate the optimizer would
+        # read exceeds own production by exactly the over-allocation.
+        assert -remainder.ship_per_hour - remainder.own_per_hour == pytest.approx(-plan.unallocated)
+
+        over = [f for f in plan.findings if f.category is Category.OVER_ALLOCATED]
+        assert len(over) == 1
+        assert over[0].severity is Severity.CRITICAL
+
 
 class TestSustainMode:
     def test_sustain_covers_the_deficit_plus_headroom(self):
