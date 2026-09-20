@@ -1407,6 +1407,16 @@ class BudgetResponse(BaseModel):
     free: int
     over_budget: bool
     trade_office_levels_needed: int | None = None
+    relay_candidates_that_would_fit: list[int] = Field(
+        default=[],
+        description=(
+            "Villages which, declared as this one's relay (`relay_for`), would "
+            "bring it inside its budget without any Trade Office upgrade at "
+            "all. Nearest first, and empty where none would -- the plan checks "
+            "each one through the same relief machinery a declaration would "
+            "actually run."
+        ),
+    )
     legs: list[BudgetLegResponse] = []
     """Where the merchants actually went, biggest bill first."""
     explanation: str | None = Field(
@@ -5449,6 +5459,9 @@ def _plan_response(account: _PlannedAccount) -> PlanResponse:
     villages = account.villages
     findings = account.all_findings
     upgrades = {o.village_id: o.trade_office_levels_needed for o in plan.over_budget}
+    relay_remedies = {
+        o.village_id: list(o.relay_candidates_that_would_fit) for o in plan.over_budget
+    }
     over = {o.village_id for o in plan.over_budget}
 
     response = PlanResponse(
@@ -5476,6 +5489,7 @@ def _plan_response(account: _PlannedAccount) -> PlanResponse:
                 free=plan.free_merchants(vid),
                 over_budget=vid in over,
                 trade_office_levels_needed=upgrades.get(vid),
+                relay_candidates_that_would_fit=relay_remedies.get(vid, []),
                 legs=_budget_legs(vid, plan, config.geometry, names, coords),
                 explanation=(
                     _explain_over_budget(

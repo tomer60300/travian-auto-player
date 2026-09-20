@@ -1219,6 +1219,114 @@ class TestARelayBringsAFarHubBackUnderItsCap:
         assert all(round(rate) == round(DEF_LUMBER) for rate in arriving.values()), arriving
 
 
+class TestTheOverBudgetRecordNamesARelayThatWouldFit:
+    """The remedy the plan knew about and never said out loud.
+
+    A breached cap was only ever handed one way out: "Trade Office +5 would
+    fit", which costs days and real resources -- and in the regime where a
+    relay actually works, the regime above, the hub is already at Trade Office
+    20 and there is no upgrade to recommend at all. So the operator read a
+    breach with no remedy beside it while the machinery that would have fixed
+    it for the price of one config line (`_budget_relief_withdrawals`) sat
+    there unmentioned, because nothing had been DECLARED for it to use.
+
+    Measured on the operator's own account, 2026-09-19: village 26 committed 20
+    against a budget of 18, no relay was declared for any of its destinations,
+    and the whole of the advice was the Trade Office.
+
+    What the field may not become is a wish list. Every village named here is
+    priced through the same relief machinery a declaration would run, so
+    naming one is a claim that it works -- and the round trip below spends a
+    re-plan proving that claim rather than asserting the list's contents.
+    """
+
+    CAP = 8
+
+    def test_a_capped_far_hub_is_told_which_villages_would_relay_for_it(self):
+        """The defect, in the shape it has on the account: no other remedy."""
+        budget = _budget(_far(caps={CAPITAL: self.CAP}), CAPITAL)
+
+        assert budget.over_budget is True
+        assert budget.trade_office_levels_needed is None, (
+            "Trade Office 20 is the maximum, so the upgrade remedy has nothing "
+            "to offer and the relay is the only way out"
+        )
+        assert RELAY_A in budget.relay_candidates_that_would_fit
+
+    def test_every_village_it_names_really_does_fit_when_declared(self):
+        """The honesty condition: declare what it said, and the breach is gone.
+
+        A remedy that does not work is worse than no remedy -- it costs the
+        operator a re-plan to find out. So each name is taken back through the
+        planner as the declaration it is advice to make.
+        """
+        named = _budget(_far(caps={CAPITAL: self.CAP}), CAPITAL).relay_candidates_that_would_fit
+        assert named, "the far regime has a relay that fits; see the class above"
+
+        for candidate in named:
+            res = _far(caps={CAPITAL: self.CAP}, relays={candidate: [D1, D2, D3]})
+
+            assert _budget(res, CAPITAL).committed <= self.CAP, candidate
+            assert res.verdict.blockers == [], candidate
+
+    def test_the_near_regime_names_nobody(self):
+        """Every village Trade Office 0 and the destinations a few fields out:
+        a trunk carries the same tonnage the hauls did, so relocating saves
+        nothing. The class above pins that declaring the tier here changes
+        nothing at all; this pins that the advice does not suggest it anyway."""
+        budget = _budget(_plan(whitelist=False, caps={CAPITAL: 6}), CAPITAL)
+
+        assert budget.over_budget is True
+        assert budget.relay_candidates_that_would_fit == []
+        assert budget.trade_office_levels_needed is not None, (
+            "the remedy that does work here is still offered"
+        )
+
+    def test_a_role_village_is_never_named(self):
+        """Section 5.9, and the schema refuses the declaration outright -- so
+        advising it would hand the operator a 422 to type out."""
+        budget = _budget(
+            _far(
+                caps={CAPITAL: self.CAP},
+                village_roles={RELAY_A: "def"},
+                roles={"def": {"allocations": {}}},
+            ),
+            CAPITAL,
+        )
+
+        assert RELAY_A not in budget.relay_candidates_that_would_fit
+        assert budget.relay_candidates_that_would_fit, "the villages with no role still qualify"
+
+    def test_a_village_with_no_merchants_to_relay_with_is_never_named(self):
+        budget = _budget(
+            _far(caps={CAPITAL: self.CAP}, merchants={REMAINDER: 0, DIRECT: 0, RELAY_B: 0}),
+            CAPITAL,
+        )
+
+        assert set(budget.relay_candidates_that_would_fit).isdisjoint({REMAINDER, DIRECT, RELAY_B})
+        assert RELAY_A in budget.relay_candidates_that_would_fit
+
+    def test_a_relay_whose_own_fleet_could_not_run_the_legs_is_never_named(self):
+        """The load is RELOCATED, not reduced. A relay that cannot staff what
+        it would be handed buys the hub's breach with one of its own, which is
+        not a fix -- so it is dropped rather than named with a caveat."""
+        budget = _budget(_far(caps={CAPITAL: self.CAP}, merchants={RELAY_A: 3}), CAPITAL)
+
+        assert RELAY_A not in budget.relay_candidates_that_would_fit
+
+    def test_a_relay_already_declared_is_not_offered_as_a_fresh_one(self):
+        """Cap the hub below what even the tier can reach and it stays over
+        budget with the tier running. Neither the relay nor a village it
+        already claims may be named: both declarations are refused at the
+        schema -- a relay may not relay for itself, and a relay may not feed a
+        relay."""
+        res = _far(caps={CAPITAL: 2}, relays=FAR_TIER)
+        budget = _budget(res, CAPITAL)
+
+        assert budget.over_budget is True, "the tier relieves, but not this far"
+        assert set(budget.relay_candidates_that_would_fit).isdisjoint({RELAY_A, D1, D2, D3})
+
+
 class TestTheBreachIsMeasuredAcrossEveryResourceAtOnce:
     """A cap is breached by a village's whole ROUTE SET, not by one resource.
 
