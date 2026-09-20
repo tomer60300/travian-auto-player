@@ -33,8 +33,13 @@ def round_preserving_total(
     result is deterministic -- a re-plan on unchanged input must produce an
     identical setup sheet or the diff against the live routes is noise.
 
-    ``min_each`` floors every NONZERO input at that many units, and then the sum
-    may exceed ``target_total`` by up to ``min_each`` per floored key. Off by
+    ``min_each`` floors every NONZERO input at that many units. It is met by
+    REDISTRIBUTION, so the sum is still exactly ``target_total`` -- see the
+    comment on that branch for why adding units instead would breach the
+    merchant budget ``route_cost`` already reserved. The one exception is a
+    target too small to give every requested key its ``min_each`` at once: no
+    arrangement satisfies that, so the last starved keys are topped up and the
+    sum exceeds ``target_total``, by at most ``min_each`` per such key. Off by
     default, because largest-remainder rounding is otherwise exactly right.
 
     The planner passes ``min_each=1`` for cargo, where the quantities are not
